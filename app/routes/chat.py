@@ -1,0 +1,1464 @@
+import json
+import uuid
+import re
+
+from typing import Annotated
+
+from difflib import SequenceMatcher
+
+from fastapi import APIRouter, Depends
+from sqlmodel import Session, select
+
+from app.db import get_session
+from app.models import (
+    MenuItem,
+    Order,
+    OrderItem,
+    ConversationSession,
+    ConversationLog,
+)
+from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
+from app.services.conversation_service import extract_order_from_text
+
+router = APIRouter(prefix="/chat", tags=["chat"])
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+
+def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
+    same_name_statement = select(MenuItem).where(MenuItem.name == item["pizza_name"])
+    same_name_items = session.exec(same_name_statement).all()
+
+    if not same_name_items:
+        typo_suggestions = get_typo_correction_suggestions(
+            session=session,
+            requested_name=item["pizza_name"],
+            limit=2,
+        )
+
+        if typo_suggestions:
+            suggestions_text = ", ".join(typo_suggestions)
+            return (
+                f'{item["pizza_name"]} non è presente nel menu. '
+                f'Forse intendevi {suggestions_text}?',
+                typo_suggestions,
+            )
+
+        suggestions = get_available_menu_suggestions(
+            session=session,
+            exclude_name=item["pizza_name"],
+            limit=3,
+        )
+
+        if suggestions:
+            suggestions_text = ", ".join(suggestions)
+            return (
+                f'{item["pizza_name"]} non è presente nel menu. '
+                f'Posso proporti {suggestions_text}.',
+                suggestions,
+            )
+
+        return f'{item["pizza_name"]} non è presente nel menu.', []
+
+    available_variants = [
+        menu_item.pizza_type
+        for menu_item in same_name_items
+        if menu_item.available
+    ]
+
+    if available_variants:
+        variants_text = ", ".join(available_variants)
+        return (
+            f'{item["pizza_name"]} ({item["pizza_type"]}) non è disponibile. '
+            f'Nel menu è disponibile nelle varianti: {variants_text}.',
+            [],
+        )
+
+    suggestions = get_available_menu_suggestions(
+        session=session,
+        exclude_name=item["pizza_name"],
+        limit=3,
+    )
+
+    if suggestions:
+        suggestions_text = ", ".join(suggestions)
+        return (
+            f'{item["pizza_name"]} è presente nel menu ma attualmente non disponibile. '
+            f'Posso proporti {suggestions_text}.',
+            suggestions,
+        )
+
+    return f'{item["pizza_name"]} è presente nel menu ma attualmente non disponibile.', []
+
+def get_available_menu_suggestions(
+    session: Session,
+    exclude_name: str | None = None,
+    limit: int = 3,
+) -> list[str]:
+    statement = select(MenuItem).where(MenuItem.available == True)  # noqa: E712
+    items = session.exec(statement).all()
+
+    seen = set()
+    suggestions = []
+
+    for item in items:
+        if exclude_name and item.name.lower() == exclude_name.lower():
+            continue
+
+        if item.name not in seen:
+            seen.add(item.name)
+            suggestions.append(item.name)
+
+        if len(suggestions) >= limit:
+            break
+
+    return suggestions
+
+def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]:
+    merged = existing_items.copy()
+
+    for new_item in new_items:
+        found = False
+        for existing_item in merged:
+            if (
+                existing_item["pizza_name"] == new_item["pizza_name"]
+                and existing_item["pizza_type"] == new_item["pizza_type"]
+                and existing_item.get("add_ingredients", []) == new_item.get("add_ingredients", [])
+                and existing_item.get("remove_ingredients", []) == new_item.get("remove_ingredients", [])
+            ):
+                existing_item["quantity"] += new_item["quantity"]
+                found = True
+                break
+
+        if not found:
+            merged.append(new_item)
+
+    return merged
+
+def remove_items_from_order(existing_items: list[dict], items_to_remove: list[dict]) -> list[dict]:
+    updated_items = []
+
+    for existing_item in existing_items:
+        remaining_quantity = existing_item["quantity"]
+
+        for item_to_remove in items_to_remove:
+            same_item = (
+                existing_item["pizza_name"] == item_to_remove["pizza_name"]
+                and existing_item["pizza_type"] == item_to_remove["pizza_type"]
+            )
+
+            if same_item:
+                remaining_quantity -= item_to_remove["quantity"]
+
+        if remaining_quantity > 0:
+            updated_items.append(
+                {
+                    "pizza_name": existing_item["pizza_name"],
+                    "pizza_type": existing_item["pizza_type"],
+                    "quantity": remaining_quantity,
+                }
+            )
+
+    return updated_items
+
+def replace_items_in_order(existing_items: list[dict], new_items: list[dict], session: Session) -> list[dict]:
+    valid_existing_items = keep_only_valid_existing_items(session, existing_items)
+    return merge_items([], new_items) if not valid_existing_items else new_items
+
+def cancel_order_items() -> list[dict]:
+    return []
+
+def apply_intent_to_items(
+    existing_items: list[dict],
+    new_items: list[dict],
+    intent: str,
+) -> list[dict]:
+    if intent in {"modify_items", "replace_items"}:
+        return new_items
+
+    if intent == "add_items":
+        return merge_items(existing_items, new_items)
+
+    if intent == "remove_items":
+        return remove_items_from_order(existing_items, new_items)
+
+    if intent == "cancel_order":
+        return cancel_order_items()
+
+    return existing_items
+
+def pluralize_pizza_name(name: str, quantity: int) -> str:
+    if quantity == 1:
+        return name.lower()
+
+    irregulars = {
+        "Margherita": "margherite",
+        "Diavola": "diavole",
+        "Capricciosa": "capricciose",
+        "Quattro Formaggi": "quattro formaggi",
+    }
+
+    if name in irregulars:
+        return irregulars[name]
+
+    return name.lower()
+
+def format_single_item(item: dict) -> str:
+    quantity = item["quantity"]
+    pizza_name = item["pizza_name"]
+    pizza_type = item["pizza_type"]
+    add_ingredients = item.get("add_ingredients", [])
+    remove_ingredients = item.get("remove_ingredients", [])
+
+    if quantity == 1:
+        line = f"una {pizza_name.lower()}"
+    else:
+        line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
+
+    if pizza_type == "Senza glutine":
+        line += " senza glutine"
+
+    if add_ingredients:
+        line += " con " + ", ".join(add_ingredients)
+
+    if remove_ingredients:
+        line += " senza " + ", ".join(remove_ingredients)
+
+    return line
+
+def format_single_item_for_customer(item: dict) -> str:
+    quantity = item["quantity"]
+    pizza_name = item["pizza_name"]
+    pizza_type = item["pizza_type"]
+    add_ingredients = item.get("add_ingredients", [])
+    remove_ingredients = item.get("remove_ingredients", [])
+
+    is_plain_margherita = (
+        pizza_name == "Margherita"
+        and not add_ingredients
+        and not remove_ingredients
+    )
+
+    is_margherita_with_variants = (
+        pizza_name == "Margherita"
+        and (add_ingredients or remove_ingredients)
+    )
+
+    is_bianca_style = (
+        pizza_name == "Margherita"
+        and "pomodoro" in remove_ingredients
+    )
+
+    # Caso 1: margherita normale
+    if is_plain_margherita:
+        if quantity == 1:
+            line = "una margherita"
+        else:
+            line = f"{quantity} margherite"
+
+    # Caso 2: margherita con varianti -> risposta naturale cliente
+    elif is_margherita_with_variants:
+        visible_remove_ingredients = [
+            ingredient for ingredient in remove_ingredients
+            if ingredient != "pomodoro"
+        ]
+
+        if is_bianca_style:
+            if quantity == 1:
+                if add_ingredients:
+                    line = f"una bianca con {', '.join(add_ingredients)}"
+                else:
+                    line = "una bianca"
+            else:
+                if add_ingredients:
+                    line = f"{quantity} bianche con {', '.join(add_ingredients)}"
+                else:
+                    line = f"{quantity} bianche"
+        else:
+            if quantity == 1:
+                if len(add_ingredients) == 1:
+                    line = f"una {add_ingredients[0]}"
+                elif len(add_ingredients) > 1:
+                    line = f"una pizza con {', '.join(add_ingredients)}"
+                else:
+                    line = "una margherita"
+            else:
+                if len(add_ingredients) == 1:
+                    line = f"{quantity} {add_ingredients[0]}"
+                elif len(add_ingredients) > 1:
+                    line = f"{quantity} pizze con {', '.join(add_ingredients)}"
+                else:
+                    line = f"{quantity} margherite"
+
+        if visible_remove_ingredients:
+            line += " senza " + ", ".join(visible_remove_ingredients)
+
+    # Caso 3: altre pizze menu
+    else:
+        if quantity == 1:
+            line = f"una {pizza_name.lower()}"
+        else:
+            line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
+
+        if add_ingredients:
+            line += " con " + ", ".join(add_ingredients)
+
+        if remove_ingredients:
+            line += " senza " + ", ".join(remove_ingredients)
+
+    if pizza_type == "Senza glutine":
+        line += " senza glutine"
+
+    return line
+
+def format_items_for_customer(items: list[dict]) -> str:
+    if not items:
+        return ""
+
+    return ", ".join(format_single_item_for_customer(item) for item in items)
+
+def pluralize_pizza_name(name: str, quantity: int) -> str:
+    if quantity == 1:
+        return name.lower()
+
+    irregulars = {
+        "Margherita": "margherite",
+        "Diavola": "diavole",
+        "Capricciosa": "capricciose",
+        "Quattro Formaggi": "quattro formaggi",
+        "Pizza personalizzata": "pizze personalizzate",
+    }
+
+    if name in irregulars:
+        return irregulars[name]
+
+    return name.lower()
+
+def format_single_item(item: dict) -> str:
+    quantity = item["quantity"]
+    pizza_name = item["pizza_name"]
+    pizza_type = item["pizza_type"]
+    add_ingredients = item.get("add_ingredients", [])
+    remove_ingredients = item.get("remove_ingredients", [])
+
+    if quantity == 1:
+        if pizza_name == "Pizza personalizzata":
+            line = "una pizza personalizzata"
+        else:
+            line = f"una {pizza_name.lower()}"
+    else:
+        if pizza_name == "Pizza personalizzata":
+            line = f"{quantity} pizze personalizzate"
+        else:
+            line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
+
+    if pizza_type == "Senza glutine":
+        line += " senza glutine"
+
+    if add_ingredients:
+        line += " con " + ", ".join(add_ingredients)
+
+    if remove_ingredients:
+        line += " senza " + ", ".join(remove_ingredients)
+
+    return line
+
+def format_items(items: list[dict]) -> str:
+    if not items:
+        return ""
+
+    return ", ".join(format_single_item(item) for item in items)
+
+def split_valid_and_invalid_items(
+    session: Session,
+    items: list[dict],
+) -> tuple[list[dict], list[dict], list[str]]:
+    valid_items = []
+    invalid_items = []
+    missing_messages = []
+
+    for item in items:
+        statement = select(MenuItem).where(
+            MenuItem.name == item["pizza_name"],
+            MenuItem.pizza_type == item["pizza_type"],
+        )
+        menu_item = session.exec(statement).first()
+
+        if not menu_item or not menu_item.available:
+            invalid_items.append(item)
+            missing_messages.append(build_missing_item_message(session, item))
+        else:
+            valid_items.append(item)
+
+    return valid_items, invalid_items, missing_messages
+
+def determine_state(merged_order: dict, missing_messages: list[str], completed: bool) -> str:
+    if completed:
+        return "completed"
+
+    if missing_messages:
+        return "collecting_items"
+
+    if not merged_order["items"]:
+        return "collecting_items"
+
+    if merged_order["items"] and not merged_order.get("customer_name"):
+        return "collecting_name"
+
+    if merged_order["items"] and not merged_order.get("pickup_time"):
+        return "collecting_pickup_time"
+
+    return "completed"
+
+def build_assistant_response(
+    merged_order: dict,
+    state: str,
+    missing_messages: list[str],
+    order_saved: bool,
+    intent: str,
+    new_valid_items: list[dict],
+) -> str:
+    items_text = format_items_for_customer(merged_order["items"])
+    new_items_text = format_items_for_customer(new_valid_items)    
+    customer_name = merged_order.get("customer_name")
+    pickup_time = merged_order.get("pickup_time")
+
+    if missing_messages:
+        if new_valid_items:
+            return f"Perfetto, ho aggiunto {new_items_text}. " + " ".join(missing_messages)
+        return " ".join(missing_messages)
+
+    if intent == "add_items":
+        added_text = new_items_text if new_items_text else items_text
+
+        if state == "collecting_name":
+            return f"Perfetto, ho aggiunto {added_text}. A nome di chi?"
+
+        if state == "collecting_pickup_time":
+            return f"Perfetto {customer_name}, ho aggiunto {added_text}. Per che ora vuoi ritirare?"
+
+        if state == "completed":
+            return f"Perfetto, ho aggiunto {added_text}."
+
+    if intent == "modify_items":
+        if state == "collecting_name":
+            return f"Va bene, ho aggiornato l’ordine: {items_text}. A nome di chi?"
+
+        if state == "collecting_pickup_time":
+            return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
+
+        return f"Va bene, ho aggiornato l’ordine: {items_text}."
+
+    if intent == "remove_items":
+        if not items_text:
+            return "Va bene, ho tolto le pizze dall’ordine. Dimmi pure se vuoi ricominciare."
+
+        if state == "collecting_name":
+            return f"Perfetto, ho aggiornato l’ordine: {items_text}. A nome di chi?"
+
+        if state == "collecting_pickup_time":
+            return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
+
+        return f"Va bene, ho aggiornato l’ordine: {items_text}."
+
+    if intent == "replace_items":
+        if state == "collecting_name":
+            return f"Va bene, al posto delle pizze precedenti ho segnato {items_text}. A nome di chi?"
+
+        if state == "collecting_pickup_time":
+            return f"Perfetto {customer_name}, al posto delle pizze precedenti ho segnato {items_text}. Per che ora vuoi ritirare?"
+
+        return f"Va bene, al posto delle pizze precedenti ho segnato {items_text}."
+
+    if intent == "cancel_order":
+        return "Va bene, ho annullato l’ordine. Dimmi pure se vuoi ricominciare."
+
+    if state == "collecting_name":
+        return f"Perfetto, ho segnato {items_text}. A nome di chi?"
+
+    if state == "collecting_pickup_time":
+        return f"Perfetto {customer_name}. Per che ora vuoi ritirare?"
+
+    if state == "completed" and order_saved:
+        return (
+            f"Perfetto {customer_name}, ho confermato l’ordine: {items_text}. "
+            f"Ritiro alle {pickup_time}. A dopo!"
+        )
+
+    if intent == "confirm_order" and state == "completed":
+        return (
+            f"Perfetto {customer_name}, confermo l’ordine: {items_text}. "
+            f"Ritiro alle {pickup_time}."
+        )
+
+    return "Dimmi pure quali pizze vuoi ordinare."
+
+def has_invalid_items(session: Session, items: list[dict]) -> bool:
+    for item in items:
+        statement = select(MenuItem).where(
+            MenuItem.name == item["pizza_name"],
+            MenuItem.pizza_type == item["pizza_type"],
+        )
+        menu_item = session.exec(statement).first()
+
+        if not menu_item or not menu_item.available:
+            return True
+
+    return False
+
+def extract_choice_from_suggestions(message: str, suggestions: list[str]) -> str | None:
+    message_lower = message.lower().strip()
+
+    for suggestion in suggestions:
+        if suggestion.lower() in message_lower:
+            return suggestion
+
+    ordinal_map = {
+        "prima": 0,
+        "primo": 0,
+        "seconda": 1,
+        "secondo": 1,
+        "terza": 2,
+        "terzo": 2,
+    }
+
+    for word, index in ordinal_map.items():
+        if word in message_lower and index < len(suggestions):
+            return suggestions[index]
+
+    implicit_choice_markers = [
+        "quella",
+        "quella lì",
+        "va bene quella",
+        "ok quella",
+        "prendo quella",
+        "fai quella",
+        "fai quella lì",
+        "sì",
+        "si",
+        "va bene",
+        "ok",
+        "perfetto",
+        "confermo",
+    ]
+
+    if any(marker in message_lower for marker in implicit_choice_markers):
+        if suggestions:
+            return suggestions[0]
+
+    return None
+
+def keep_only_valid_existing_items(session: Session, items: list[dict]) -> list[dict]:
+    valid_items = []
+
+    for item in items:
+        statement = select(MenuItem).where(
+            MenuItem.name == item["pizza_name"],
+            MenuItem.pizza_type == item["pizza_type"],
+        )
+        menu_item = session.exec(statement).first()
+
+        if menu_item and menu_item.available:
+            valid_items.append(item)
+
+    return valid_items
+
+def get_menu_names(session: Session) -> list[str]:
+    statement = select(MenuItem).where(MenuItem.available == True)  # noqa: E712
+    items = session.exec(statement).all()
+
+    seen = set()
+    names = []
+
+    for item in items:
+        if item.name not in seen:
+            seen.add(item.name)
+            names.append(item.name)
+
+    return names
+
+def get_typo_correction_suggestions(
+    session: Session,
+    requested_name: str,
+    limit: int = 2,
+) -> list[str]:
+    menu_names = get_menu_names(session)
+
+    scored_matches = []
+    requested_lower = requested_name.lower().strip()
+
+    for name in menu_names:
+        similarity = SequenceMatcher(None, requested_lower, name.lower()).ratio()
+
+        # soglia alta = solo typo molto vicini
+        if similarity >= 0.82:
+            scored_matches.append((name, similarity))
+
+    scored_matches.sort(key=lambda x: x[1], reverse=True)
+
+    return [name for name, _ in scored_matches[:limit]]
+
+def singularize_pizza_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        return name
+
+    lower = name.lower()
+
+    irregulars = {
+        "diavole": "diavola",
+        "margherite": "margherita",
+        "capricciose": "capricciosa",
+    }
+
+    if lower in irregulars:
+        return irregulars[lower].capitalize()
+
+    # fallback leggero (solo se sembra davvero una pizza)
+    if lower.endswith("e") and len(lower) > 4:
+        return (lower[:-1] + "a").capitalize()
+
+    return lower.capitalize()
+
+def infer_quantity_from_message(message: str) -> int:
+    message_lower = message.lower()
+
+    # rimuovi orari tipo 20:00
+    message_clean = re.sub(r"\b\d{1,2}:\d{2}\b", "", message_lower)
+
+    # numeri scritti
+    number_words = {
+        "una": 1,
+        "un": 1,
+        "uno": 1,
+        "due": 2,
+        "tre": 3,
+        "quattro": 4,
+        "cinque": 5,
+    }
+
+    for word, value in number_words.items():
+        if re.search(rf"\b{word}\b", message_clean):
+            return value
+
+    # numeri numerici
+    numbers = re.findall(r"\b\d+\b", message_clean)
+
+    if numbers:
+        return int(numbers[0])
+
+    return 1
+
+def extract_ingredient_changes(message: str) -> tuple[list[str], list[str]]:
+    message_lower = message.lower()
+
+    known_ingredients = [
+        "mozzarella senza lattosio",
+        "pomodoro",
+        "mozzarella",
+        "würstel",
+        "wurstel",
+        "patatine",
+        "prosciutto",
+        "funghi",
+        "salame",
+        "olive",
+        "cipolla",
+        "salsiccia",
+        "bresaola",
+        "rucola",
+        "grana",
+    ]
+
+    add_ingredients = []
+    remove_ingredients = []
+
+    def normalize(ingredient: str) -> str:
+        return "würstel" if ingredient == "wurstel" else ingredient
+
+    # ordina per lunghezza decrescente per matchare prima le stringhe più specifiche
+    known_ingredients = sorted(known_ingredients, key=len, reverse=True)
+
+    add_match = re.search(r"\bcon\b\s+(.+?)(?=\bsenza\b|$)", message_lower)
+    remove_match = re.search(r"\bsenza\b\s+(.+?)(?=\bcon\b|$)", message_lower)
+
+    if add_match:
+        add_text = add_match.group(1)
+        for ingredient in known_ingredients:
+            if ingredient in add_text:
+                normalized = normalize(ingredient)
+                if normalized not in add_ingredients:
+                    add_ingredients.append(normalized)
+
+    if remove_match:
+        remove_text = remove_match.group(1)
+        for ingredient in known_ingredients:
+            if ingredient in remove_text:
+                normalized = normalize(ingredient)
+                if normalized not in remove_ingredients:
+                    remove_ingredients.append(normalized)
+
+    return add_ingredients, remove_ingredients
+
+def find_menu_pizza_in_message(message: str, menu_items_for_llm: list[dict]) -> dict | None:
+    message_lower = message.lower()
+
+    # ordiniamo per nome più lungo, così "quattro formaggi" viene trovata
+    # prima di parole più corte
+    sorted_menu_items = sorted(
+        menu_items_for_llm,
+        key=lambda item: len(item["name"]),
+        reverse=True,
+    )
+
+    for item in sorted_menu_items:
+        menu_name_lower = item["name"].lower()
+        if menu_name_lower in message_lower:
+            return {
+                "pizza_name": item["name"],
+                "pizza_type": "Senza glutine"
+                if "senza glutine" in message_lower or "gluten free" in message_lower
+                else item["pizza_type"],
+                "quantity": infer_quantity_from_message(message_lower),
+            }
+
+    return None
+
+def segment_explicitly_requests_custom_pizza(segment: str) -> bool:
+    segment_lower = segment.lower().strip()
+
+    custom_markers = [
+        "pizza con",
+        "una pizza con",
+        "bianca con",
+        "rossa con",
+        "una bianca",
+        "una rossa",
+    ]
+
+    return any(marker in segment_lower for marker in custom_markers)
+
+def build_custom_pizza_from_message(message: str, menu_items_for_llm: list[dict]) -> dict | None:
+    message_lower = message.lower().strip()
+
+    quantity = infer_quantity_from_message(message_lower)
+    add_ingredients, remove_ingredients = extract_ingredient_changes(message_lower)
+
+    if "bianca" in message_lower:
+        normalized_remove = ["pomodoro"]
+        for ingredient in remove_ingredients:
+            if ingredient != "pomodoro" and ingredient not in normalized_remove:
+                normalized_remove.append(ingredient)
+
+        return {
+            "pizza_name": "Margherita",
+            "pizza_type": "Senza glutine"
+            if "senza glutine" in message_lower or "gluten free" in message_lower
+            else "Normale",
+            "quantity": quantity,
+            "add_ingredients": add_ingredients,
+            "remove_ingredients": normalized_remove,
+        }
+
+    # custom solo se ci sono davvero ingredienti/modifiche
+    if not add_ingredients and not remove_ingredients:
+        return None
+
+    return {
+        "pizza_name": "Margherita",
+        "pizza_type": "Senza glutine"
+        if "senza glutine" in message_lower or "gluten free" in message_lower
+        else "Normale",
+        "quantity": quantity,
+        "add_ingredients": add_ingredients,
+        "remove_ingredients": remove_ingredients,
+    }
+
+def split_order_segments(message: str) -> list[str]:
+    text = message.lower().strip()
+
+    starters = [
+        "ciao,",
+        "ciao",
+        "mi fai",
+        "vorrei",
+        "voglio",
+        "fammi",
+        "prendo",
+        "aggiungi anche",
+        "aggiungi",
+    ]
+
+    for starter in starters:
+        if text.startswith(starter):
+            text = text[len(starter):].strip()
+            break
+
+    # rimuovi nome e orario dalla parte che serve per splittare gli item
+    text = re.sub(r"\ba nome\s+[a-zàèéìòù]+\b", "", text)
+    text = re.sub(r"\bper le\s+\d{1,2}:\d{2}\b", "", text)
+    text = re.sub(r"\balle\s+\d{1,2}:\d{2}\b", "", text)
+
+    # prima prova split su pattern numerici
+    matches = list(re.finditer(r"\b(?:\d+|una|un|uno|due|tre|quattro|cinque)\s+", text))
+    if len(matches) > 1:
+        parts = []
+        for i, match in enumerate(matches):
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            part = text[start:end].strip(" ,.")
+            if part:
+                parts.append(part)
+        return parts
+
+    # fallback: split su " e " solo se sembra separare due pizze
+    parts = re.split(
+        r"\s+e\s+(?=(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+(?:bianca|rossa|pizza|margherita|diavola|capricciosa|quattro formaggi|würstel|wurstel))",
+        text,
+    )
+
+    cleaned_parts = [part.strip(" ,.") for part in parts if part.strip(" ,.")]
+    return cleaned_parts if cleaned_parts else [text.strip(" ,.")]
+
+def extract_items_from_segments(segments: list[str], menu_items_for_llm: list[dict]) -> list[dict]:
+    collected_items = []
+
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+
+        # 1. parser normale se non sembra custom esplicita
+        if not segment_explicitly_requests_custom_pizza(segment):
+            segment_extracted = extract_order_from_text(segment, menu_items_for_llm)
+
+            if segment_extracted.get("items"):
+                normalized_items = []
+
+                for item in segment_extracted["items"]:
+                    # Se l'LLM inventa "Pizza personalizzata", la trasformiamo in:
+                    # - pizza custom vera, se il segmento descrive ingredienti
+                    # - pizza sconosciuta, se invece è un nome pizza non nel menu
+                    if item.get("pizza_name") == "Pizza personalizzata":
+                        custom_item = build_custom_pizza_from_message(segment, menu_items_for_llm)
+
+                        if custom_item:
+                            normalized_items.append(custom_item)
+                            continue
+
+                        fallback_unknown_items = fallback_extract_unknown_items(
+                            segment,
+                            menu_items_for_llm,
+                        )
+                        if fallback_unknown_items:
+                            for fallback_item in fallback_unknown_items:
+                                fallback_item.setdefault("add_ingredients", [])
+                                fallback_item.setdefault("remove_ingredients", [])
+                            normalized_items.extend(fallback_unknown_items)
+                            continue
+
+                    item.setdefault("add_ingredients", [])
+                    item.setdefault("remove_ingredients", [])
+                    normalized_items.append(item)
+
+                if normalized_items:
+                    collected_items.extend(normalized_items)
+                    continue
+
+        # 2. custom builder
+        custom_item = build_custom_pizza_from_message(segment, menu_items_for_llm)
+        if custom_item:
+            collected_items.append(custom_item)
+            continue
+
+        # 3. unknown pizza item (es. "3 diavole")
+        fallback_unknown_items = fallback_extract_unknown_items(
+            segment,
+            menu_items_for_llm,
+        )
+
+        if fallback_unknown_items:
+            for item in fallback_unknown_items:
+                item.setdefault("add_ingredients", [])
+                item.setdefault("remove_ingredients", [])
+            collected_items.extend(fallback_unknown_items)
+            continue
+
+        # 4. fallback menu semplice
+        fallback_items = fallback_extract_menu_items_from_message(
+            segment,
+            menu_items_for_llm,
+        )
+
+        if fallback_items:
+            for item in fallback_items:
+                item.setdefault("add_ingredients", [])
+                item.setdefault("remove_ingredients", [])
+            collected_items.extend(fallback_items)
+
+    return collected_items
+
+def fallback_extract_unknown_items(message: str, menu_items_for_llm: list[dict]) -> list[dict]:
+    message_lower = message.lower().strip()
+
+    patterns = [
+        r"(?:vorrei|prendo|aggiungi|fai|allora fai|fammi)\s+(?:anche\s+)?(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+([a-zàèéìòù]+)",
+        r"(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+([a-zàèéìòù]+)",
+    ]
+
+    excluded_words = {
+        "pizza",
+        "pizze",
+        "nome",
+        "ritiro",
+        "orario",
+        "bianca",
+        "rossa",
+    }
+
+    for pattern in patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            candidate = singularize_pizza_name(match.group(1))
+
+            if candidate.lower() not in excluded_words:
+                quantity = infer_quantity_from_message(message_lower)
+
+                return [
+                    {
+                        "pizza_name": candidate,
+                        "pizza_type": (
+                            "Senza glutine"
+                            if "senza glutine" in message_lower or "gluten free" in message_lower
+                            else "Normale"
+                        ),
+                        "quantity": quantity,
+                        "add_ingredients": [],
+                        "remove_ingredients": [],
+                    }
+                ]
+
+    return []
+
+def fallback_extract_menu_items_from_message(message: str, menu_items_for_llm: list[dict]) -> list[dict]:
+    message_lower = message.lower()
+    quantity = infer_quantity_from_message(message_lower)
+    found_items = []
+
+    sorted_menu_items = sorted(
+        menu_items_for_llm,
+        key=lambda item: len(item["name"]),
+        reverse=True,
+    )
+
+    for menu_item in sorted_menu_items:
+        if menu_item["name"].lower() in message_lower:
+            found_items.append(
+                {
+                    "pizza_name": menu_item["name"],
+                    "pizza_type": "Senza glutine"
+                    if "senza glutine" in message_lower or "gluten free" in message_lower
+                    else menu_item["pizza_type"],
+                    "quantity": quantity,
+                    "add_ingredients": [],
+                    "remove_ingredients": [],
+                }
+            )
+            break
+
+    return found_items
+
+def should_force_segment_parsing(message: str) -> bool:
+    message_lower = message.lower()
+
+    numeric_chunks = re.findall(r"\d+\s+", message_lower)
+
+    return (
+        len(numeric_chunks) >= 2
+        or (
+            " e " in message_lower
+            and any(char.isdigit() for char in message_lower)
+        )
+    )
+
+@router.post("/start", response_model=ChatStartResponse)
+def start_chat(session: SessionDep):
+    new_session_id = str(uuid.uuid4())
+
+    conversation = ConversationSession(
+        session_id=new_session_id,
+        customer_name=None,
+        pickup_time=None,
+        items_json="[]",
+        state="collecting_items",
+        completed=False,
+    )
+    session.add(conversation)
+    session.commit()
+    session.refresh(conversation)
+
+    return ChatStartResponse(
+        session_id=conversation.session_id,
+        state=conversation.state,
+        completed=conversation.completed,
+        response_message="Ciao, dimmi pure quali pizze vuoi ordinare.",
+    )
+
+@router.post("/", response_model=ChatResponse)
+def chat(request: ChatRequest, session: SessionDep):
+    menu_statement = select(MenuItem)
+    db_menu_items = session.exec(menu_statement).all()
+
+    menu_items_for_llm = [
+        {
+            "name": item.name,
+            "category": item.category,
+            "pizza_type": item.pizza_type,
+            "price": item.price,
+            "available": item.available,
+        }
+        for item in db_menu_items
+    ]
+
+    message_lower = request.message.lower()
+
+    extracted = extract_order_from_text(request.message, menu_items_for_llm)
+
+    normalized_items = []
+
+    for item in extracted.get("items", []):
+        if item.get("pizza_name") == "Pizza personalizzata":
+            custom = build_custom_pizza_from_message(
+                request.message,
+                menu_items_for_llm,
+            )
+
+            if custom:
+                normalized_items.append(custom)
+                continue
+
+            fallback_unknown_items = fallback_extract_unknown_items(
+                request.message,
+                menu_items_for_llm,
+            )
+
+            if fallback_unknown_items:
+                for fallback_item in fallback_unknown_items:
+                    fallback_item.setdefault("add_ingredients", [])
+                    fallback_item.setdefault("remove_ingredients", [])
+                normalized_items.extend(fallback_unknown_items)
+                continue
+
+        item.setdefault("add_ingredients", [])
+        item.setdefault("remove_ingredients", [])
+        normalized_items.append(item)
+
+    if normalized_items:
+        extracted["items"] = normalized_items
+
+    if not extracted.get("items"):
+        forced_custom = build_custom_pizza_from_message(
+            request.message,
+            menu_items_for_llm,
+        )
+
+        if forced_custom:
+            extracted["items"] = [forced_custom]
+            if extracted.get("intent") == "unknown":
+                extracted["intent"] = "add_items"
+
+    if not extracted.get("items"):
+        fallback_unknown_items = fallback_extract_unknown_items(
+            request.message,
+            menu_items_for_llm,
+        )
+
+        if fallback_unknown_items:
+            for item in fallback_unknown_items:
+                item.setdefault("add_ingredients", [])
+                item.setdefault("remove_ingredients", [])
+            extracted["items"] = fallback_unknown_items
+            if extracted.get("intent") == "unknown":
+                extracted["intent"] = "add_items"
+
+    segments = split_order_segments(request.message)
+
+    if len(segments) > 1:
+        segmented_items = extract_items_from_segments(segments, menu_items_for_llm)
+        if segmented_items:
+            extracted["items"] = segmented_items
+            extracted["intent"] = "add_items"
+
+    # fallback menu items dal testo, se ancora non ci sono item
+    if not extracted.get("items"):
+        fallback_menu_items = fallback_extract_menu_items_from_message(
+            request.message,
+            menu_items_for_llm,
+        )
+        if fallback_menu_items:
+            extracted["items"] = fallback_menu_items
+            if extracted.get("intent") == "unknown":
+                extracted["intent"] = "add_items"
+
+    for item in extracted.get("items", []):
+        item.setdefault("add_ingredients", [])
+        item.setdefault("remove_ingredients", [])
+
+    if "senza glutine" in message_lower or "gluten free" in message_lower:
+        for item in extracted.get("items", []):
+            item["pizza_type"] = "Senza glutine"
+
+    if extracted.get("items") and extracted.get("intent") == "unknown":
+        extracted["intent"] = "add_items"
+
+    session_statement = select(ConversationSession).where(
+        ConversationSession.session_id == request.session_id
+    )
+    conversation = session.exec(session_statement).first()
+
+    if not conversation:
+        conversation = ConversationSession(
+            session_id=request.session_id,
+            customer_name=None,
+            pickup_time=None,
+            items_json="[]",
+            suggested_items_json="[]",
+            state="collecting_items",
+            completed=False,
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
+    existing_items = json.loads(conversation.items_json)
+    existing_suggestions = json.loads(conversation.suggested_items_json)
+
+    chosen_suggestion = extract_choice_from_suggestions(
+        request.message,
+        existing_suggestions,
+    )
+    selected_from_suggestions = chosen_suggestion is not None
+
+    if chosen_suggestion:
+        chosen_quantity = infer_quantity_from_message(message_lower)
+        extracted["items"] = [
+            {
+                "pizza_name": chosen_suggestion,
+                "pizza_type": "Senza glutine"
+                if "senza glutine" in message_lower or "gluten free" in message_lower
+                else "Normale",
+                "quantity": chosen_quantity,
+                "add_ingredients": [],
+                "remove_ingredients": [],
+            }
+        ]
+        extracted["intent"] = "add_items"
+
+    merged_order = {
+        "customer_name": conversation.customer_name,
+        "pickup_time": conversation.pickup_time,
+        "items": existing_items,
+    }
+
+    intent = extracted.get("intent", "unknown")
+
+    confirmation_markers = [
+        "sì",
+        "si",
+        "va bene",
+        "ok",
+        "perfetto",
+        "confermo",
+    ]
+
+    is_simple_confirmation = (
+        any(marker in message_lower for marker in confirmation_markers)
+        and not extracted.get("items")
+        and not extracted.get("customer_name")
+        and not extracted.get("pickup_time")
+    )
+
+    correction_markers = [
+        "no aspetta",
+        "anzi",
+        "correggo",
+        "ho sbagliato",
+        "volevo dire",
+        "una sola",
+        "solo una",
+        "non due ma una",
+        "allora fai",
+    ]
+
+    add_markers = [
+        "aggiungi",
+        "aggiungi anche",
+        "fammi anche",
+        "metti anche",
+    ]
+
+    remove_markers = [
+        "togli",
+        "leva",
+        "rimuovi",
+    ]
+
+    replace_markers = [
+        "invece",
+        "al posto di",
+        "sostituisci",
+    ]
+
+    cancel_markers = [
+        "annulla tutto",
+        "cancella tutto",
+        "annulla ordine",
+    ]
+
+    existing_items_invalid = has_invalid_items(session, existing_items)
+
+    has_existing_order = len(existing_items) > 0
+    has_new_items = len(extracted.get("items", [])) > 0
+
+    has_add_marker = any(marker in message_lower for marker in add_markers)
+    has_correction_marker = any(marker in message_lower for marker in correction_markers)
+    has_remove_marker = any(marker in message_lower for marker in remove_markers)
+    has_replace_marker = any(marker in message_lower for marker in replace_markers)
+    has_cancel_marker = any(marker in message_lower for marker in cancel_markers)
+
+    if has_add_marker:
+        intent = "add_items"
+
+    if has_correction_marker:
+        intent = "modify_items"
+
+    if has_remove_marker:
+        intent = "remove_items"
+
+    if has_replace_marker:
+        intent = "replace_items"
+
+    if has_cancel_marker:
+        intent = "cancel_order"
+
+    # Se esiste già un ordine e il cliente manda nuove pizze senza marker di replace/remove/cancel,
+    # trattiamo il messaggio come aggiunta, non come sostituzione.
+    if (
+        has_existing_order
+        and has_new_items
+        and not selected_from_suggestions
+        and not has_remove_marker
+        and not has_replace_marker
+        and not has_cancel_marker
+        and not has_correction_marker
+    ):
+        intent = "add_items"
+
+    # Se ci sono item invalidi già presenti e il cliente manda nuove pizze,
+    # interpretiamo come correzione/sostituzione solo se non ci sono marker espliciti di aggiunta.
+    if (
+        existing_items_invalid
+        and has_new_items
+        and not selected_from_suggestions
+        and not has_add_marker
+    ):
+        intent = "modify_items"
+
+    if extracted.get("customer_name"):
+        merged_order["customer_name"] = extracted["customer_name"]
+
+    if extracted.get("pickup_time"):
+        merged_order["pickup_time"] = extracted["pickup_time"]
+
+    if selected_from_suggestions:
+        valid_existing_items = keep_only_valid_existing_items(session, existing_items)
+        merged_order["items"] = merge_items(
+            valid_existing_items,
+            extracted.get("items", []),
+        )
+    else:
+        merged_order["items"] = apply_intent_to_items(
+            existing_items=existing_items,
+            new_items=extracted.get("items", []),
+            intent=intent,
+        )
+
+    if intent == "cancel_order":
+        merged_order["customer_name"] = None
+        merged_order["pickup_time"] = None
+
+    conversation.customer_name = merged_order["customer_name"]
+    conversation.pickup_time = merged_order["pickup_time"]
+    conversation.items_json = json.dumps(merged_order["items"], ensure_ascii=False)
+
+    valid_items = []
+    invalid_items = []
+    missing_messages = []
+    new_suggestions = []
+
+    for item in merged_order["items"]:
+        statement = select(MenuItem).where(
+            MenuItem.name == item["pizza_name"],
+            MenuItem.pizza_type == item["pizza_type"],
+        )
+        menu_item = session.exec(statement).first()
+
+        is_custom = bool(item.get("add_ingredients") or item.get("remove_ingredients"))
+
+        if not menu_item or not menu_item.available:
+            if is_custom:
+                # 👉 VALIDAZIONE BASE (Margherita)
+                base_statement = select(MenuItem).where(
+                    MenuItem.name == item["pizza_name"],
+                    MenuItem.pizza_type == item["pizza_type"],
+                )
+                base_item = session.exec(base_statement).first()
+
+                if base_item and base_item.available:
+                    valid_items.append(item)
+                    continue
+
+            # 👉 davvero non valida
+            invalid_items.append(item)
+            message, suggestions = build_missing_item_message(session, item)
+            missing_messages.append(message)
+            new_suggestions.extend(suggestions)
+        else:
+            valid_items.append(item)
+
+    if is_simple_confirmation and not existing_suggestions:
+        if (
+            merged_order.get("customer_name") is not None
+            and merged_order.get("pickup_time") is not None
+            and len(valid_items) > 0
+            and len(invalid_items) == 0
+        ):
+            intent = "confirm_order"
+
+    if is_simple_confirmation and intent == "unknown":
+        intent = "confirmation"
+
+    conversation.suggested_items_json = json.dumps(new_suggestions, ensure_ascii=False)
+
+    missing_items = [
+        f'{item["pizza_name"]} ({item["pizza_type"]})'
+        for item in invalid_items
+    ]
+
+    new_valid_items = []
+    existing_keys = {
+        (
+            item["pizza_name"],
+            item["pizza_type"],
+            tuple(item.get("add_ingredients", [])),
+            tuple(item.get("remove_ingredients", [])),
+        )
+        for item in existing_items
+    }
+
+    for item in valid_items:
+        key = (
+            item["pizza_name"],
+            item["pizza_type"],
+            tuple(item.get("add_ingredients", [])),
+            tuple(item.get("remove_ingredients", [])),
+        )
+        if key not in existing_keys or intent in {
+            "add_items",
+            "modify_items",
+            "replace_items",
+            "remove_items",
+        }:
+            new_valid_items.append(item)
+
+    valid = (
+        len(invalid_items) == 0
+        and len(valid_items) > 0
+        and merged_order.get("customer_name") is not None
+        and merged_order.get("pickup_time") is not None
+    )
+
+    order_id = None
+    order_saved = False
+
+    state = determine_state(
+        merged_order=merged_order,
+        missing_messages=missing_messages,
+        completed=conversation.completed,
+    )
+    conversation.state = state
+
+    if valid and not conversation.completed:
+        order = Order(
+            customer_name=merged_order["customer_name"],
+            pickup_time=merged_order["pickup_time"],
+            status="new",
+        )
+        session.add(order)
+        session.commit()
+        session.refresh(order)
+
+        for item in merged_order["items"]:
+            order_item = OrderItem(
+                order_id=order.id,
+                pizza_name=item["pizza_name"],
+                pizza_type=item["pizza_type"],
+                quantity=item["quantity"],
+                add_ingredients_json=json.dumps(
+                    item.get("add_ingredients", []),
+                    ensure_ascii=False,
+                ),
+                remove_ingredients_json=json.dumps(
+                    item.get("remove_ingredients", []),
+                    ensure_ascii=False,
+                ),
+            )
+            session.add(order_item)
+
+        session.commit()
+
+        conversation.completed = True
+        conversation.state = "completed"
+        conversation.suggested_items_json = "[]"
+        session.add(conversation)
+        session.commit()
+
+        order_id = order.id
+        order_saved = True
+
+    response_message = build_assistant_response(
+        merged_order=merged_order,
+        state=conversation.state,
+        missing_messages=missing_messages,
+        order_saved=order_saved,
+        intent=intent,
+        new_valid_items=new_valid_items,
+    )
+
+    session.add(conversation)
+    session.commit()
+
+    log_entry = ConversationLog(
+        session_id=request.session_id,
+        user_message=request.message,
+        extracted_order_json=json.dumps(extracted, ensure_ascii=False),
+        merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+        response_message=response_message,
+        valid=valid,
+        missing_items_json=json.dumps(missing_items, ensure_ascii=False),
+        state=conversation.state,
+    )
+    session.add(log_entry)
+    session.commit()
+
+    return ChatResponse(
+        session_id=request.session_id,
+        user_message=request.message,
+        extracted_order=extracted,
+        merged_order=merged_order,
+        valid=valid,
+        missing_items=missing_items,
+        response_message=response_message,
+        order_id=order_id,
+        state=conversation.state,
+    )

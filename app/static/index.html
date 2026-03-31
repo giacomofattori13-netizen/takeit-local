@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TakeIt Local UI</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    .page {
+      max-width: 1200px;
+      margin: 32px auto;
+      padding: 0 16px;
+    }
+
+    .header {
+      margin-bottom: 20px;
+    }
+
+    .header h1 {
+      margin: 0 0 6px 0;
+      font-size: 28px;
+    }
+
+    .header p {
+      margin: 0;
+      color: #6b7280;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 20px;
+    }
+
+    .panel {
+      background: white;
+      border-radius: 18px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 18px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #111827;
+      color: white;
+    }
+
+    .panel-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .panel-header p {
+      margin: 6px 0 0 0;
+      color: #d1d5db;
+      font-size: 14px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #111827;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    button:hover {
+      opacity: 0.92;
+    }
+
+    .nav-link {
+      background: #111827;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    .nav-link:hover {
+      opacity: 0.92;
+    }
+
+    .secondary {
+      background: #6b7280;
+    }
+
+    .mic-active {
+      background: #dc2626 !important;
+    }
+
+    .call-active {
+      background: #059669 !important;
+    }
+
+    .session-box {
+      font-size: 14px;
+      color: #374151;
+    }
+
+    .chat {
+      height: 420px;
+      overflow-y: auto;
+      padding: 20px;
+      background: #fafafa;
+    }
+
+    .message {
+      margin-bottom: 14px;
+      max-width: 80%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .user {
+      background: #dbeafe;
+      margin-left: auto;
+      text-align: right;
+    }
+
+    .bot {
+      background: #e5e7eb;
+      margin-right: auto;
+    }
+
+    .meta {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 6px;
+    }
+
+    .composer {
+      display: flex;
+      gap: 12px;
+      padding: 16px 20px 20px;
+      border-top: 1px solid #e5e7eb;
+      background: white;
+    }
+
+    .composer input {
+      flex: 1;
+      padding: 12px 14px;
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+
+    .status {
+      padding: 0 20px 16px;
+      font-size: 13px;
+      color: #6b7280;
+    }
+
+    .debug {
+      padding: 16px 20px 20px;
+      border-top: 1px solid #e5e7eb;
+      background: #fcfcfc;
+    }
+
+    .debug pre {
+      background: #111827;
+      color: #f9fafb;
+      padding: 14px;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-size: 12px;
+      margin: 8px 0 0 0;
+    }
+
+    .summary {
+      padding: 20px;
+    }
+
+    .summary-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 14px;
+      background: #fafafa;
+    }
+
+    .summary-card h3 {
+      margin: 0 0 12px 0;
+      font-size: 16px;
+    }
+
+    .summary-row {
+      margin-bottom: 10px;
+    }
+
+    .summary-label {
+      font-size: 12px;
+      color: #6b7280;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .summary-value {
+      font-size: 15px;
+      color: #111827;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #e5e7eb;
+      color: #111827;
+    }
+
+    .badge.collecting_items {
+      background: #e0f2fe;
+      color: #0369a1;
+    }
+
+    .badge.collecting_name {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .badge.collecting_pickup_time {
+      background: #ede9fe;
+      color: #6d28d9;
+    }
+
+    .badge.completed {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .items-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .items-list li {
+      margin-bottom: 8px;
+    }
+
+    .empty {
+      color: #6b7280;
+      font-style: italic;
+    }
+
+
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .chat {
+        height: 360px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <h1>TakeIt Local UI</h1>
+      <p>Test conversazionale del motore ordini</p>
+    </div>
+
+    <div class="layout">
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Conversazione</h2>
+          <p>Simulazione del flusso cliente → assistente</p>
+        </div>
+
+        <div class="toolbar">
+          <button id="startBtn">Start conversation</button>
+          <button id="callModeBtn">Start call mode</button>
+          <button id="resetBtn" class="secondary">Reset session</button>
+
+          <a href="/dashboard" class="nav-link secondary">Dashboard ristorante</a>
+          <a href="/tech-dashboard" class="nav-link secondary">Tech dashboard</a>
+
+          <div class="session-box">
+            <strong>Session ID:</strong>
+            <span id="sessionId">nessuna</span>
+          </div>
+        </div>
+
+        <div id="chat" class="chat"></div>
+
+        <div class="composer">
+          <input
+            id="messageInput"
+            type="text"
+            placeholder="Scrivi o detta un messaggio, es. 'Vorrei 2 margherite'"
+          />
+          <button id="micBtn" class="secondary">🎤</button>
+          <button id="sendBtn">Invia</button>
+        </div>
+
+        <div class="status" id="status">
+          Nessuna sessione attiva.
+        </div>
+
+        <div class="debug">
+          <strong>Ultima risposta JSON</strong>
+          <pre id="debugOutput">{}</pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Ordine corrente</h2>
+          <p>Stato della conversazione e riepilogo ordine</p>
+        </div>
+
+        <div class="summary">
+          <div class="summary-card">
+            <div class="summary-row">
+              <div class="summary-label">Stato</div>
+              <div class="summary-value">
+                <span id="stateBadge" class="badge">nessuno</span>
+              </div>
+            </div>
+
+            <div class="summary-row">
+              <div class="summary-label">Nome cliente</div>
+              <div class="summary-value" id="customerName">—</div>
+            </div>
+
+            <div class="summary-row">
+              <div class="summary-label">Orario ritiro</div>
+              <div class="summary-value" id="pickupTime">—</div>
+            </div>
+          </div>
+
+          <div class="summary-card">
+            <h3>Pizze</h3>
+            <ul id="itemsList" class="items-list"></ul>
+            <div id="itemsEmpty" class="empty">Nessuna pizza ancora aggiunta.</div>
+          </div>
+
+          <div class="summary-card">
+            <h3>Ordine salvato</h3>
+            <div class="summary-row">
+              <div class="summary-label">Order ID</div>
+              <div class="summary-value" id="orderId">—</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentSessionId = null;
+    let recognition = null;
+    let isListening = false;
+    let callModeActive = false;
+    let botIsSpeaking = false;
+    let shouldResumeListening = false;
+
+    const chatEl = document.getElementById("chat");
+    const sessionIdEl = document.getElementById("sessionId");
+    const statusEl = document.getElementById("status");
+    const debugOutputEl = document.getElementById("debugOutput");
+    const inputEl = document.getElementById("messageInput");
+
+    const stateBadgeEl = document.getElementById("stateBadge");
+    const customerNameEl = document.getElementById("customerName");
+    const pickupTimeEl = document.getElementById("pickupTime");
+    const itemsListEl = document.getElementById("itemsList");
+    const itemsEmptyEl = document.getElementById("itemsEmpty");
+    const orderIdEl = document.getElementById("orderId");
+
+    const micBtn = document.getElementById("micBtn");
+    const callModeBtn = document.getElementById("callModeBtn");
+
+    function prettifyState(state) {
+      const map = {
+        collecting_items: "Sto raccogliendo le pizze",
+        collecting_name: "Mi manca il nome",
+        collecting_pickup_time: "Mi manca l'orario",
+        completed: "Ordine completato"
+      };
+      return map[state] || state || "nessuno";
+    }
+
+    function addMessage(text, role, meta = "") {
+      const wrapper = document.createElement("div");
+      wrapper.className = `message ${role}`;
+      wrapper.textContent = text;
+
+      if (meta) {
+        const metaEl = document.createElement("div");
+        metaEl.className = "meta";
+        metaEl.textContent = meta;
+        wrapper.appendChild(metaEl);
+      }
+
+      chatEl.appendChild(wrapper);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function setSession(sessionId) {
+      currentSessionId = sessionId;
+      sessionIdEl.textContent = sessionId || "nessuna";
+    }
+
+    function resetSummary() {
+      stateBadgeEl.textContent = "nessuno";
+      stateBadgeEl.className = "badge";
+      customerNameEl.textContent = "—";
+      pickupTimeEl.textContent = "—";
+      orderIdEl.textContent = "—";
+      itemsListEl.innerHTML = "";
+      itemsEmptyEl.style.display = "block";
+    }
+
+    function renderItems(items) {
+      itemsListEl.innerHTML = "";
+
+      if (!items || items.length === 0) {
+        itemsEmptyEl.style.display = "block";
+        return;
+      }
+
+      itemsEmptyEl.style.display = "none";
+
+      items.forEach(item => {
+        const li = document.createElement("li");
+        let text = `${item.quantity} ${item.pizza_name}`;
+        if (item.pizza_type === "Senza glutine") {
+          text += " senza glutine";
+        }
+        li.textContent = text;
+        itemsListEl.appendChild(li);
+      });
+    }
+
+    function updateSummary(data) {
+      const merged = data.merged_order || {};
+
+      const state = data.state || "nessuno";
+      stateBadgeEl.textContent = prettifyState(state);
+      stateBadgeEl.className = `badge ${state}`;
+
+      customerNameEl.textContent = merged.customer_name || "—";
+      pickupTimeEl.textContent = merged.pickup_time || "—";
+      orderIdEl.textContent = data.order_id ?? "—";
+
+      renderItems(merged.items || []);
+      statusEl.textContent = `Stato: ${prettifyState(state)}`;
+    }
+
+    async function speakText(text) {
+      if (!text) return;
+
+      try {
+        botIsSpeaking = true;
+        shouldResumeListening = callModeActive;
+
+        if (recognition && isListening) {
+          recognition.stop();
+        }
+
+        statusEl.textContent = "L'assistente sta parlando...";
+
+        const res = await fetch("/tts/", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ text })
+        });
+
+        if (!res.ok) {
+          throw new Error("Errore TTS backend");
+        }
+
+        const audioBlob = await res.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audio = new Audio(audioUrl);
+
+        audio.onended = () => {
+          botIsSpeaking = false;
+          URL.revokeObjectURL(audioUrl);
+
+          if (callModeActive && shouldResumeListening && recognition) {
+            setTimeout(() => {
+              if (!isListening && !botIsSpeaking) {
+                recognition.start();
+              }
+            }, 400);
+          } else {
+            statusEl.textContent = currentSessionId
+              ? `Stato: ${stateBadgeEl.textContent}`
+              : "Nessuna sessione attiva.";
+          }
+        };
+
+        audio.onerror = () => {
+          botIsSpeaking = false;
+          URL.revokeObjectURL(audioUrl);
+          statusEl.textContent = "Errore riproduzione audio.";
+        };
+
+        await audio.play();
+      } catch (err) {
+        botIsSpeaking = false;
+        statusEl.textContent = "Errore TTS.";
+        console.error(err);
+      }
+    }
+
+    function speakBotMessage(text) {
+      if (!text) return;
+      speakText(text);
+    }
+
+    function updateCallModeButton() {
+      if (callModeActive) {
+        callModeBtn.textContent = "Stop call mode";
+        callModeBtn.classList.add("call-active");
+      } else {
+        callModeBtn.textContent = "Start call mode";
+        callModeBtn.classList.remove("call-active");
+      }
+    }
+
+    async function startConversation() {
+      try {
+        const res = await fetch("/chat/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        });
+
+        const data = await res.json();
+
+        setSession(data.session_id);
+        chatEl.innerHTML = "";
+        resetSummary();
+
+        callModeActive = false;
+        shouldResumeListening = false;
+        updateCallModeButton();
+
+        stateBadgeEl.textContent = prettifyState(data.state);
+        stateBadgeEl.className = `badge ${data.state}`;
+        statusEl.textContent = `Stato: ${prettifyState(data.state)}`;
+
+        debugOutputEl.textContent = JSON.stringify(data, null, 2);
+        addMessage(data.response_message, "bot", `state: ${data.state}`);
+        speakBotMessage(data.response_message);
+      } catch (err) {
+        addMessage("Errore nell'avvio della sessione.", "bot");
+      }
+    }
+
+    async function sendMessage() {
+      const message = inputEl.value.trim();
+      if (!message) return;
+
+      if (!currentSessionId) {
+        addMessage("Prima avvia una conversazione.", "bot");
+        return;
+      }
+
+      addMessage(message, "user");
+      inputEl.value = "";
+
+      try {
+        const res = await fetch("/chat/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: currentSessionId,
+            message: message
+          })
+        });
+
+        const data = await res.json();
+        debugOutputEl.textContent = JSON.stringify(data, null, 2);
+        updateSummary(data);
+        addMessage(data.response_message, "bot", `state: ${data.state}`);
+        speakBotMessage(data.response_message);
+
+        if (data.state === "completed") {
+          callModeActive = false;
+          shouldResumeListening = false;
+          updateCallModeButton();
+
+          if (recognition && isListening) {
+            recognition.stop();
+          }
+
+          statusEl.textContent = "Ordine completato.";
+        }
+      } catch (err) {
+        addMessage("Errore durante l'invio del messaggio.", "bot");
+      }
+    }
+
+    async function resetSession() {
+      if (!currentSessionId) return;
+
+      callModeActive = false;
+      shouldResumeListening = false;
+      updateCallModeButton();
+
+      if (recognition && isListening) {
+        recognition.stop();
+      }
+
+      try {
+        await fetch(`/sessions/${currentSessionId}`, {
+          method: "DELETE"
+        });
+
+        setSession(null);
+        chatEl.innerHTML = "";
+        debugOutputEl.textContent = "{}";
+        statusEl.textContent = "Sessione eliminata.";
+        resetSummary();
+        addMessage("Sessione resettata.", "bot");
+      } catch (err) {
+        addMessage("Errore durante il reset della sessione.", "bot");
+      }
+    }
+
+    function setupSpeechRecognition() {
+      const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+      if (!SpeechRecognition) {
+        micBtn.disabled = true;
+        micBtn.textContent = "🎤 non supportato";
+        callModeBtn.disabled = true;
+        return;
+      }
+
+      recognition = new SpeechRecognition();
+      recognition.lang = "it-IT";
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        isListening = true;
+        micBtn.classList.add("mic-active");
+        statusEl.textContent = "Ascolto in corso...";
+      };
+
+      recognition.onend = () => {
+        isListening = false;
+        micBtn.classList.remove("mic-active");
+
+        if (callModeActive && !botIsSpeaking) {
+          statusEl.textContent = "Attendo la tua voce...";
+        } else {
+          statusEl.textContent = currentSessionId
+            ? `Stato: ${stateBadgeEl.textContent}`
+            : "Nessuna sessione attiva.";
+        }
+      };
+
+      recognition.onerror = (event) => {
+        addMessage(`Errore microfono: ${event.error}`, "bot");
+      };
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        inputEl.value = transcript;
+        sendMessage();
+      };
+    }
+
+    function toggleMic() {
+      if (!recognition) return;
+
+      if (!currentSessionId) {
+        addMessage("Prima avvia una conversazione.", "bot");
+        return;
+      }
+
+      if (isListening) {
+        recognition.stop();
+      } else {
+        recognition.start();
+      }
+    }
+
+    function toggleCallMode() {
+      if (!currentSessionId) {
+        addMessage("Prima avvia una conversazione.", "bot");
+        return;
+      }
+
+      callModeActive = !callModeActive;
+      updateCallModeButton();
+
+      if (callModeActive) {
+        statusEl.textContent = "Call mode attiva.";
+        if (recognition && !isListening && !botIsSpeaking) {
+          recognition.start();
+        }
+      } else {
+        shouldResumeListening = false;
+        statusEl.textContent = `Stato: ${stateBadgeEl.textContent}`;
+        if (recognition && isListening) {
+          recognition.stop();
+        }
+      }
+    }
+
+    document.getElementById("startBtn").addEventListener("click", startConversation);
+    document.getElementById("sendBtn").addEventListener("click", sendMessage);
+    document.getElementById("resetBtn").addEventListener("click", resetSession);
+    micBtn.addEventListener("click", toggleMic);
+    callModeBtn.addEventListener("click", toggleCallMode);
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        sendMessage();
+      }
+    });
+
+    resetSummary();
+    setupSpeechRecognition();
+    updateCallModeButton();
+  </script>
+</body>
+</html>

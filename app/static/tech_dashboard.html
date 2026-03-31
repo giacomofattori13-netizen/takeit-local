@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TakeIt Tech Dashboard</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f3f4f6;
+      color: #111827;
+    }
+
+    .page {
+      max-width: 1440px;
+      margin: 32px auto;
+      padding: 0 16px;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: 32px;
+    }
+
+    .header p {
+      margin: 6px 0 0 0;
+      color: #6b7280;
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    button, a.button-link, select {
+      background: #111827;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 14px;
+      text-decoration: none;
+      display: inline-block;
+    }
+
+    select {
+      appearance: none;
+    }
+
+    button:hover, a.button-link:hover {
+      opacity: 0.92;
+    }
+
+    .secondary {
+      background: #6b7280;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card, .panel {
+      background: white;
+      border-radius: 18px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    }
+
+    .stat-card {
+      padding: 20px;
+    }
+
+    .stat-label {
+      color: #6b7280;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-size: 30px;
+      font-weight: 700;
+    }
+
+    .panel-header {
+      padding: 18px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #111827;
+      color: white;
+      border-radius: 18px 18px 0 0;
+    }
+
+    .panel-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .panel-header p {
+      margin: 6px 0 0 0;
+      color: #d1d5db;
+      font-size: 14px;
+    }
+
+    .toolbar {
+      padding: 16px 20px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      background: #fafafa;
+    }
+
+    .logs-list {
+      padding: 20px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .log-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      padding: 18px;
+      background: #fafafa;
+    }
+
+    .log-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .log-id {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 6px;
+    }
+
+    .log-message {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .log-session {
+      font-size: 14px;
+      color: #374151;
+    }
+
+    .badges {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .badge.valid {
+      background: #dcfce7;
+      color: #166534;
+    }
+
+    .badge.invalid {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+
+    .badge.custom {
+      background: #ede9fe;
+      color: #6d28d9;
+    }
+
+    .badge.missing {
+      background: #fef3c7;
+      color: #92400e;
+    }
+
+    .section {
+      margin-top: 14px;
+    }
+
+    .section-title {
+      font-size: 12px;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+
+    pre {
+      margin: 0;
+      background: #111827;
+      color: #f9fafb;
+      border-radius: 12px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .response-box {
+      background: #eef2ff;
+      border-radius: 12px;
+      padding: 12px 14px;
+      line-height: 1.45;
+    }
+
+    .empty {
+      padding: 24px 20px 28px;
+      color: #6b7280;
+      font-style: italic;
+    }
+
+    .last-updated {
+      margin-top: 14px;
+      color: #6b7280;
+      font-size: 13px;
+      padding: 0 20px 20px;
+    }
+
+    .stat-value {
+      font-size: 30px;
+      font-weight: 700;
+      word-break: break-word;
+      line-height: 1.2;
+    }
+
+    @media (max-width: 1100px) {
+      .stats {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 700px) {
+      .stats {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="header">
+      <div>
+        <h1>TakeIt Tech Dashboard</h1>
+        <p>Debug tecnico delle conversazioni del motore ordini</p>
+      </div>
+
+      <div class="actions">
+        <button id="refreshBtn">Aggiorna</button>
+        <a href="/dashboard" class="button-link secondary">Dashboard ristorante</a>
+        <a href="/ui" class="button-link secondary">Apri chat UI</a>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-label">Log totali</div>
+        <div class="stat-value" id="totalLogs">0</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Validi</div>
+        <div class="stat-value" id="validLogs">0</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Invalidi</div>
+        <div class="stat-value" id="invalidLogs">0</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Pizze personalizzate</div>
+        <div class="stat-value" id="customPizzas">0</div>
+      </div>
+    </div>
+
+    <div class="stats" style="margin-top: 0;">
+      <div class="stat-card">
+        <div class="stat-label">Error rate</div>
+        <div class="stat-value" id="errorRate">0%</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Top ingrediente custom</div>
+        <div class="stat-value" id="topIngredient">—</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Top missing item</div>
+        <div class="stat-value" id="topMissingItem">—</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Messaggio problematico top</div>
+        <div class="stat-value" id="topProblemMessage">—</div>
+      </div>
+    </div>
+
+    <div class="stats" style="margin-top: 0;">
+      <div class="stat-card">
+        <div class="stat-label">Sessioni uniche</div>
+        <div class="stat-value" id="uniqueSessions">0</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Media msg / sessione</div>
+        <div class="stat-value" id="avgMessagesPerSession">0</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Top pizza ordinata</div>
+        <div class="stat-value" id="topPizza">—</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">Top stato</div>
+        <div class="stat-value" id="topState">—</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top: 20px;">
+      <div class="panel-header">
+        <h2>Intent Confusion</h2>
+        <p>Dove il bot sbaglia interpretazione</p>
+      </div>
+
+      <div style="padding: 16px;">
+        <table style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr style="text-align: left; border-bottom: 1px solid #e5e7eb;">
+              <th>Intent</th>
+              <th>Problema</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody id="intentConfusionTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Conversation Logs</h2>
+        <p>Storico tecnico di parsing, merge e risposta finale</p>
+      </div>
+
+      <div class="toolbar">
+        <select id="statusFilter" class="secondary">
+          <option value="all">Tutti</option>
+          <option value="valid">Solo validi</option>
+          <option value="invalid">Solo invalidi</option>
+        </select>
+      </div>
+
+      <div id="logsList" class="logs-list"></div>
+      <div id="emptyState" class="empty" style="display:none;">
+        Nessun log disponibile.
+      </div>
+
+      <div id="lastUpdated" class="last-updated">
+        Ultimo aggiornamento: —
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const logsListEl = document.getElementById("logsList");
+    const emptyStateEl = document.getElementById("emptyState");
+    const lastUpdatedEl = document.getElementById("lastUpdated");
+    const statusFilterEl = document.getElementById("statusFilter");
+
+    const totalLogsEl = document.getElementById("totalLogs");
+    const validLogsEl = document.getElementById("validLogs");
+    const invalidLogsEl = document.getElementById("invalidLogs");
+    const customPizzasEl = document.getElementById("customPizzas");
+    const errorRateEl = document.getElementById("errorRate");
+    const topIngredientEl = document.getElementById("topIngredient");
+    const topMissingItemEl = document.getElementById("topMissingItem");
+    const topProblemMessageEl = document.getElementById("topProblemMessage");
+    const uniqueSessionsEl = document.getElementById("uniqueSessions");
+    const avgMessagesPerSessionEl = document.getElementById("avgMessagesPerSession");
+    const topPizzaEl = document.getElementById("topPizza");
+    const topStateEl = document.getElementById("topState");
+    const intentConfusionTable = document.getElementById("intentConfusionTable");
+
+    let allLogs = [];
+
+    function countCustomPizzas(logs) {
+      let count = 0;
+
+      logs.forEach(log => {
+        const items = log.merged_order?.items || [];
+        items.forEach(item => {
+          if (item.pizza_name === "Pizza personalizzata") {
+            count += item.quantity || 1;
+          }
+        });
+      });
+
+      return count;
+    }
+    
+    function getTopEntry(counter) {
+      const entries = Object.entries(counter);
+      if (entries.length === 0) {
+        return "—";
+      }
+  
+      entries.sort((a, b) => b[1] - a[1]);
+      return entries[0][0];
+    }
+
+    function collectUniqueSessions(logs) {
+      return new Set(logs.map(log => log.session_id)).size;
+    }
+
+    function collectAverageMessagesPerSession(logs) {
+      const uniqueSessions = collectUniqueSessions(logs);
+      if (uniqueSessions === 0) {
+        return "0";
+      }
+
+      return (logs.length / uniqueSessions).toFixed(1);
+    }
+
+    function collectTopPizza(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const items = log.merged_order?.items || [];
+
+        items.forEach(item => {
+          const name = item.pizza_name;
+          const quantity = item.quantity || 1;
+          counter[name] = (counter[name] || 0) + quantity;
+        });
+      });
+
+      return getTopEntry(counter);
+    }
+
+    function collectTopState(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const state = log.state || "unknown";
+        counter[state] = (counter[state] || 0) + 1;
+      });
+
+      return getTopEntry(counter);
+    }
+
+    function collectTopCustomIngredient(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const items = log.merged_order?.items || [];
+
+        items.forEach(item => {
+          const addIngredients = item.add_ingredients || [];
+          addIngredients.forEach(ingredient => {
+           counter[ingredient] = (counter[ingredient] || 0) + 1;
+          });
+        });
+      });
+
+      return getTopEntry(counter);
+    }
+
+    function collectTopMissingItem(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const missingItems = log.missing_items || [];
+        missingItems.forEach(item => {
+          counter[item] = (counter[item] || 0) + 1;
+        });
+      });
+
+      return getTopEntry(counter);
+    }
+
+    function collectTopProblemMessage(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const isProblematic =
+          !log.valid ||
+          (log.missing_items && log.missing_items.length > 0);
+
+        if (isProblematic) {
+          const message = log.user_message?.trim();
+          if (message) {
+            counter[message] = (counter[message] || 0) + 1;
+          }
+        }
+      });
+
+      return getTopEntry(counter);
+    }
+
+    function collectIntentConfusion(logs) {
+      const counter = {};
+
+      logs.forEach(log => {
+        const extracted = log.extracted_order || {};
+        const intent = extracted.intent || "unknown";
+
+        const items = log.merged_order?.items || [];
+        const hasCustom = items.some(item => item.pizza_name === "Pizza personalizzata");
+        const hasMissingItems = log.missing_items && log.missing_items.length > 0;
+        const isInvalid = !log.valid;
+
+        if (hasMissingItems) {
+          const key = `${intent} → missing_items`;
+          counter[key] = (counter[key] || 0) + 1;
+        }
+
+        if (isInvalid) {
+          const key = `${intent} → invalid_order`;
+          counter[key] = (counter[key] || 0) + 1;
+        }
+
+        if (hasCustom) {
+          const key = `${intent} → custom_pizza`;
+          counter[key] = (counter[key] || 0) + 1;
+        }
+      });
+
+      return counter;
+    } 
+
+    function updateStats(logs) {
+      const totalLogs = logs.length;
+      const validLogs = logs.filter(log => log.valid).length;
+      const invalidLogs = logs.filter(log => !log.valid).length;
+      const errorRate = totalLogs > 0
+       ? `${Math.round((invalidLogs / totalLogs) * 100)}%`
+       : "0%";
+
+      totalLogsEl.textContent = totalLogs;
+      validLogsEl.textContent = validLogs;
+      invalidLogsEl.textContent = invalidLogs;
+      customPizzasEl.textContent = countCustomPizzas(logs);
+
+      errorRateEl.textContent = errorRate;
+      topIngredientEl.textContent = collectTopCustomIngredient(logs);
+      topMissingItemEl.textContent = collectTopMissingItem(logs);
+      topProblemMessageEl.textContent = collectTopProblemMessage(logs);
+
+      uniqueSessionsEl.textContent = collectUniqueSessions(logs);
+      avgMessagesPerSessionEl.textContent = collectAverageMessagesPerSession(logs);
+      topPizzaEl.textContent = collectTopPizza(logs);
+      topStateEl.textContent = collectTopState(logs);
+    }
+
+    function renderIntentConfusion(logs) {
+      const data = collectIntentConfusion(logs);
+
+      intentConfusionTable.innerHTML = "";
+
+      const entries = Object.entries(data)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+
+      if (entries.length === 0) {
+        intentConfusionTable.innerHTML = `
+          <tr>
+            <td colspan="3" style="padding: 12px; color: #6b7280;">
+              Nessun dato disponibile.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      entries.forEach(([key, count]) => {
+        const [intent, problem] = key.split(" → ");
+
+        const row = document.createElement("tr");
+
+        row.innerHTML = `
+          <td style="padding: 8px;">${intent}</td>
+          <td style="padding: 8px;">${problem}</td>
+          <td style="padding: 8px; font-weight: bold;">${count}</td>
+        `;
+
+        intentConfusionTable.appendChild(row);
+      });
+    }
+
+    function applyFilter(logs) {
+      const filter = statusFilterEl.value;
+
+      if (filter === "valid") {
+        return logs.filter(log => log.valid);
+      }
+
+      if (filter === "invalid") {
+        return logs.filter(log => !log.valid);
+      }
+
+      return logs;
+    }
+
+    function renderLogs(logs) {
+      logsListEl.innerHTML = "";
+
+      if (!logs || logs.length === 0) {
+        emptyStateEl.style.display = "block";
+        return;
+      }
+
+      emptyStateEl.style.display = "none";
+
+      const sortedLogs = [...logs].reverse();
+
+      sortedLogs.forEach(log => {
+        const card = document.createElement("div");
+        card.className = "log-card";
+
+        const validBadge = log.valid
+          ? `<span class="badge valid">Valid</span>`
+          : `<span class="badge invalid">Invalid</span>`;
+
+        const mergedItems = log.merged_order?.items || [];
+        const hasCustomPizza = mergedItems.some(item => item.pizza_name === "Pizza personalizzata");
+        const hasMissingItems = (log.missing_items || []).length > 0;
+
+        const extraBadges = [];
+        if (hasCustomPizza) {
+          extraBadges.push(`<span class="badge custom">Custom pizza</span>`);
+        }
+        if (hasMissingItems) {
+          extraBadges.push(`<span class="badge missing">Missing items</span>`);
+        }
+
+        card.innerHTML = `
+          <div class="log-top">
+            <div>
+              <div class="log-id">Log #${log.id}</div>
+              <div class="log-message">${log.user_message}</div>
+              <div class="log-session">Session: ${log.session_id} · State: ${log.state}</div>
+            </div>
+            <div class="badges">
+              ${validBadge}
+              ${extraBadges.join("")}
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Response message</div>
+            <div class="response-box">${log.response_message}</div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Extracted order</div>
+            <pre>${JSON.stringify(log.extracted_order, null, 2)}</pre>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Merged order</div>
+            <pre>${JSON.stringify(log.merged_order, null, 2)}</pre>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Missing items</div>
+            <pre>${JSON.stringify(log.missing_items, null, 2)}</pre>
+          </div>
+        `;
+
+        logsListEl.appendChild(card);
+      });
+
+      lastUpdatedEl.textContent =
+        `Ultimo aggiornamento: ${new Date().toLocaleTimeString("it-IT")}`;
+    }
+
+    async function loadLogs() {
+      try {
+        const res = await fetch("/logs/");
+        const data = await res.json();
+        allLogs = data;
+
+        updateStats(allLogs);
+        renderLogs(applyFilter(allLogs));
+        renderIntentConfusion(allLogs);
+      } catch (err) {
+        console.error(err);
+        logsListEl.innerHTML = "";
+        emptyStateEl.style.display = "block";
+        emptyStateEl.textContent = "Errore nel caricamento logs.";
+      }
+    }
+
+    statusFilterEl.addEventListener("change", () => {
+      renderLogs(applyFilter(allLogs));
+    });
+
+    document.getElementById("refreshBtn").addEventListener("click", loadLogs);
+
+    loadLogs();
+    setInterval(loadLogs, 5000);
+  </script>
+</body>
+</html>
