@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +19,19 @@ app = FastAPI(title="TakeIt Local Core")
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
+
+    # --- DEBUG PATH ---
+    print(f"[DEBUG] __file__      = {os.path.abspath(__file__)}")
+    print(f"[DEBUG] os.getcwd()   = {os.getcwd()}")
+    _app_dir = os.path.dirname(os.path.abspath(__file__))
+    _expected_menu = os.path.normpath(os.path.join(_app_dir, "menu_data.json"))
+    print(f"[DEBUG] expected menu = {_expected_menu}")
+    print(f"[DEBUG] exists?       = {os.path.exists(_expected_menu)}")
+    try:
+        print(f"[DEBUG] listdir(app/) = {os.listdir(_app_dir)}")
+    except Exception as e:
+        print(f"[DEBUG] listdir error = {e}")
+    # --- END DEBUG ---
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
