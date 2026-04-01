@@ -1042,7 +1042,8 @@ def start_chat(session: SessionDep):
 def chat(request: ChatRequest, session: SessionDep):
     # Carica il menu da Base44 (con cache 10 min); fallback al DB locale se vuoto
     menu_items_for_llm = load_menu_from_base44()
-    print(f"[Chat] load_menu_from_base44 ha restituito {len(menu_items_for_llm)} voci")
+    first_names = [item["name"] for item in menu_items_for_llm[:3]]
+    print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci. Prime 3: {first_names}")
 
     if not menu_items_for_llm:
         print("[Chat] Fallback al DB locale")
@@ -1340,12 +1341,17 @@ def chat(request: ChatRequest, session: SessionDep):
     missing_messages = []
     new_suggestions = []
 
+    db_menu_count = session.exec(select(MenuItem)).all()
+    print(f"[Chat] DB SQLite MenuItem: {len(db_menu_count)} righe totali")
+    print(f"[Chat] Items da validare: {[(i['pizza_name'], i['pizza_type']) for i in merged_order['items']]}")
+
     for item in merged_order["items"]:
         statement = select(MenuItem).where(
             MenuItem.name == item["pizza_name"],
             MenuItem.pizza_type == item["pizza_type"],
         )
         menu_item = session.exec(statement).first()
+        print(f"[Chat] Validazione '{item['pizza_name']}' ({item['pizza_type']}): {'OK' if menu_item and menu_item.available else 'NON TROVATO nel DB'}")
 
         is_custom = bool(item.get("add_ingredients") or item.get("remove_ingredients"))
 
