@@ -1042,8 +1042,10 @@ def start_chat(session: SessionDep):
 def chat(request: ChatRequest, session: SessionDep):
     # Carica il menu da Base44 (con cache 10 min); fallback al DB locale se vuoto
     menu_items_for_llm = load_menu_from_base44()
+    print(f"[Chat] load_menu_from_base44 ha restituito {len(menu_items_for_llm)} voci")
 
     if not menu_items_for_llm:
+        print("[Chat] Fallback al DB locale")
         db_menu_items = session.exec(select(MenuItem)).all()
         menu_items_for_llm = [
             {

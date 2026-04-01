@@ -63,7 +63,9 @@ def load_menu_from_base44() -> list[dict]:
         ]
 
         _menu_cache = menu
+        first_names = [item["name"] for item in menu[:3]]
         print(f"[Menu] Caricato da file: {len(menu)} voci ({menu_path})")
+        print(f"[Menu] Prime 3 voci: {first_names}")
         return menu
 
     except FileNotFoundError:
@@ -255,6 +257,9 @@ def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
         menu_lines.append(line)
 
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
+
+    print(f"[LLM] menu_items ricevuti: {len(menu_items)}")
+    print(f"[LLM] Prime 3 righe menu_text:\n" + "\n".join(menu_lines[:3]) if menu_lines else "[LLM] menu_text vuoto")
 
     response = client.responses.create(
         model=MODEL_NAME,
