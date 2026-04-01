@@ -1,6 +1,5 @@
 import json
 import os
-import time
 
 import httpx
 from dotenv import load_dotenv
@@ -9,11 +8,10 @@ from openai import OpenAI
 load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
-BASE44_MENU_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/MenuItem"
-MENU_CACHE_TTL = 600  # 10 minuti
+
+MENU_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "menu_data.json")
 
 _menu_cache: list[dict] = []
-_menu_cache_time: float = 0.0
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -31,33 +29,20 @@ _PIZZA_TYPE_TO_DOUGH: dict[str, str] = {
 
 def load_menu_from_base44() -> list[dict]:
     """
-    Carica il menu da Base44 con cache di 10 minuti.
-    Usa BASE44_TOKEN (JWT utente) come Bearer per leggere le voci del menu.
-    Restituisce lista di dict con campi: name, category, dough_type, pizza_type,
-    price, available, ingredients.
-    Ritorna la cache (anche se vuota) se il token non è configurato o la chiamata fallisce.
+    Carica il menu dal file statico app/menu_data.json (generato da Base44).
+    Il file viene letto una sola volta e tenuto in memoria per l'intera durata
+    del processo — nessun token JWT, nessuna chiamata di rete.
+    Per aggiornare il menu: sostituire menu_data.json e riavviare il server.
     """
-    global _menu_cache, _menu_cache_time
+    global _menu_cache
 
-    now = time.time()
-    if _menu_cache_time > 0 and (now - _menu_cache_time) < MENU_CACHE_TTL:
+    if _menu_cache:
         return _menu_cache
 
-    token = os.getenv("BASE44_TOKEN")
-    if not token:
-        print("[Base44] BASE44_TOKEN non configurato, menu non caricato")
-        return _menu_cache
-
+    menu_path = os.path.normpath(MENU_JSON_PATH)
     try:
-        response = httpx.get(
-            BASE44_MENU_URL,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        print(f"[Base44] GET menu status: {response.status_code}")
-        response.raise_for_status()
-        all_items = response.json()
-        print(f"[Base44] Voci ricevute da Base44: {len(all_items)}")
+        with open(menu_path, encoding="utf-8") as f:
+            raw = json.load(f)
 
         menu = [
             {
@@ -68,21 +53,23 @@ def load_menu_from_base44() -> list[dict]:
                     item.get("dough_type", "classica"), "Normale"
                 ),
                 "price": item.get("price", 0.0),
-                "available": True,
+                "available": item.get("available", True),
                 "ingredients": item.get("ingredients", []),
             }
-            for item in all_items
-            if item.get("available", False)
+            for item in raw
+            if item.get("available", True)
         ]
 
         _menu_cache = menu
-        _menu_cache_time = now
-        print(f"[Base44] Menu caricato: {len(menu)} voci disponibili")
+        print(f"[Menu] Caricato da file: {len(menu)} voci ({menu_path})")
         return menu
 
+    except FileNotFoundError:
+        print(f"[Menu] File non trovato: {menu_path} — verrà usato il DB locale come fallback")
+        return []
     except Exception as e:
-        print(f"[Base44] Errore caricamento menu: {type(e).__name__}: {e}")
-        return _menu_cache
+        print(f"[Menu] Errore lettura menu_data.json: {type(e).__name__}: {e}")
+        return []
 
 
 def save_order_to_base44(
