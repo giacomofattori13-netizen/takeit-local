@@ -1,10 +1,48 @@
 import json
 import os
 
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+BASE44_ORDER_URL = "https://api.base44.com/apps/69c54bc5c44250d7da397903/entities/Order"
+
+
+def save_order_to_base44(
+    customer_name: str,
+    customer_phone: str | None,
+    pickup_time: str,
+    total_amount: float,
+    items: list[dict],
+) -> None:
+    api_key = os.getenv("BASE44_API_KEY")
+    if not api_key:
+        print("WARNING: BASE44_API_KEY not set, skipping Base44 sync")
+        return
+
+    payload = {
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "status": "nuovo",
+        "source": "telefono",
+        "pickup_time": pickup_time,
+        "total_amount": total_amount,
+        "items": items,
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "ApiKey": api_key,
+    }
+
+    try:
+        response = httpx.post(BASE44_ORDER_URL, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+        print(f"DEBUG: Order synced to Base44, id={response.json().get('_id')}")
+    except Exception as e:
+        print(f"ERROR: Failed to sync order to Base44: {e}")
 
 print("DEBUG conversation_service loaded")
 

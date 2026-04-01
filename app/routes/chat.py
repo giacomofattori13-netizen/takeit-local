@@ -18,7 +18,7 @@ from app.models import (
     ConversationLog,
 )
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
-from app.services.conversation_service import extract_order_from_text
+from app.services.conversation_service import extract_order_from_text, save_order_to_base44
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -1425,6 +1425,26 @@ def chat(request: ChatRequest, session: SessionDep):
 
         order_id = order.id
         order_saved = True
+
+        # Compute total_amount from menu prices
+        total_amount = 0.0
+        for item in merged_order["items"]:
+            menu_item = session.exec(
+                select(MenuItem).where(
+                    MenuItem.name == item["pizza_name"],
+                    MenuItem.pizza_type == item["pizza_type"],
+                )
+            ).first()
+            if menu_item:
+                total_amount += menu_item.price * item["quantity"]
+
+        save_order_to_base44(
+            customer_name=merged_order["customer_name"],
+            customer_phone=None,
+            pickup_time=merged_order["pickup_time"],
+            total_amount=total_amount,
+            items=merged_order["items"],
+        )
 
     response_message = build_assistant_response(
         merged_order=merged_order,
