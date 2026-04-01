@@ -2,7 +2,10 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.db import create_db_and_tables
+from sqlmodel import Session, delete
+
+from app.db import create_db_and_tables, engine
+from app.models import MenuItem
 from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
 from app.routes.chat import router as chat_router
@@ -19,11 +22,23 @@ def on_startup():
     create_db_and_tables()
 
     menu = load_menu_from_base44()
-    if menu:
-        first_names = [item["name"] for item in menu[:3]]
-        print(f"[Startup] Menu caricato: {len(menu)} voci. Prime 3: {first_names}")
-    else:
+    if not menu:
         print("[Startup] ATTENZIONE: menu vuoto dopo load_menu_from_base44()")
+        return
+
+    with Session(engine) as session:
+        session.exec(delete(MenuItem))
+        for item in menu:
+            session.add(MenuItem(
+                name=item["name"],
+                category=item.get("category", ""),
+                pizza_type=item["pizza_type"],
+                price=item.get("price", 0.0),
+                available=item.get("available", True),
+            ))
+        session.commit()
+
+    print(f"[Startup] DB sincronizzato: {len(menu)} voci da menu_data.json")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
