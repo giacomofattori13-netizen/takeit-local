@@ -32,9 +32,10 @@ _PIZZA_TYPE_TO_DOUGH: dict[str, str] = {
 def load_menu_from_base44() -> list[dict]:
     """
     Carica il menu da Base44 con cache di 10 minuti.
+    Usa BASE44_TOKEN (JWT utente) come Bearer per leggere le voci del menu.
     Restituisce lista di dict con campi: name, category, dough_type, pizza_type,
     price, available, ingredients.
-    Ritorna lista vuota (e logga) se la chiamata fallisce o la chiave non è configurata.
+    Ritorna la cache (anche se vuota) se il token non è configurato o la chiamata fallisce.
     """
     global _menu_cache, _menu_cache_time
 
@@ -42,19 +43,21 @@ def load_menu_from_base44() -> list[dict]:
     if _menu_cache_time > 0 and (now - _menu_cache_time) < MENU_CACHE_TTL:
         return _menu_cache
 
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Base44] BASE44_API_KEY non configurata, menu non caricato")
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        print("[Base44] BASE44_TOKEN non configurato, menu non caricato")
         return _menu_cache
 
     try:
         response = httpx.get(
             BASE44_MENU_URL,
-            params={"api_key": api_key},
+            headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
+        print(f"[Base44] GET menu status: {response.status_code}")
         response.raise_for_status()
         all_items = response.json()
+        print(f"[Base44] Voci ricevute da Base44: {len(all_items)}")
 
         menu = [
             {
