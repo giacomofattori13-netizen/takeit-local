@@ -18,7 +18,12 @@ from app.models import (
     ConversationLog,
 )
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
-from app.services.conversation_service import extract_order_from_text, save_order_to_base44
+from app.services.conversation_service import (
+    extract_order_from_text,
+    load_menu_from_base44,
+    save_order_to_base44,
+    _PIZZA_TYPE_TO_DOUGH,
+)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -745,11 +750,11 @@ def find_menu_pizza_in_message(message: str, menu_items_for_llm: list[dict]) -> 
     for item in sorted_menu_items:
         menu_name_lower = item["name"].lower()
         if menu_name_lower in message_lower:
+            _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
             return {
                 "pizza_name": item["name"],
-                "pizza_type": "Senza glutine"
-                if "senza glutine" in message_lower or "gluten free" in message_lower
-                else item["pizza_type"],
+                "pizza_type": "Senza glutine" if _is_gf else item["pizza_type"],
+                "dough_type": "senza_glutine" if _is_gf else item.get("dough_type", "classica"),
                 "quantity": infer_quantity_from_message(message_lower),
             }
 
@@ -781,11 +786,11 @@ def build_custom_pizza_from_message(message: str, menu_items_for_llm: list[dict]
             if ingredient != "pomodoro" and ingredient not in normalized_remove:
                 normalized_remove.append(ingredient)
 
+        _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
         return {
             "pizza_name": "Margherita",
-            "pizza_type": "Senza glutine"
-            if "senza glutine" in message_lower or "gluten free" in message_lower
-            else "Normale",
+            "pizza_type": "Senza glutine" if _is_gf else "Normale",
+            "dough_type": "senza_glutine" if _is_gf else "classica",
             "quantity": quantity,
             "add_ingredients": add_ingredients,
             "remove_ingredients": normalized_remove,
@@ -795,11 +800,11 @@ def build_custom_pizza_from_message(message: str, menu_items_for_llm: list[dict]
     if not add_ingredients and not remove_ingredients:
         return None
 
+    _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
     return {
         "pizza_name": "Margherita",
-        "pizza_type": "Senza glutine"
-        if "senza glutine" in message_lower or "gluten free" in message_lower
-        else "Normale",
+        "pizza_type": "Senza glutine" if _is_gf else "Normale",
+        "dough_type": "senza_glutine" if _is_gf else "classica",
         "quantity": quantity,
         "add_ingredients": add_ingredients,
         "remove_ingredients": remove_ingredients,
@@ -955,14 +960,12 @@ def fallback_extract_unknown_items(message: str, menu_items_for_llm: list[dict])
             if candidate.lower() not in excluded_words:
                 quantity = infer_quantity_from_message(message_lower)
 
+                _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
                 return [
                     {
                         "pizza_name": candidate,
-                        "pizza_type": (
-                            "Senza glutine"
-                            if "senza glutine" in message_lower or "gluten free" in message_lower
-                            else "Normale"
-                        ),
+                        "pizza_type": "Senza glutine" if _is_gf else "Normale",
+                        "dough_type": "senza_glutine" if _is_gf else "classica",
                         "quantity": quantity,
                         "add_ingredients": [],
                         "remove_ingredients": [],
@@ -984,12 +987,12 @@ def fallback_extract_menu_items_from_message(message: str, menu_items_for_llm: l
 
     for menu_item in sorted_menu_items:
         if menu_item["name"].lower() in message_lower:
+            _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
             found_items.append(
                 {
                     "pizza_name": menu_item["name"],
-                    "pizza_type": "Senza glutine"
-                    if "senza glutine" in message_lower or "gluten free" in message_lower
-                    else menu_item["pizza_type"],
+                    "pizza_type": "Senza glutine" if _is_gf else menu_item["pizza_type"],
+                    "dough_type": "senza_glutine" if _is_gf else menu_item.get("dough_type", "classica"),
                     "quantity": quantity,
                     "add_ingredients": [],
                     "remove_ingredients": [],
@@ -1037,19 +1040,23 @@ def start_chat(session: SessionDep):
 
 @router.post("/", response_model=ChatResponse)
 def chat(request: ChatRequest, session: SessionDep):
-    menu_statement = select(MenuItem)
-    db_menu_items = session.exec(menu_statement).all()
+    # Carica il menu da Base44 (con cache 10 min); fallback al DB locale se vuoto
+    menu_items_for_llm = load_menu_from_base44()
 
-    menu_items_for_llm = [
-        {
-            "name": item.name,
-            "category": item.category,
-            "pizza_type": item.pizza_type,
-            "price": item.price,
-            "available": item.available,
-        }
-        for item in db_menu_items
-    ]
+    if not menu_items_for_llm:
+        db_menu_items = session.exec(select(MenuItem)).all()
+        menu_items_for_llm = [
+            {
+                "name": item.name,
+                "category": item.category,
+                "dough_type": _PIZZA_TYPE_TO_DOUGH.get(item.pizza_type, "classica"),
+                "pizza_type": item.pizza_type,
+                "price": item.price,
+                "available": item.available,
+                "ingredients": [],
+            }
+            for item in db_menu_items
+        ]
 
     message_lower = request.message.lower()
 
@@ -1138,6 +1145,7 @@ def chat(request: ChatRequest, session: SessionDep):
     if "senza glutine" in message_lower or "gluten free" in message_lower:
         for item in extracted.get("items", []):
             item["pizza_type"] = "Senza glutine"
+            item["dough_type"] = "senza_glutine"
 
     if extracted.get("items") and extracted.get("intent") == "unknown":
         extracted["intent"] = "add_items"
@@ -1172,12 +1180,12 @@ def chat(request: ChatRequest, session: SessionDep):
 
     if chosen_suggestion:
         chosen_quantity = infer_quantity_from_message(message_lower)
+        _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
         extracted["items"] = [
             {
                 "pizza_name": chosen_suggestion,
-                "pizza_type": "Senza glutine"
-                if "senza glutine" in message_lower or "gluten free" in message_lower
-                else "Normale",
+                "pizza_type": "Senza glutine" if _is_gf else "Normale",
+                "dough_type": "senza_glutine" if _is_gf else "classica",
                 "quantity": chosen_quantity,
                 "add_ingredients": [],
                 "remove_ingredients": [],
