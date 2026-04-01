@@ -408,7 +408,7 @@ def determine_state(merged_order: dict, missing_messages: list[str], completed: 
     if merged_order["items"] and not merged_order.get("pickup_time"):
         return "collecting_pickup_time"
 
-    return "completed"
+    return "awaiting_confirmation"
 
 def build_assistant_response(
     merged_order: dict,
@@ -437,6 +437,13 @@ def build_assistant_response(
         if state == "collecting_pickup_time":
             return f"Perfetto {customer_name}, ho aggiunto {added_text}. Per che ora vuoi ritirare?"
 
+        if state == "awaiting_confirmation":
+            return (
+                f"Perfetto, ho aggiunto {added_text}. "
+                f"Riepilogo: {items_text}, ritiro alle {pickup_time} a nome {customer_name}. "
+                f"Confermo?"
+            )
+
         if state == "completed":
             return f"Perfetto, ho aggiunto {added_text}."
 
@@ -446,6 +453,12 @@ def build_assistant_response(
 
         if state == "collecting_pickup_time":
             return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
+
+        if state == "awaiting_confirmation":
+            return (
+                f"Va bene, ho aggiornato l’ordine: {items_text}. "
+                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
+            )
 
         return f"Va bene, ho aggiornato l’ordine: {items_text}."
 
@@ -459,6 +472,12 @@ def build_assistant_response(
         if state == "collecting_pickup_time":
             return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
 
+        if state == "awaiting_confirmation":
+            return (
+                f"Va bene, ho aggiornato l’ordine: {items_text}. "
+                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
+            )
+
         return f"Va bene, ho aggiornato l’ordine: {items_text}."
 
     if intent == "replace_items":
@@ -467,6 +486,12 @@ def build_assistant_response(
 
         if state == "collecting_pickup_time":
             return f"Perfetto {customer_name}, al posto delle pizze precedenti ho segnato {items_text}. Per che ora vuoi ritirare?"
+
+        if state == "awaiting_confirmation":
+            return (
+                f"Va bene, al posto delle pizze precedenti ho segnato {items_text}. "
+                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
+            )
 
         return f"Va bene, al posto delle pizze precedenti ho segnato {items_text}."
 
@@ -478,6 +503,12 @@ def build_assistant_response(
 
     if state == "collecting_pickup_time":
         return f"Perfetto {customer_name}. Per che ora vuoi ritirare?"
+
+    if state == "awaiting_confirmation":
+        return (
+            f"Perfetto {customer_name}, riepilogo: {items_text}. "
+            f"Ritiro alle {pickup_time}. Confermo?"
+        )
 
     if state == "completed" and order_saved:
         return (
@@ -1254,16 +1285,6 @@ def chat(request: ChatRequest, session: SessionDep):
     ):
         intent = "add_items"
 
-    # Se ci sono item invalidi già presenti e il cliente manda nuove pizze,
-    # interpretiamo come correzione/sostituzione solo se non ci sono marker espliciti di aggiunta.
-    if (
-        existing_items_invalid
-        and has_new_items
-        and not selected_from_suggestions
-        and not has_add_marker
-    ):
-        intent = "modify_items"
-
     if extracted.get("customer_name"):
         merged_order["customer_name"] = extracted["customer_name"]
 
@@ -1276,6 +1297,19 @@ def chat(request: ChatRequest, session: SessionDep):
             valid_existing_items,
             extracted.get("items", []),
         )
+    elif (
+        existing_items_invalid
+        and has_new_items
+        and not has_add_marker
+        and not has_remove_marker
+        and not has_replace_marker
+        and not has_cancel_marker
+        and not has_correction_marker
+    ):
+        # L'utente sta sostituendo un item non valido: conserva i valid esistenti e aggiungi i nuovi
+        valid_existing_items = keep_only_valid_existing_items(session, existing_items)
+        merged_order["items"] = merge_items(valid_existing_items, extracted.get("items", []))
+        intent = "add_items"
     else:
         merged_order["items"] = apply_intent_to_items(
             existing_items=existing_items,
@@ -1388,7 +1422,7 @@ def chat(request: ChatRequest, session: SessionDep):
     )
     conversation.state = state
 
-    if valid and not conversation.completed:
+    if valid and not conversation.completed and intent == "confirm_order":
         order = Order(
             customer_name=merged_order["customer_name"],
             pickup_time=merged_order["pickup_time"],
