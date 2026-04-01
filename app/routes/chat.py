@@ -1460,8 +1460,8 @@ def chat(request: ChatRequest, session: SessionDep):
         order_id = order.id
         order_saved = True
 
-        # Compute total_amount from menu prices
-        total_amount = 0.0
+        # Arricchisci ogni item con i prezzi e calcola total_amount
+        enriched_items = []
         for item in merged_order["items"]:
             menu_item = session.exec(
                 select(MenuItem).where(
@@ -1469,15 +1469,27 @@ def chat(request: ChatRequest, session: SessionDep):
                     MenuItem.pizza_type == item["pizza_type"],
                 )
             ).first()
-            if menu_item:
-                total_amount += menu_item.price * item["quantity"]
+            base_price = round(menu_item.price, 2) if menu_item else 0.0
+            extras_price = 0.0
+            total_price = round((base_price + extras_price) * item["quantity"], 2)
+            enriched_items.append({
+                **item,
+                "base_price": base_price,
+                "extras_price": extras_price,
+                "total_price": total_price,
+            })
+
+        # Confidenza AI: 0.75 se nel turno precedente erano presenti suggerimenti
+        # (item invalidi già corretti), 0.9 se l'ordine è arrivato diretto
+        ai_confidence = 0.75 if existing_suggestions else 0.9
 
         save_order_to_base44(
             customer_name=merged_order["customer_name"],
             customer_phone=None,
             pickup_time=merged_order["pickup_time"],
-            total_amount=total_amount,
-            items=merged_order["items"],
+            order_number=order.id,
+            ai_confidence=ai_confidence,
+            items=enriched_items,
         )
 
     response_message = build_assistant_response(

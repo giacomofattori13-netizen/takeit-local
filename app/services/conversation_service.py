@@ -14,22 +14,50 @@ def save_order_to_base44(
     customer_name: str,
     customer_phone: str | None,
     pickup_time: str,
-    total_amount: float,
+    order_number: int,
+    ai_confidence: float,
     items: list[dict],
 ) -> None:
+    """
+    Invia l'ordine a Base44.
+    Ogni item deve già contenere base_price, extras_price, total_price.
+    total_amount viene calcolato come somma dei total_price.
+    """
     api_key = os.getenv("BASE44_API_KEY")
     if not api_key:
         print("WARNING: BASE44_API_KEY not set, skipping Base44 sync")
         return
 
+    needs_review = ai_confidence < 0.8
+    review_reason = "Bassa confidenza AI" if needs_review else None
+    total_amount = round(sum(item.get("total_price", 0.0) for item in items), 2)
+
+    base44_items = [
+        {
+            "pizza_name": item["pizza_name"],
+            "quantity": item["quantity"],
+            "dough_type": item.get("pizza_type"),
+            "add_ingredients": item.get("add_ingredients", []),
+            "remove_ingredients": item.get("remove_ingredients", []),
+            "base_price": item.get("base_price", 0.0),
+            "extras_price": item.get("extras_price", 0.0),
+            "total_price": item.get("total_price", 0.0),
+        }
+        for item in items
+    ]
+
     payload = {
+        "order_number": order_number,
         "customer_name": customer_name,
         "customer_phone": customer_phone,
         "status": "nuovo",
         "source": "telefono",
         "pickup_time": pickup_time,
         "total_amount": total_amount,
-        "items": items,
+        "ai_confidence": ai_confidence,
+        "needs_review": needs_review,
+        "review_reason": review_reason,
+        "items": base44_items,
     }
 
     print(f"[Base44] Payload inviato: {json.dumps(payload, ensure_ascii=False, indent=2)}")
