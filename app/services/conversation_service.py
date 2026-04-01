@@ -9,7 +9,9 @@ load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 
-MENU_JSON_PATH = os.path.join(os.path.dirname(__file__), "..", "menu_data.json")
+MENU_JSON_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "menu_data.json")
+)
 
 _menu_cache: list[dict] = []
 
