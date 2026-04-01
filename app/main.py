@@ -1,5 +1,3 @@
-import os
-
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -10,8 +8,8 @@ from app.routes.orders import router as orders_router
 from app.routes.chat import router as chat_router
 from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
-
 from app.routes.logs import router as logs_router
+from app.services.conversation_service import load_menu_from_base44
 
 app = FastAPI(title="TakeIt Local Core")
 
@@ -20,18 +18,12 @@ app = FastAPI(title="TakeIt Local Core")
 def on_startup():
     create_db_and_tables()
 
-    # --- DEBUG PATH ---
-    print(f"[DEBUG] __file__      = {os.path.abspath(__file__)}")
-    print(f"[DEBUG] os.getcwd()   = {os.getcwd()}")
-    _app_dir = os.path.dirname(os.path.abspath(__file__))
-    _expected_menu = os.path.normpath(os.path.join(_app_dir, "menu_data.json"))
-    print(f"[DEBUG] expected menu = {_expected_menu}")
-    print(f"[DEBUG] exists?       = {os.path.exists(_expected_menu)}")
-    try:
-        print(f"[DEBUG] listdir(app/) = {os.listdir(_app_dir)}")
-    except Exception as e:
-        print(f"[DEBUG] listdir error = {e}")
-    # --- END DEBUG ---
+    menu = load_menu_from_base44()
+    if menu:
+        first_names = [item["name"] for item in menu[:3]]
+        print(f"[Startup] Menu caricato: {len(menu)} voci. Prime 3: {first_names}")
+    else:
+        print("[Startup] ATTENZIONE: menu vuoto dopo load_menu_from_base44()")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
