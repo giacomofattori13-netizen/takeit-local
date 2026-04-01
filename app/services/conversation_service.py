@@ -34,7 +34,7 @@ def save_order_to_base44(
 
     headers = {
         "Content-Type": "application/json",
-        "ApiKey": api_key,
+        "api-key": api_key,
     }
 
     try:
