@@ -7,7 +7,7 @@ from openai import OpenAI
 
 load_dotenv()
 
-BASE44_ORDER_URL = "https://api.base44.com/apps/69c54bc5c44250d7da397903/entities/Order"
+BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 
 
 def save_order_to_base44(
@@ -32,17 +32,24 @@ def save_order_to_base44(
         "items": items,
     }
 
-    headers = {
-        "Content-Type": "application/json",
-        "api-key": api_key,
-    }
+    print(f"[Base44] Payload inviato: {json.dumps(payload, ensure_ascii=False, indent=2)}")
 
     try:
-        response = httpx.post(BASE44_ORDER_URL, json=payload, headers=headers, timeout=10)
+        response = httpx.post(
+            BASE44_ORDER_URL,
+            params={"api_key": api_key},
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        print(f"[Base44] Status code: {response.status_code}")
+        print(f"[Base44] Response body: {response.text}")
         response.raise_for_status()
-        print(f"DEBUG: Order synced to Base44, id={response.json().get('_id')}")
+        print(f"[Base44] Ordine sincronizzato, id={response.json().get('id')}")
+    except httpx.HTTPStatusError as e:
+        print(f"[Base44] HTTP error {e.response.status_code}: {e.response.text}")
     except Exception as e:
-        print(f"ERROR: Failed to sync order to Base44: {e}")
+        print(f"[Base44] Errore generico: {type(e).__name__}: {e}")
 
 print("DEBUG conversation_service loaded")
 
