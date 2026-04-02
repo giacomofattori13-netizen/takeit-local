@@ -81,6 +81,7 @@ class ChatResponse(SQLModel):
 
 class SessionCreateRequest(SQLModel):
     caller_phone: str | None = None
+    test_phone: str | None = None
 
 
 class SessionRead(SQLModel):

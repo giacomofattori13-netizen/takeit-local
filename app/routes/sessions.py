@@ -21,7 +21,7 @@ def create_session(body: SessionCreateRequest, session: SessionDep):
     conversation = ConversationSession(
         session_id=new_session_id,
         customer_name=None,
-        customer_phone=body.caller_phone or None,
+        customer_phone=body.test_phone or body.caller_phone or None,
         pickup_time=None,
         items_json="[]",
         state="collecting_items",
