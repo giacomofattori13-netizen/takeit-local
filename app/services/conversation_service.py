@@ -95,6 +95,19 @@ def load_menu_from_base44() -> list[dict]:
         return []
 
 
+def _filter_doughs(raw: list[dict]) -> list[dict]:
+    """Deduplica per code (primo trovato) ed esclude senza_glutine."""
+    seen: set[str] = set()
+    result = []
+    for d in raw:
+        code = d.get("code", "")
+        if code == "senza_glutine" or code in seen:
+            continue
+        seen.add(code)
+        result.append(d)
+    return result
+
+
 def load_doughs() -> list[dict]:
     """Carica gli impasti dal file dough_data.json (fallback statico)."""
     global _dough_cache
@@ -103,8 +116,8 @@ def load_doughs() -> list[dict]:
     try:
         with open(DOUGH_JSON_PATH, encoding="utf-8") as f:
             raw = json.load(f)
-        _dough_cache = [d for d in raw if d.get("available", True)]
-        print(f"[Dough] Caricati {len(_dough_cache)} impasti da file")
+        _dough_cache = _filter_doughs([d for d in raw if d.get("available", True)])
+        print(f"[Dough] Caricati {len(_dough_cache)} impasti da file: {[d['code'] for d in _dough_cache]}")
         return _dough_cache
     except FileNotFoundError:
         print(f"[Dough] File non trovato: {DOUGH_JSON_PATH}")
@@ -146,8 +159,8 @@ def fetch_and_save_doughs() -> list[dict]:
         ]
         with open(DOUGH_JSON_PATH, "w", encoding="utf-8") as f:
             json.dump(doughs, f, ensure_ascii=False, indent=2)
-        _dough_cache = [d for d in doughs if d.get("available", True)]
-        print(f"[Dough] Scaricati {len(_dough_cache)} impasti da Base44 e salvati")
+        _dough_cache = _filter_doughs([d for d in doughs if d.get("available", True)])
+        print(f"[Dough] Scaricati da Base44, salvati. Impasti attivi: {[d['code'] for d in _dough_cache]}")
         return _dough_cache
     except Exception as e:
         print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {e} — carico da file")
