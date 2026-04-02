@@ -3,10 +3,7 @@ import os
 import re
 
 import httpx
-from dotenv import load_dotenv
 from openai import OpenAI
-
-load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 
