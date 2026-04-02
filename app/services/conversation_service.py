@@ -385,18 +385,14 @@ Allowed intent values:
 Rules:
 - Output JSON only. No markdown.
 - Each pizza in the MENU is a standalone product. Gluten-free versions have "(SG)" in their name and are distinct products, not variants.
-- dough_type must be exactly one of these three values: "classica", "integrale", "senza_glutine".
-- Map customer language to dough_type as follows:
-  - "normale", "classica", "standard", or no specification → "classica"
-  - "integrale", "integra" → "integrale"
-  - "senza glutine", "gluten free", "senza g.", "sg" → "senza_glutine"
-- If the user says "senza glutine", dough_type MUST be "senza_glutine" AND use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)").
-- If the user says "integrale", dough_type MUST be "integrale".
-- If the user does NOT specify the dough, dough_type MUST be "classica" and use the base pizza name without any suffix.
+- dough_type MUST be one of the exact codes listed in DOUGH TYPES above (e.g. "classica", "integrale", "napoletana", "pinsa_romana", "senza_lievito").
+- NEVER use "Normale", "Standard", "Normal", or any value not in the DOUGH TYPES list.
+- If the user does NOT specify the dough, dough_type MUST be "classica".
+- Always use the exact "code" value from DOUGH TYPES, never the "name".
+- If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
+- If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
 - Never propose a "(SG)" pizza as an alternative when the user asked for a specific dough type.
-- If DOUGH TYPES are listed above, use the "code" field as the dough_type value.
-- If the client asks which doughs are available or their prices, answer using the DOUGH TYPES list.
-- Only use dough codes that appear in DOUGH TYPES (if provided). Reject requests for unavailable doughs.
+- Reject (set dough_type to "classica") any dough not present in DOUGH TYPES.
 - quantity must be an integer > 0.
 - Always use the exact pizza name as it appears in the MENU.
 - If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.

@@ -1,4 +1,7 @@
 [
   {"name": "Classica", "code": "classica", "surcharge": 0.0, "available": true},
-  {"name": "Integrale", "code": "integrale", "surcharge": 0.0, "available": true}
+  {"name": "Integrale", "code": "integrale", "surcharge": 0.0, "available": true},
+  {"name": "Napoletana", "code": "napoletana", "surcharge": 2.0, "available": true},
+  {"name": "Pinsa Romana", "code": "pinsa_romana", "surcharge": 2.0, "available": true},
+  {"name": "Senza Lievito", "code": "senza_lievito", "surcharge": 2.0, "available": true}
 ]
