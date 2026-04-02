@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,6 +38,11 @@ def on_startup():
 
     doughs = fetch_and_save_doughs()
     print(f"[Startup] Impasti disponibili: {[d['name'] for d in doughs]}")
+
+    _twilio_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"]
+    _present = [v for v in _twilio_vars if os.getenv(v)]
+    _missing = [v for v in _twilio_vars if not os.getenv(v)]
+    print(f"[Startup] Twilio — presenti: {_present}, mancanti: {_missing}")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
