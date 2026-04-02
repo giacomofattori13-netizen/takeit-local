@@ -1480,7 +1480,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 )
             ).first()
             base_price = round(menu_item.price, 2) if menu_item else 0.0
-            dough_surcharge = get_dough_surcharge(item.get("dough_type", "classica"))
+            is_sg_pizza = "(SG)" in item.get("pizza_name", "")
+            dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(item.get("dough_type", "classica"))
             add_count = len(item.get("add_ingredients", []))
             extras_price = round(dough_surcharge + add_count * INGREDIENT_EXTRA_PRICE, 2)
             total_price = round((base_price + extras_price) * item["quantity"], 2)
