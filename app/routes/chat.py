@@ -1501,7 +1501,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
         save_order_to_base44(
             customer_name=merged_order["customer_name"],
-            customer_phone=None,
+            customer_phone=conversation.customer_phone,
             pickup_time=merged_order["pickup_time"],
             order_number=order.id,
             ai_confidence=ai_confidence,

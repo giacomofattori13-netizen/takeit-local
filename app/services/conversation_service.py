@@ -187,8 +187,8 @@ def send_whatsapp_confirmation(
     if not phone:
         print("[WhatsApp] Numero non disponibile, skip")
         return
-    # Numeri fissi italiani iniziano con 0 (02, 06, 0461...)
-    if phone.startswith("0"):
+    # Numeri fissi: formato locale (0...) o internazionale italiano (+390...)
+    if phone.startswith("0") or phone.startswith("+390"):
         print(f"[WhatsApp] Numero fisso ({phone}), skip")
         return
     if not phone.startswith("+"):

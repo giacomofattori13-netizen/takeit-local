@@ -79,9 +79,14 @@ class ChatResponse(SQLModel):
     state: str
 
 
+class SessionCreateRequest(SQLModel):
+    caller_phone: str | None = None
+
+
 class SessionRead(SQLModel):
     session_id: str
     customer_name: str | None
+    customer_phone: str | None
     pickup_time: str | None
     items: list[dict]
     completed: bool
