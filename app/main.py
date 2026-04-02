@@ -43,6 +43,7 @@ def on_startup():
     _present = [v for v in _twilio_vars if os.getenv(v)]
     _missing = [v for v in _twilio_vars if not os.getenv(v)]
     print(f"[Startup] Twilio — presenti: {_present}, mancanti: {_missing}")
+    print(f"[Startup] Twilio environ check — TWILIO_ACCOUNT_SID is not None: {os.environ.get('TWILIO_ACCOUNT_SID') is not None}, TWILIO_AUTH_TOKEN is not None: {os.environ.get('TWILIO_AUTH_TOKEN') is not None}, TWILIO_WHATSAPP_FROM is not None: {os.environ.get('TWILIO_WHATSAPP_FROM') is not None}")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
