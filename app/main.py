@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import text
 
-from app.db import create_db_and_tables
+from app.db import create_db_and_tables, engine
 from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
 from app.routes.chat import router as chat_router
