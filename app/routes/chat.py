@@ -31,69 +31,51 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 
 def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
-    same_name_statement = select(MenuItem).where(MenuItem.name == item["pizza_name"])
-    same_name_items = session.exec(same_name_statement).all()
+    pizza_name = item["pizza_name"]
+    is_sg = pizza_name.upper().endswith("(SG)")
 
-    if not same_name_items:
-        typo_suggestions = get_typo_correction_suggestions(
-            session=session,
-            requested_name=item["pizza_name"],
-            limit=2,
-        )
+    same_name_statement = select(MenuItem).where(MenuItem.name == pizza_name)
+    same_name_item = session.exec(same_name_statement).first()
 
-        if typo_suggestions:
-            suggestions_text = ", ".join(typo_suggestions)
-            return (
-                f'{item["pizza_name"]} non è presente nel menu. '
-                f'Forse intendevi {suggestions_text}?',
-                typo_suggestions,
-            )
+    if same_name_item:
+        # La pizza esiste ma non è disponibile
+        if is_sg:
+            base_name = pizza_name[:-4].strip()
+            return f'{base_name} non è disponibile in versione senza glutine.', []
+        return f'{pizza_name} non è disponibile al momento.', []
 
-        suggestions = get_available_menu_suggestions(
-            session=session,
-            exclude_name=item["pizza_name"],
-            limit=3,
-        )
-
-        if suggestions:
-            suggestions_text = ", ".join(suggestions)
-            return (
-                f'{item["pizza_name"]} non è presente nel menu. '
-                f'Posso proporti {suggestions_text}.',
-                suggestions,
-            )
-
-        return f'{item["pizza_name"]} non è presente nel menu.', []
-
-    available_variants = [
-        menu_item.pizza_type
-        for menu_item in same_name_items
-        if menu_item.available
-    ]
-
-    if available_variants:
-        variants_text = ", ".join(available_variants)
+    # La pizza non esiste: prova correzione typo
+    typo_suggestions = get_typo_correction_suggestions(
+        session=session,
+        requested_name=pizza_name,
+        limit=2,
+    )
+    if typo_suggestions:
+        suggestions_text = ", ".join(typo_suggestions)
         return (
-            f'{item["pizza_name"]} ({item["pizza_type"]}) non è disponibile. '
-            f'Nel menu è disponibile nelle varianti: {variants_text}.',
-            [],
+            f'{pizza_name} non è presente nel menu. '
+            f'Forse intendevi {suggestions_text}?',
+            typo_suggestions,
         )
+
+    if is_sg:
+        base_name = pizza_name[:-4].strip()
+        return f'{base_name} non è disponibile in versione senza glutine.', []
 
     suggestions = get_available_menu_suggestions(
         session=session,
-        exclude_name=item["pizza_name"],
+        exclude_name=pizza_name,
         limit=3,
     )
-
     if suggestions:
         suggestions_text = ", ".join(suggestions)
         return (
-            f'{item["pizza_name"]} è presente nel menu ma attualmente non disponibile. '
+            f'{pizza_name} non è presente nel menu. '
             f'Posso proporti {suggestions_text}.',
             suggestions,
         )
 
-    return f'{item["pizza_name"]} è presente nel menu ma attualmente non disponibile.', []
+    return f'{pizza_name} non è presente nel menu.', []
 
 def get_available_menu_suggestions(
     session: Session,

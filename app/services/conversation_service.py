@@ -277,18 +277,18 @@ Allowed intent values:
 
 Rules:
 - Output JSON only. No markdown.
+- Each pizza in the MENU is a standalone product. Gluten-free versions have "(SG)" in their name and are distinct products, not variants.
 - dough_type must be exactly one of these three values: "classica", "integrale", "senza_glutine".
 - Map customer language to dough_type as follows:
   - "normale", "classica", "standard", or no specification → "classica"
   - "integrale", "integra" → "integrale"
   - "senza glutine", "gluten free", "senza g.", "sg" → "senza_glutine"
-- If the user explicitly says "senza glutine" or "gluten free", dough_type MUST be "senza_glutine".
+- If the user says "senza glutine", dough_type MUST be "senza_glutine" AND use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)").
 - If the user says "integrale", dough_type MUST be "integrale".
-- If the user does NOT specify the dough, dough_type MUST be "classica".
-- Never convert an explicit senza_glutine request into "classica".
+- If the user does NOT specify the dough, dough_type MUST be "classica" and use the base pizza name without any suffix.
+- Never propose a "(SG)" pizza as an alternative when the user asked for a specific dough type.
 - quantity must be an integer > 0.
-- Normalize pizza names with first letter uppercase when possible.
-- If a pizza exists in the MENU, use exactly the same name as in the MENU.
+- Always use the exact pizza name as it appears in the MENU.
 - If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.
 - Never drop an explicitly requested pizza just because it is not present in the MENU.
 - If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request even if it is not in the MENU.
@@ -394,16 +394,30 @@ def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
 def _build_name_lookup(menu_items: list[dict]) -> dict:
     """
     Costruisce un indice {(nome_lower, dough_type): nome_canonico}.
-    Indicizza sia il nome esatto che il nome base (senza suffissi come '(SG)'),
-    così "Pusteria" + "senza_glutine" risolve in "Pusteria (SG)".
+
+    Regole implementate:
+    - Corrispondenza esatta: ("pusteria (sg)", "senza_glutine") → "Pusteria (SG)"
+    - Nome base + dough: ("pusteria", "senza_glutine") → "Pusteria (SG)"
+    - Regola 1 fallback: se "X classica" non esiste ma "X (SG)" esiste,
+      ("x", "classica") → "X (SG)" — per richieste senza impasto specificato.
     """
     lookup: dict[tuple[str, str], str] = {}
+    base_to_doughs: dict[str, dict[str, str]] = {}  # base_lower → {dough: full_name}
+
     for item in menu_items:
         full_name = item["name"]
         dough = item.get("dough_type", "classica")
         lookup[(full_name.lower(), dough)] = full_name
-        # Rimuovi qualsiasi suffisso tra parentesi: " (SG)", " (INT)", ecc.
-        base = re.sub(r"\s*\([^)]+\)\s*$", "", full_name).strip()
-        if base.lower() != full_name.lower():
-            lookup.setdefault((base.lower(), dough), full_name)
+        # Nome base senza suffissi tra parentesi: "Pusteria (SG)" → "pusteria"
+        base = re.sub(r"\s*\([^)]+\)\s*$", "", full_name).strip().lower()
+        if base != full_name.lower():
+            lookup.setdefault((base, dough), full_name)
+        base_to_doughs.setdefault(base, {})[dough] = full_name
+
+    # Regola 1: se classica non esiste ma senza_glutine sì, il fallback
+    # silenzioso usa la versione SG (cliente non ha specificato impasto)
+    for base, doughs in base_to_doughs.items():
+        if "classica" not in doughs and "senza_glutine" in doughs:
+            lookup.setdefault((base, "classica"), doughs["senza_glutine"])
+
     return lookup
