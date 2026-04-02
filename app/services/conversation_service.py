@@ -377,4 +377,33 @@ def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
         item["dough_type"] = dough
         item["pizza_type"] = _DOUGH_TO_PIZZA_TYPE.get(dough, "Normale")
 
+    # Correggi i nomi: l'LLM può estrarre "Pusteria" + dough_type="senza_glutine"
+    # mentre nel menu la voce si chiama "Pusteria (SG)". Usiamo un indice
+    # (nome_base, dough_type) → nome_canonico costruito dal menu.
+    name_lookup = _build_name_lookup(menu_items)
+    for item in parsed["items"]:
+        key = (item["pizza_name"].lower(), item["dough_type"])
+        canonical = name_lookup.get(key)
+        if canonical and canonical != item["pizza_name"]:
+            print(f"[LLM] Nome corretto: '{item['pizza_name']}' → '{canonical}'")
+            item["pizza_name"] = canonical
+
     return parsed
+
+
+def _build_name_lookup(menu_items: list[dict]) -> dict:
+    """
+    Costruisce un indice {(nome_lower, dough_type): nome_canonico}.
+    Indicizza sia il nome esatto che il nome base (senza suffissi come '(SG)'),
+    così "Pusteria" + "senza_glutine" risolve in "Pusteria (SG)".
+    """
+    lookup: dict[tuple[str, str], str] = {}
+    for item in menu_items:
+        full_name = item["name"]
+        dough = item.get("dough_type", "classica")
+        lookup[(full_name.lower(), dough)] = full_name
+        # Rimuovi qualsiasi suffisso tra parentesi: " (SG)", " (INT)", ecc.
+        base = re.sub(r"\s*\([^)]+\)\s*$", "", full_name).strip()
+        if base.lower() != full_name.lower():
+            lookup.setdefault((base.lower(), dough), full_name)
+    return lookup
