@@ -13,13 +13,26 @@ BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/ent
 MENU_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "menu_data.json")
 )
+DOUGH_JSON_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dough_data.json")
+)
 
 _menu_cache: list[dict] = []
+_dough_cache: list[dict] = []
+
+BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
+
+INGREDIENT_EXTRA_PRICE = 2.0
 
 
 def reset_menu_cache() -> None:
     global _menu_cache
     _menu_cache = []
+
+
+def reset_dough_cache() -> None:
+    global _dough_cache
+    _dough_cache = []
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -80,6 +93,81 @@ def load_menu_from_base44() -> list[dict]:
     except Exception as e:
         print(f"[Menu] Errore lettura menu_data.json: {type(e).__name__}: {e}")
         return []
+
+
+def load_doughs() -> list[dict]:
+    """Carica gli impasti dal file dough_data.json (fallback statico)."""
+    global _dough_cache
+    if _dough_cache:
+        return _dough_cache
+    try:
+        with open(DOUGH_JSON_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+        _dough_cache = [d for d in raw if d.get("available", True)]
+        print(f"[Dough] Caricati {len(_dough_cache)} impasti da file")
+        return _dough_cache
+    except FileNotFoundError:
+        print(f"[Dough] File non trovato: {DOUGH_JSON_PATH}")
+        return []
+    except Exception as e:
+        print(f"[Dough] Errore: {type(e).__name__}: {e}")
+        return []
+
+
+def fetch_and_save_doughs() -> list[dict]:
+    """
+    Scarica gli impasti dall'endpoint DoughType di Base44, salva su
+    dough_data.json e aggiorna la cache. Se il fetch fallisce, carica
+    da file.
+    """
+    global _dough_cache
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        print("[Dough] BASE44_TOKEN non configurato, carico da file")
+        return load_doughs()
+
+    url = f"{BASE44_APP}/DoughType"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        raw = response.json()
+        doughs = [
+            {
+                "name": item["name"],
+                "code": item["code"],
+                "surcharge": float(item.get("surcharge", 0.0)),
+                "available": item.get("available", True),
+            }
+            for item in raw
+        ]
+        with open(DOUGH_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(doughs, f, ensure_ascii=False, indent=2)
+        _dough_cache = [d for d in doughs if d.get("available", True)]
+        print(f"[Dough] Scaricati {len(_dough_cache)} impasti da Base44 e salvati")
+        return _dough_cache
+    except Exception as e:
+        print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {e} — carico da file")
+        return load_doughs()
+
+
+def get_dough_surcharge(dough_code: str) -> float:
+    """Restituisce il supplemento dell'impasto; 0.0 se non trovato."""
+    for dough in _dough_cache:
+        if dough["code"] == dough_code:
+            return float(dough.get("surcharge", 0.0))
+    return 0.0
+
+
+def is_dough_available(dough_code: str) -> bool:
+    """Restituisce True se l'impasto è disponibile (o se non è in cache = non gestito)."""
+    for dough in _dough_cache:
+        if dough["code"] == dough_code:
+            return bool(dough.get("available", True))
+    return True  # impasti non elencati sono considerati validi (es. default classica)
 
 
 def save_order_to_base44(
@@ -240,7 +328,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def build_system_prompt(menu_text: str) -> str:
+def build_system_prompt(menu_text: str, dough_text: str = "") -> str:
+    dough_section = f"\nDOUGH TYPES AVAILABLE:\n{dough_text}\n" if dough_text else ""
     return f"""
 You extract takeaway pizza orders from Italian customer messages.
 
@@ -248,6 +337,7 @@ You MUST use this menu as the source of truth.
 
 MENU:
 {menu_text}
+{dough_section}
 
 Return ONLY valid JSON with this exact structure:
 {{
@@ -287,6 +377,9 @@ Rules:
 - If the user says "integrale", dough_type MUST be "integrale".
 - If the user does NOT specify the dough, dough_type MUST be "classica" and use the base pizza name without any suffix.
 - Never propose a "(SG)" pizza as an alternative when the user asked for a specific dough type.
+- If DOUGH TYPES are listed above, use the "code" field as the dough_type value.
+- If the client asks which doughs are available or their prices, answer using the DOUGH TYPES list.
+- Only use dough codes that appear in DOUGH TYPES (if provided). Reject requests for unavailable doughs.
 - quantity must be an integer > 0.
 - Always use the exact pizza name as it appears in the MENU.
 - If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.
@@ -329,7 +422,11 @@ Examples:
 """
 
 
-def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
+def extract_order_from_text(
+    message: str,
+    menu_items: list[dict],
+    dough_items: list[dict] | None = None,
+) -> dict:
     menu_lines = []
     for item in menu_items:
         ingredients_text = ", ".join(item.get("ingredients", [])) or "n.d."
@@ -342,6 +439,13 @@ def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
 
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
 
+    dough_lines = []
+    for d in (dough_items or []):
+        surcharge = d.get("surcharge", 0.0)
+        surcharge_text = f"+€{surcharge:.2f}" if surcharge > 0 else "incluso"
+        dough_lines.append(f'- {d["name"]} (code: {d["code"]}) | supplemento: {surcharge_text}')
+    dough_text = "\n".join(dough_lines)
+
     print(f"[LLM] menu_items ricevuti: {len(menu_items)}")
     print(f"[LLM] Prime 3 righe menu_text:\n" + "\n".join(menu_lines[:3]) if menu_lines else "[LLM] menu_text vuoto")
 
@@ -350,7 +454,7 @@ def extract_order_from_text(message: str, menu_items: list[dict]) -> dict:
         input=[
             {
                 "role": "system",
-                "content": build_system_prompt(menu_text),
+                "content": build_system_prompt(menu_text, dough_text),
             },
             {
                 "role": "user",

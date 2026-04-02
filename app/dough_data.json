@@ -1,0 +1,5 @@
+[
+  {"name": "Classica", "code": "classica", "surcharge": 0.0, "available": true},
+  {"name": "Integrale", "code": "integrale", "surcharge": 0.0, "available": true},
+  {"name": "Senza Glutine", "code": "senza_glutine", "surcharge": 2.0, "available": true}
+]

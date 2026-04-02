@@ -21,7 +21,11 @@ from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
 from app.services.conversation_service import (
     extract_order_from_text,
     load_menu_from_base44,
+    load_doughs,
     save_order_to_base44,
+    get_dough_surcharge,
+    is_dough_available,
+    INGREDIENT_EXTRA_PRICE,
     _PIZZA_TYPE_TO_DOUGH,
 )
 
@@ -1043,9 +1047,11 @@ def chat(request: ChatRequest, session: SessionDep):
             for item in db_menu_items
         ]
 
+    dough_items = load_doughs()
+
     message_lower = request.message.lower()
 
-    extracted = extract_order_from_text(request.message, menu_items_for_llm)
+    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
 
     normalized_items = []
 
@@ -1356,7 +1362,13 @@ def chat(request: ChatRequest, session: SessionDep):
             missing_messages.append(message)
             new_suggestions.extend(suggestions)
         else:
-            valid_items.append(item)
+            # Controlla disponibilità impasto
+            dough_code = item.get("dough_type", "classica")
+            if not is_dough_available(dough_code):
+                invalid_items.append(item)
+                missing_messages.append(f"L'impasto '{dough_code}' non è al momento disponibile.")
+            else:
+                valid_items.append(item)
 
     if is_simple_confirmation and not existing_suggestions:
         if (
@@ -1468,7 +1480,9 @@ def chat(request: ChatRequest, session: SessionDep):
                 )
             ).first()
             base_price = round(menu_item.price, 2) if menu_item else 0.0
-            extras_price = 0.0
+            dough_surcharge = get_dough_surcharge(item.get("dough_type", "classica"))
+            add_count = len(item.get("add_ingredients", []))
+            extras_price = round(dough_surcharge + add_count * INGREDIENT_EXTRA_PRICE, 2)
             total_price = round((base_price + extras_price) * item["quantity"], 2)
             enriched_items.append({
                 **item,

@@ -13,6 +13,7 @@ from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
 from app.services.menu_sync import sync_menu_to_db
+from app.services.conversation_service import fetch_and_save_doughs
 
 app = FastAPI(title="TakeIt Local Core")
 
@@ -32,6 +33,9 @@ def on_startup():
         print(f"[Startup] DB sincronizzato: {synced} voci da menu_data.json")
     else:
         print("[Startup] ATTENZIONE: menu vuoto, DB non sincronizzato")
+
+    doughs = fetch_and_save_doughs()
+    print(f"[Startup] Impasti disponibili: {[d['name'] for d in doughs]}")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
