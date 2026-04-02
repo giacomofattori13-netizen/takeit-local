@@ -1486,11 +1486,7 @@ def chat(request: ChatRequest, session: SessionDep):
             add_count = len(item.get("add_ingredients", []))
             extras_price = round(dough_surcharge + add_count * INGREDIENT_EXTRA_PRICE, 2)
             total_price = round((base_price + extras_price) * item["quantity"], 2)
-            print(
-                f"[Pricing] '{item['pizza_name']}' | dough={dough_code} is_sg={is_sg_pizza} | "
-                f"base={base_price} surcharge={dough_surcharge} adds={add_count}×{INGREDIENT_EXTRA_PRICE} "
-                f"extras={extras_price} qty={item['quantity']} total={total_price}"
-            )
+            print(f"[Pricing] Pizza: {item['pizza_name']}, base_price: {base_price}, dough: {dough_code}, dough_surcharge: {dough_surcharge}, aggiunte: {add_count}, extras_price: {extras_price}, total_price: {total_price}")
             enriched_items.append({
                 **item,
                 "base_price": base_price,
