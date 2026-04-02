@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import httpx
 from dotenv import load_dotenv
@@ -14,6 +15,11 @@ MENU_JSON_PATH = os.path.normpath(
 )
 
 _menu_cache: list[dict] = []
+
+
+def reset_menu_cache() -> None:
+    global _menu_cache
+    _menu_cache = []
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -146,8 +152,86 @@ def save_order_to_base44(
         print(f"[Base44] Ordine sincronizzato, id={response.json().get('id')}")
     except httpx.HTTPStatusError as e:
         print(f"[Base44] HTTP error {e.response.status_code}: {e.response.text}")
+        return
     except Exception as e:
         print(f"[Base44] Errore generico: {type(e).__name__}: {e}")
+        return
+
+    send_whatsapp_confirmation(
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        pickup_time=pickup_time,
+        items=items,
+        total_amount=total_amount,
+    )
+
+
+def send_whatsapp_confirmation(
+    customer_name: str,
+    customer_phone: str | None,
+    pickup_time: str,
+    items: list[dict],
+    total_amount: float,
+) -> None:
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_number = os.getenv("TWILIO_WHATSAPP_FROM")
+    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+
+    if not all([account_sid, auth_token, from_number]):
+        print("[WhatsApp] Variabili Twilio non configurate, skip")
+        return
+
+    # Normalizza il numero: rimuovi spazi/trattini/parentesi
+    phone = re.sub(r"[\s\-\(\)]", "", customer_phone or "")
+    if not phone:
+        print("[WhatsApp] Numero non disponibile, skip")
+        return
+    # Numeri fissi italiani iniziano con 0 (02, 06, 0461...)
+    if phone.startswith("0"):
+        print(f"[WhatsApp] Numero fisso ({phone}), skip")
+        return
+    if not phone.startswith("+"):
+        phone = f"+39{phone}"
+
+    pizza_lines = []
+    for item in items:
+        qty = item.get("quantity", 1)
+        name = item.get("pizza_name", "")
+        dough = item.get("dough_type", "classica")
+        extras = []
+        if dough != "classica":
+            extras.append(dough)
+        for ing in item.get("add_ingredients", []):
+            extras.append(f"+{ing}")
+        for ing in item.get("remove_ingredients", []):
+            extras.append(f"-{ing}")
+        line = f"{qty}x {name}"
+        if extras:
+            line += f" ({', '.join(extras)})"
+        pizza_lines.append(line)
+
+    body = (
+        f"Ciao {customer_name}! \u2705 Ordine confermato: {', '.join(pizza_lines)}. "
+        f"Ritiro alle {pickup_time}. Totale \u20ac{total_amount:.2f}. \u2014 {pizzeria_name}"
+    )
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    try:
+        response = httpx.post(
+            url,
+            auth=(account_sid, auth_token),
+            data={
+                "From": f"whatsapp:{from_number}",
+                "To": f"whatsapp:{phone}",
+                "Body": body,
+            },
+            timeout=10,
+        )
+        print(f"[WhatsApp] Inviato a {phone}: {response.status_code}")
+        response.raise_for_status()
+    except Exception as e:
+        print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
 
 
 print("DEBUG conversation_service loaded")
