@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from sqlalchemy import text
+
 from app.db import create_db_and_tables
 from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
@@ -17,6 +19,13 @@ app = FastAPI(title="TakeIt Local Core")
 
 @app.on_event("startup")
 def on_startup():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR"))
+            conn.commit()
+    except Exception:
+        pass  # colonna già esistente
+
     create_db_and_tables()
     synced = sync_menu_to_db()
     if synced:
