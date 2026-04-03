@@ -346,16 +346,19 @@ def send_whatsapp_confirmation(
 def load_restaurant() -> dict:
     """Carica i dati del ristorante dall'entità Restaurant di Base44 (con cache).
     Prova prima BASE44_TOKEN (Bearer auth), poi BASE44_API_KEY (query param).
+    I fallimenti di rete NON vengono cachati — viene ritentato ad ogni chiamata
+    finché non si ottengono dati reali.
     """
     global _restaurant_cache
-    if _restaurant_cache is not None:
+    # Usa la cache solo se contiene dati reali (non None e non vuota)
+    if _restaurant_cache:
         return _restaurant_cache
 
     token = os.getenv("BASE44_TOKEN")
     api_key = os.getenv("BASE44_API_KEY")
     if not token and not api_key:
         print("[Restaurant] Nessun token Base44 (BASE44_TOKEN / BASE44_API_KEY) — skip")
-        _restaurant_cache = {}
+        # Non carichiamo la cache: se il token viene aggiunto dopo non vogliamo bloccarci
         return {}
 
     url = f"{BASE44_APP}/Restaurant"
@@ -365,7 +368,6 @@ def load_restaurant() -> dict:
     if api_key:
         attempts.append({"params": {"api_key": api_key}})
 
-    last_err = None
     for kwargs in attempts:
         try:
             response = httpx.get(url, timeout=10, **kwargs)
@@ -373,21 +375,22 @@ def load_restaurant() -> dict:
             response.raise_for_status()
             data = response.json()
             if isinstance(data, list) and data:
-                _restaurant_cache = data[0]
-            elif isinstance(data, dict):
-                _restaurant_cache = data
+                result = data[0]
+            elif isinstance(data, dict) and data:
+                result = data
             else:
-                _restaurant_cache = {}
+                print("[Restaurant] Risposta vuota o formato inatteso, non cacheato")
+                continue
+            _restaurant_cache = result
             print(f"[Restaurant] Campi disponibili: {list(_restaurant_cache.keys())}")
             print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
             return _restaurant_cache
         except Exception as e:
-            last_err = e
             print(f"[Restaurant] Tentativo fallito: {type(e).__name__}: {e}")
             continue
 
-    print(f"[Restaurant] Tutti i tentativi falliti. Ultimo errore: {last_err}")
-    _restaurant_cache = {}
+    # Tutti i tentativi falliti — non cacheamo, si riproverà alla prossima chiamata
+    print("[Restaurant] Tutti i tentativi falliti, verrà riprovato alla prossima richiesta")
     return {}
 
 

@@ -510,13 +510,11 @@ def build_assistant_response(
 
     # Collecting pickup time (ha già il nome, manca solo l’ora)
     if state == "collecting_pickup_time":
-        return "Per che ora vuoi ritirare?"
+        return "Per che ora?"
 
-    # Collecting name — chiedi nome E ora in un unico messaggio
+    # Collecting name
     if state == "collecting_name":
-        if not pickup_time:
-            return "A nome di chi e per che ora?"
-        return "A nome di chi metto l’ordine?"
+        return "Che nome metto?"
 
     # Collecting items — risposte brevissime, niente domande
     if intent in ("add_items", "modify_items", "replace_items"):
@@ -1045,11 +1043,14 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     if body.test_phone:
         print(f"[Chat] Start con test_phone: {body.test_phone}")
 
+    greeting = get_agent_greeting()
+    print(f"[Agent] Saluto usato: {greeting!r}")
+
     return ChatStartResponse(
         session_id=conversation.session_id,
         state=conversation.state,
         completed=conversation.completed,
-        response_message=get_agent_greeting(),
+        response_message=greeting,
     )
 
 @router.post("/", response_model=ChatResponse)
