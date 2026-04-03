@@ -374,10 +374,9 @@ def load_restaurant() -> dict:
         try:
             response = httpx.get(url, timeout=10, **kwargs)
             print(f"[Restaurant] HTTP {response.status_code} ({list(kwargs.keys())[0]})")
-            print(f"[Restaurant] Body raw: {response.text[:500]}")
             response.raise_for_status()
             data = response.json()
-            print(f"[Restaurant] Body parsed type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else 'n/a'}")
+            print(f"[Restaurant] Body raw: {response.text[:300]}")
             if isinstance(data, list) and data:
                 result = data[0]
             elif isinstance(data, dict) and data:
@@ -506,7 +505,7 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
 def lookup_customer(phone: str) -> dict | None:
     """
     Cerca il cliente su Base44 per numero di telefono.
-    Restituisce il dict del cliente o None se non trovato / errore.
+    Scarica tutti i Customer e filtra in Python (Base44 non supporta query params).
     """
     token = os.getenv("BASE44_TOKEN")
     if not token:
@@ -516,17 +515,20 @@ def lookup_customer(phone: str) -> dict | None:
         response = httpx.get(
             BASE44_CUSTOMER_URL,
             headers={"Authorization": f"Bearer {token}"},
-            params={"phone": phone},
             timeout=10,
         )
         response.raise_for_status()
-        print(f"[Customer] Body raw: {response.text[:500]}")
         data = response.json()
-        print(f"[Customer] Body parsed type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else 'n/a'}")
-        if isinstance(data, list) and data:
-            customer = data[0]
-            print(f"[Customer] Trovato: {customer.get('full_name')}")
-            return customer
+        if not isinstance(data, list):
+            print(f"[Customer] Formato inatteso: {type(data).__name__}")
+            return None
+        # Filtra in Python per phone (normalizzato senza spazi)
+        phone_norm = re.sub(r"\s+", "", phone)
+        for record in data:
+            rec_phone = re.sub(r"\s+", "", record.get("phone") or "")
+            if rec_phone == phone_norm:
+                print(f"[Customer] Trovato: {record.get('full_name')}")
+                return record
         print("[Customer] Non trovato, nuovo cliente")
         return None
     except Exception as e:
