@@ -1,8 +1,22 @@
 {
+  "name": "Corte Del Sole",
+  "address": "Via Costeggiola 38, Cazzano Di Tramigna",
+  "phone": "+39 3356504223",
+  "email": "cortedelsole@yahoo.it",
   "agent_greeting": "Pizzeria Corte Del Sole, buonasera. Come posso aiutarla?",
-  "opening_hours": "",
-  "agent_tone": "",
-  "name": "Pizzeria Corte Del Sole",
-  "phone": "",
-  "address": ""
+  "agent_tone": "friendly",
+  "agent_upsell": true,
+  "agent_fallback_human": true,
+  "agent_languages": ["italiano", "inglese"],
+  "agent_active": true,
+  "pickup_slot_minutes": 15,
+  "opening_hours": {
+    "monday": "closed",
+    "tuesday": "closed",
+    "wednesday": "19:00-22:00",
+    "thursday": "19:00-22:00",
+    "friday": "19:00-22:00",
+    "saturday": "19:00-22:00",
+    "sunday": "19:00-22:00"
+  }
 }

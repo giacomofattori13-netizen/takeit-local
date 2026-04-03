@@ -409,15 +409,34 @@ def get_opening_hours() -> dict | str | None:
     return restaurant.get("opening_hours")
 
 
+_WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
 def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
     """
-    Controlla se pickup_time rientra negli orari di apertura.
-    Restituisce (is_valid, nearest_slot) dove nearest_slot è il primo slot aperto successivo.
-    Se opening_hours non è configurato o non parsabile, restituisce sempre (True, None).
+    Controlla se pickup_time rientra negli orari di apertura del giorno corrente.
+    opening_hours atteso: {"monday": "closed"|"HH:MM-HH:MM", "tuesday": ..., ...}
+    Restituisce (is_valid, nearest_open_slot).
+    Se opening_hours non è configurato o non parsabile, restituisce (True, None).
     """
     opening_hours = get_opening_hours()
-    if not opening_hours:
+    if not opening_hours or not isinstance(opening_hours, dict):
         return True, None
+
+    def parse_time(t: str) -> int:
+        p = t.strip().split(":")
+        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
+
+    def parse_range(slot: str) -> tuple[int, int] | None:
+        if not slot or slot.strip().lower() == "closed":
+            return None
+        halves = slot.strip().split("-", 1)
+        if len(halves) != 2:
+            return None
+        try:
+            return parse_time(halves[0]), parse_time(halves[1])
+        except Exception:
+            return None
 
     try:
         parts = pickup_time.strip().split(":")
@@ -425,60 +444,42 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
     except (ValueError, IndexError):
         return True, None
 
-    def parse_time(t: str) -> int:
-        p = t.strip().split(":")
-        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
+    today_name = _WEEKDAY_NAMES[datetime.date.today().weekday()]
+    today_slot = opening_hours.get(today_name, "")
+    today_range = parse_range(today_slot)
 
-    # Collect ranges as list of (open_min, close_min)
-    ranges: list[tuple[int, int]] = []
+    if today_range is None:
+        # Oggi chiusi — cerca il prossimo giorno aperto e suggerisci l'orario di apertura
+        for i in range(1, 7):
+            next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
+            next_slot = opening_hours.get(next_day, "")
+            next_range = parse_range(next_slot)
+            if next_range:
+                h, m = divmod(next_range[0], 60)
+                print(f"[Hours] Oggi ({today_name}) chiusi, prossima apertura: {next_day} {h:02d}:{m:02d}")
+                return False, f"{h:02d}:{m:02d}"
+        return False, None
 
-    if isinstance(opening_hours, str):
-        for segment in opening_hours.split(","):
-            segment = segment.strip()
-            if "-" in segment:
-                halves = segment.split("-", 1)
-                try:
-                    ranges.append((parse_time(halves[0]), parse_time(halves[1])))
-                except Exception:
-                    pass
-    elif isinstance(opening_hours, dict):
-        if "open" in opening_hours and "close" in opening_hours:
-            try:
-                ranges.append((parse_time(opening_hours["open"]), parse_time(opening_hours["close"])))
-            except Exception:
-                pass
-        else:
-            for slot in opening_hours.values():
-                if isinstance(slot, str) and "-" in slot:
-                    halves = slot.split("-", 1)
-                    try:
-                        ranges.append((parse_time(halves[0]), parse_time(halves[1])))
-                    except Exception:
-                        pass
-                elif isinstance(slot, dict) and "open" in slot and "close" in slot:
-                    try:
-                        ranges.append((parse_time(slot["open"]), parse_time(slot["close"])))
-                    except Exception:
-                        pass
-
-    if not ranges:
+    open_m, close_m = today_range
+    if open_m <= pickup_minutes <= close_m:
         return True, None
 
-    for open_m, close_m in ranges:
-        if open_m <= pickup_minutes <= close_m:
-            return True, None
+    # Orario fuori range — suggerisci l'apertura di oggi se non ancora raggiunta
+    if pickup_minutes < open_m:
+        h, m = divmod(open_m, 60)
+        return False, f"{h:02d}:{m:02d}"
 
-    # Not valid — find nearest open slot after requested time
-    ranges.sort()
-    for open_m, _ in ranges:
-        if open_m > pickup_minutes:
-            h, m = divmod(open_m, 60)
+    # Dopo la chiusura — suggerisci il prossimo giorno aperto
+    for i in range(1, 7):
+        next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
+        next_slot = opening_hours.get(next_day, "")
+        next_range = parse_range(next_slot)
+        if next_range:
+            h, m = divmod(next_range[0], 60)
+            print(f"[Hours] Dopo chiusura ({today_name}), prossima apertura: {next_day} {h:02d}:{m:02d}")
             return False, f"{h:02d}:{m:02d}"
 
-    # All ranges are before the requested time — suggest first opening
-    open_m = ranges[0][0]
-    h, m = divmod(open_m, 60)
-    return False, f"{h:02d}:{m:02d}"
+    return False, None
 
 
 def lookup_customer(phone: str) -> dict | None:
