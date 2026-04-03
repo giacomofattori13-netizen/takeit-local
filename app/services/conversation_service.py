@@ -374,14 +374,16 @@ def load_restaurant() -> dict:
         try:
             response = httpx.get(url, timeout=10, **kwargs)
             print(f"[Restaurant] HTTP {response.status_code} ({list(kwargs.keys())[0]})")
+            print(f"[Restaurant] Body raw: {response.text[:500]}")
             response.raise_for_status()
             data = response.json()
+            print(f"[Restaurant] Body parsed type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else 'n/a'}")
             if isinstance(data, list) and data:
                 result = data[0]
             elif isinstance(data, dict) and data:
                 result = data
             else:
-                print("[Restaurant] Risposta vuota o formato inatteso, non cacheato")
+                print(f"[Restaurant] Risposta vuota o formato inatteso: {data!r}")
                 continue
             _restaurant_cache = result
             print(f"[Restaurant] Campi disponibili: {list(_restaurant_cache.keys())}")
@@ -518,7 +520,9 @@ def lookup_customer(phone: str) -> dict | None:
             timeout=10,
         )
         response.raise_for_status()
+        print(f"[Customer] Body raw: {response.text[:500]}")
         data = response.json()
+        print(f"[Customer] Body parsed type={type(data).__name__}, len={len(data) if isinstance(data, (list, dict)) else 'n/a'}")
         if isinstance(data, list) and data:
             customer = data[0]
             print(f"[Customer] Trovato: {customer.get('full_name')}")
