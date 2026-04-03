@@ -487,8 +487,10 @@ def lookup_customer(phone: str) -> dict | None:
     Cerca il cliente su Base44 per numero di telefono.
     Scarica tutti i Customer e filtra in Python (Base44 non supporta query params).
     """
+    print(f"[Customer] Inizio lookup per {phone!r}")
     token = os.getenv("BASE44_TOKEN")
     if not token:
+        print("[Customer] BASE44_TOKEN non configurato, lookup saltato")
         return None
 
     try:

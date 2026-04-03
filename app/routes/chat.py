@@ -1053,7 +1053,9 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 
     # Riconoscimento cliente dal numero di telefono
     greeting = get_agent_greeting()
+    print(f"[Customer] customer_phone in sessione: {phone!r}")
     if phone:
+        print(f"[Customer] Avvio lookup per {phone!r}")
         customer = lookup_customer(phone)
         if customer:
             found_name = customer.get("full_name", "").strip()
@@ -1064,6 +1066,8 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
                 conversation.pending_customer_name = found_name
                 session.add(conversation)
                 session.commit()
+    else:
+        print("[Customer] phone non disponibile, lookup saltato")
 
     print(f"[Agent] Saluto: {greeting!r}")
 
