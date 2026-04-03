@@ -330,8 +330,10 @@ def send_whatsapp_confirmation(
             },
             timeout=10,
         )
-        print(f"[WhatsApp] Inviato a {phone}: {response.status_code}")
+        print(f"[WhatsApp] Risposta Twilio: status={response.status_code} body={response.text}")
         response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text}")
     except Exception as e:
         print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
 
