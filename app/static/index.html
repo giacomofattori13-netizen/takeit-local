@@ -305,10 +305,24 @@
 
           <a href="/dashboard" class="nav-link secondary">Dashboard ristorante</a>
           <a href="/tech-dashboard" class="nav-link secondary">Tech dashboard</a>
+        </div>
 
-          <div class="session-box">
+        <div class="toolbar" style="background:#f9fafb; gap:8px;">
+          <label style="font-size:13px; color:#374151; white-space:nowrap;">📱 Numero test:</label>
+          <input id="testPhoneInput" type="text" placeholder="+39347XXXXXXX"
+            style="width:160px; padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; font-size:13px;" />
+
+          <span style="color:#d1d5db;">|</span>
+
+          <label style="font-size:13px; color:#374151; white-space:nowrap;">🔁 Riprendi sessione:</label>
+          <input id="resumeSessionInput" type="text" placeholder="Incolla session_id..."
+            style="flex:1; min-width:200px; padding:8px 10px; border:1px solid #d1d5db; border-radius:8px; font-size:13px;" />
+          <button id="resumeBtn" class="secondary" style="white-space:nowrap;">Riprendi</button>
+
+          <div class="session-box" style="margin-left:auto;">
             <strong>Session ID:</strong>
-            <span id="sessionId">nessuna</span>
+            <span id="sessionId" title="Clicca per copiare" style="cursor:pointer; text-decoration:underline dotted;"
+              onclick="navigator.clipboard.writeText(this.textContent).then(()=>{ this.style.color='#059669'; setTimeout(()=>this.style.color='',1200); })">nessuna</span>
           </div>
         </div>
 
@@ -554,11 +568,35 @@
       }
     }
 
+    async function resumeSession() {
+      const sid = document.getElementById("resumeSessionInput").value.trim();
+      if (!sid) { addMessage("Incolla un session_id valido.", "bot"); return; }
+
+      try {
+        const res = await fetch(`/sessions/${sid}`);
+        if (!res.ok) { addMessage(`Sessione '${sid}' non trovata.`, "bot"); return; }
+
+        chatEl.innerHTML = "";
+        resetSummary();
+        callModeActive = false;
+        shouldResumeListening = false;
+        updateCallModeButton();
+        setSession(sid);
+        document.getElementById("resumeSessionInput").value = "";
+        statusEl.textContent = "Sessione ripresa.";
+        addMessage(`Sessione ${sid} ripresa. Continua pure.`, "bot");
+      } catch (err) {
+        addMessage("Errore nel riprendere la sessione.", "bot");
+      }
+    }
+
     async function startConversation() {
+      const testPhone = document.getElementById("testPhoneInput").value.trim() || null;
       try {
         const res = await fetch("/chat/start", {
           method: "POST",
-          headers: { "Content-Type": "application/json" }
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ test_phone: testPhone })
         });
 
         const data = await res.json();
@@ -741,6 +779,7 @@
     document.getElementById("startBtn").addEventListener("click", startConversation);
     document.getElementById("sendBtn").addEventListener("click", sendMessage);
     document.getElementById("resetBtn").addEventListener("click", resetSession);
+    document.getElementById("resumeBtn").addEventListener("click", resumeSession);
     micBtn.addEventListener("click", toggleMic);
     callModeBtn.addEventListener("click", toggleCallMode);
 

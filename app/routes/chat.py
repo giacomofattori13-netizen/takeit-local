@@ -7,6 +7,7 @@ from typing import Annotated
 from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.db import get_session
@@ -1001,13 +1002,18 @@ def should_force_segment_parsing(message: str) -> bool:
         )
     )
 
+class ChatStartRequest(BaseModel):
+    test_phone: str | None = None
+
+
 @router.post("/start", response_model=ChatStartResponse)
-def start_chat(session: SessionDep):
+def start_chat(body: ChatStartRequest, session: SessionDep):
     new_session_id = str(uuid.uuid4())
 
     conversation = ConversationSession(
         session_id=new_session_id,
         customer_name=None,
+        customer_phone=body.test_phone or None,
         pickup_time=None,
         items_json="[]",
         state="collecting_items",
@@ -1016,6 +1022,9 @@ def start_chat(session: SessionDep):
     session.add(conversation)
     session.commit()
     session.refresh(conversation)
+
+    if body.test_phone:
+        print(f"[Chat] Start con test_phone: {body.test_phone}")
 
     return ChatStartResponse(
         session_id=conversation.session_id,
