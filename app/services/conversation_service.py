@@ -16,6 +16,7 @@ DOUGH_JSON_PATH = os.path.normpath(
 
 _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
+_restaurant_cache: dict | None = None
 
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
@@ -30,6 +31,11 @@ def reset_menu_cache() -> None:
 def reset_dough_cache() -> None:
     global _dough_cache
     _dough_cache = []
+
+
+def reset_restaurant_cache() -> None:
+    global _restaurant_cache
+    _restaurant_cache = None
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -335,6 +341,128 @@ def send_whatsapp_confirmation(
         print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text}")
     except Exception as e:
         print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
+
+
+def load_restaurant() -> dict:
+    """Carica i dati del ristorante dall'entità Restaurant di Base44 (con cache)."""
+    global _restaurant_cache
+    if _restaurant_cache is not None:
+        return _restaurant_cache
+
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        print("[Restaurant] BASE44_TOKEN non configurato, skip")
+        _restaurant_cache = {}
+        return {}
+
+    url = f"{BASE44_APP}/Restaurant"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            _restaurant_cache = data[0]
+        elif isinstance(data, dict):
+            _restaurant_cache = data
+        else:
+            _restaurant_cache = {}
+        print(f"[Restaurant] Caricato: {list(_restaurant_cache.keys())}")
+        return _restaurant_cache
+    except Exception as e:
+        print(f"[Restaurant] Errore fetch: {type(e).__name__}: {e}")
+        _restaurant_cache = {}
+        return {}
+
+
+def get_agent_greeting() -> str:
+    """Restituisce il saluto dell'agente da Restaurant.agent_greeting in Base44."""
+    restaurant = load_restaurant()
+    greeting = restaurant.get("agent_greeting")
+    if greeting and isinstance(greeting, str) and greeting.strip():
+        return greeting.strip()
+    return "Ciao! Come posso aiutarti?"
+
+
+def get_opening_hours() -> dict | str | None:
+    """Restituisce gli orari di apertura da Restaurant.opening_hours in Base44."""
+    restaurant = load_restaurant()
+    return restaurant.get("opening_hours")
+
+
+def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
+    """
+    Controlla se pickup_time rientra negli orari di apertura.
+    Restituisce (is_valid, nearest_slot) dove nearest_slot è il primo slot aperto successivo.
+    Se opening_hours non è configurato o non parsabile, restituisce sempre (True, None).
+    """
+    opening_hours = get_opening_hours()
+    if not opening_hours:
+        return True, None
+
+    try:
+        parts = pickup_time.strip().split(":")
+        pickup_minutes = int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
+    except (ValueError, IndexError):
+        return True, None
+
+    def parse_time(t: str) -> int:
+        p = t.strip().split(":")
+        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
+
+    # Collect ranges as list of (open_min, close_min)
+    ranges: list[tuple[int, int]] = []
+
+    if isinstance(opening_hours, str):
+        for segment in opening_hours.split(","):
+            segment = segment.strip()
+            if "-" in segment:
+                halves = segment.split("-", 1)
+                try:
+                    ranges.append((parse_time(halves[0]), parse_time(halves[1])))
+                except Exception:
+                    pass
+    elif isinstance(opening_hours, dict):
+        if "open" in opening_hours and "close" in opening_hours:
+            try:
+                ranges.append((parse_time(opening_hours["open"]), parse_time(opening_hours["close"])))
+            except Exception:
+                pass
+        else:
+            for slot in opening_hours.values():
+                if isinstance(slot, str) and "-" in slot:
+                    halves = slot.split("-", 1)
+                    try:
+                        ranges.append((parse_time(halves[0]), parse_time(halves[1])))
+                    except Exception:
+                        pass
+                elif isinstance(slot, dict) and "open" in slot and "close" in slot:
+                    try:
+                        ranges.append((parse_time(slot["open"]), parse_time(slot["close"])))
+                    except Exception:
+                        pass
+
+    if not ranges:
+        return True, None
+
+    for open_m, close_m in ranges:
+        if open_m <= pickup_minutes <= close_m:
+            return True, None
+
+    # Not valid — find nearest open slot after requested time
+    ranges.sort()
+    for open_m, _ in ranges:
+        if open_m > pickup_minutes:
+            h, m = divmod(open_m, 60)
+            return False, f"{h:02d}:{m:02d}"
+
+    # All ranges are before the requested time — suggest first opening
+    open_m = ranges[0][0]
+    h, m = divmod(open_m, 60)
+    return False, f"{h:02d}:{m:02d}"
 
 
 print("DEBUG conversation_service loaded")

@@ -28,6 +28,8 @@ from app.services.conversation_service import (
     is_dough_available,
     INGREDIENT_EXTRA_PRICE,
     _PIZZA_TYPE_TO_DOUGH,
+    get_agent_greeting,
+    validate_pickup_time,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -402,6 +404,18 @@ def determine_state(merged_order: dict, missing_messages: list[str], completed: 
 
     return "awaiting_confirmation"
 
+def _is_mobile_phone(phone: str | None) -> bool:
+    """True se il numero è un cellulare italiano."""
+    if not phone:
+        return False
+    p = re.sub(r"[\s\-\(\)]", "", phone)
+    return (
+        p.startswith("+393")
+        or p.startswith("393")
+        or (p.startswith("3") and not p.startswith("+390") and not p.startswith("0"))
+    )
+
+
 def build_assistant_response(
     merged_order: dict,
     state: str,
@@ -409,112 +423,62 @@ def build_assistant_response(
     order_saved: bool,
     intent: str,
     new_valid_items: list[dict],
+    customer_phone: str | None = None,
+    pickup_time_error: str | None = None,
 ) -> str:
-    items_text = format_items_for_customer(merged_order["items"])
-    new_items_text = format_items_for_customer(new_valid_items)    
     customer_name = merged_order.get("customer_name")
     pickup_time = merged_order.get("pickup_time")
+    items_text = format_items_for_customer(merged_order["items"])
 
+    # Pickup time closed-hours error
+    if pickup_time_error:
+        if missing_messages:
+            return pickup_time_error + " " + " ".join(missing_messages)
+        return pickup_time_error
+
+    # Missing/invalid items
     if missing_messages:
-        if new_valid_items:
-            return f"Perfetto, ho aggiunto {new_items_text}. " + " ".join(missing_messages)
         return " ".join(missing_messages)
 
-    if intent == "add_items":
-        added_text = new_items_text if new_items_text else items_text
-
-        if state == "collecting_name":
-            return f"Perfetto, ho aggiunto {added_text}. A nome di chi?"
-
-        if state == "collecting_pickup_time":
-            return f"Perfetto {customer_name}, ho aggiunto {added_text}. Per che ora vuoi ritirare?"
-
-        if state == "awaiting_confirmation":
-            return (
-                f"Perfetto, ho aggiunto {added_text}. "
-                f"Riepilogo: {items_text}, ritiro alle {pickup_time} a nome {customer_name}. "
-                f"Confermo?"
-            )
-
-        if state == "completed":
-            return f"Perfetto, ho aggiunto {added_text}."
-
-    if intent == "modify_items":
-        if state == "collecting_name":
-            return f"Va bene, ho aggiornato l’ordine: {items_text}. A nome di chi?"
-
-        if state == "collecting_pickup_time":
-            return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
-
-        if state == "awaiting_confirmation":
-            return (
-                f"Va bene, ho aggiornato l’ordine: {items_text}. "
-                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
-            )
-
-        return f"Va bene, ho aggiornato l’ordine: {items_text}."
-
-    if intent == "remove_items":
-        if not items_text:
-            return "Va bene, ho tolto le pizze dall’ordine. Dimmi pure se vuoi ricominciare."
-
-        if state == "collecting_name":
-            return f"Perfetto, ho aggiornato l’ordine: {items_text}. A nome di chi?"
-
-        if state == "collecting_pickup_time":
-            return f"Perfetto {customer_name}, ho aggiornato l’ordine: {items_text}. Per che ora vuoi ritirare?"
-
-        if state == "awaiting_confirmation":
-            return (
-                f"Va bene, ho aggiornato l’ordine: {items_text}. "
-                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
-            )
-
-        return f"Va bene, ho aggiornato l’ordine: {items_text}."
-
-    if intent == "replace_items":
-        if state == "collecting_name":
-            return f"Va bene, al posto delle pizze precedenti ho segnato {items_text}. A nome di chi?"
-
-        if state == "collecting_pickup_time":
-            return f"Perfetto {customer_name}, al posto delle pizze precedenti ho segnato {items_text}. Per che ora vuoi ritirare?"
-
-        if state == "awaiting_confirmation":
-            return (
-                f"Va bene, al posto delle pizze precedenti ho segnato {items_text}. "
-                f"Ritiro alle {pickup_time} a nome {customer_name}. Confermo?"
-            )
-
-        return f"Va bene, al posto delle pizze precedenti ho segnato {items_text}."
-
+    # Cancellation
     if intent == "cancel_order":
-        return "Va bene, ho annullato l’ordine. Dimmi pure se vuoi ricominciare."
+        return "Va bene, ordine annullato. Dimmi pure se vuoi ricominciare."
 
-    if state == "collecting_name":
-        return f"Perfetto, ho segnato {items_text}. A nome di chi?"
+    # Order completed
+    if state == "completed" and order_saved:
+        if _is_mobile_phone(customer_phone):
+            return "Perfetto! Ti arriverà una conferma su WhatsApp. A presto!"
+        else:
+            return "Perfetto! Vuoi un riepilogo dell’ordine o ti fidi?"
 
-    if state == "collecting_pickup_time":
-        return f"Perfetto {customer_name}. Per che ora vuoi ritirare?"
-
+    # Full summary before confirmation
     if state == "awaiting_confirmation":
+        name_part = f" {customer_name}" if customer_name else ""
         return (
-            f"Perfetto {customer_name}, riepilogo: {items_text}. "
+            f"Perfetto{name_part}! Riepilogo: {items_text}. "
             f"Ritiro alle {pickup_time}. Confermo?"
         )
 
-    if state == "completed" and order_saved:
-        return (
-            f"Perfetto {customer_name}, ho confermato l’ordine: {items_text}. "
-            f"Ritiro alle {pickup_time}. A dopo!"
-        )
+    # Collecting pickup time
+    if state == "collecting_pickup_time":
+        name_part = f" {customer_name}" if customer_name else ""
+        return f"Ok{name_part}! Per che ora vuoi ritirare?"
 
-    if intent == "confirm_order" and state == "completed":
-        return (
-            f"Perfetto {customer_name}, confermo l’ordine: {items_text}. "
-            f"Ritiro alle {pickup_time}."
-        )
+    # Collecting name
+    if state == "collecting_name":
+        return "A nome di chi metto l’ordine?"
 
-    return "Dimmi pure quali pizze vuoi ordinare."
+    # Collecting items — brief natural responses
+    if intent in ("add_items", "modify_items", "replace_items"):
+        return "Ok! Altro?"
+
+    if intent == "remove_items":
+        if not merged_order["items"]:
+            return "Rimosso. Dimmi pure se vuoi aggiungere altro."
+        return "Rimosso! Altro?"
+
+    # Natural ordering intent (e.g. "vorrei ordinare")
+    return "Certo, dimmi pure!"
 
 def has_invalid_items(session: Session, items: list[dict]) -> bool:
     for item in items:
@@ -1031,7 +995,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
         session_id=conversation.session_id,
         state=conversation.state,
         completed=conversation.completed,
-        response_message="Ciao, dimmi pure quali pizze vuoi ordinare.",
+        response_message=get_agent_greeting(),
     )
 
 @router.post("/", response_model=ChatResponse)
@@ -1297,8 +1261,17 @@ def chat(request: ChatRequest, session: SessionDep):
     if extracted.get("customer_name"):
         merged_order["customer_name"] = extracted["customer_name"]
 
+    pickup_time_error = None
     if extracted.get("pickup_time"):
-        merged_order["pickup_time"] = extracted["pickup_time"]
+        pt = extracted["pickup_time"]
+        is_valid, suggestion = validate_pickup_time(pt)
+        if not is_valid:
+            if suggestion:
+                pickup_time_error = f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
+            else:
+                pickup_time_error = f"Mi dispiace, alle {pt} siamo chiusi."
+        else:
+            merged_order["pickup_time"] = pt
 
     if selected_from_suggestions:
         valid_existing_items = keep_only_valid_existing_items(session, existing_items)
@@ -1524,6 +1497,8 @@ def chat(request: ChatRequest, session: SessionDep):
         order_saved=order_saved,
         intent=intent,
         new_valid_items=new_valid_items,
+        customer_phone=conversation.customer_phone,
+        pickup_time_error=pickup_time_error,
     )
 
     session.add(conversation)
