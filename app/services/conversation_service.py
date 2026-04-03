@@ -15,6 +15,9 @@ MENU_JSON_PATH = os.path.normpath(
 DOUGH_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dough_data.json")
 )
+RESTAURANT_JSON_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "restaurant_data.json")
+)
 
 _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
@@ -348,54 +351,29 @@ def send_whatsapp_confirmation(
 
 
 def load_restaurant() -> dict:
-    """Carica i dati del ristorante dall'entità Restaurant di Base44 (con cache).
-    Prova prima BASE44_TOKEN (Bearer auth), poi BASE44_API_KEY (query param).
-    I fallimenti di rete NON vengono cachati — viene ritentato ad ogni chiamata
-    finché non si ottengono dati reali.
+    """Carica i dati del ristorante da restaurant_data.json (generato da export_menu.py).
+    Il file viene letto una sola volta e tenuto in cache per tutta la durata del processo.
+    Per aggiornare: rieseguire export_menu.py e riavviare il server.
     """
     global _restaurant_cache
-    # Usa la cache solo se contiene dati reali (non None e non vuota)
     if _restaurant_cache:
         return _restaurant_cache
 
-    token = os.getenv("BASE44_TOKEN")
-    api_key = os.getenv("BASE44_API_KEY")
-    if not token and not api_key:
-        print("[Restaurant] Nessun token Base44 (BASE44_TOKEN / BASE44_API_KEY) — skip")
-        # Non carichiamo la cache: se il token viene aggiunto dopo non vogliamo bloccarci
+    path = RESTAURANT_JSON_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        _restaurant_cache = data if isinstance(data, dict) else {}
+        print(f"[Restaurant] Caricato da file: {path}")
+        print(f"[Restaurant] Campi: {list(_restaurant_cache.keys())}")
+        print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
+        return _restaurant_cache
+    except FileNotFoundError:
+        print(f"[Restaurant] File non trovato: {path} — esegui scripts/export_menu.py")
         return {}
-
-    url = f"{BASE44_APP}/Restaurant"
-    attempts = []
-    if token:
-        attempts.append({"headers": {"Authorization": f"Bearer {token}"}})
-    if api_key:
-        attempts.append({"params": {"api_key": api_key}})
-
-    for kwargs in attempts:
-        try:
-            response = httpx.get(url, timeout=10, **kwargs)
-            print(f"[Restaurant] HTTP {response.status_code} ({list(kwargs.keys())[0]})")
-            response.raise_for_status()
-            data = response.json()
-            print(f"[Restaurant] Body keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}")
-            entities = data.get("entities", []) if isinstance(data, dict) else data
-            if isinstance(entities, list) and entities:
-                result = entities[0]
-            else:
-                print(f"[Restaurant] Nessun record in entities: {entities!r}")
-                continue
-            _restaurant_cache = result
-            print(f"[Restaurant] Campi disponibili: {list(_restaurant_cache.keys())}")
-            print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
-            return _restaurant_cache
-        except Exception as e:
-            print(f"[Restaurant] Tentativo fallito: {type(e).__name__}: {e}")
-            continue
-
-    # Tutti i tentativi falliti — non cacheamo, si riproverà alla prossima chiamata
-    print("[Restaurant] Tutti i tentativi falliti, verrà riprovato alla prossima richiesta")
-    return {}
+    except Exception as e:
+        print(f"[Restaurant] Errore lettura {path}: {type(e).__name__}: {e}")
+        return {}
 
 
 def get_agent_greeting() -> str:
