@@ -1044,7 +1044,6 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
         print(f"[Chat] Start con test_phone: {body.test_phone}")
 
     greeting = get_agent_greeting()
-    print(f"[Agent] Saluto usato: {greeting!r}")
 
     return ChatStartResponse(
         session_id=conversation.session_id,

@@ -395,14 +395,30 @@ def load_restaurant() -> dict:
 
 
 def get_agent_greeting() -> str:
-    """Restituisce il saluto dell'agente da Restaurant.agent_greeting in Base44."""
+    """Restituisce il saluto dell'agente.
+    Priorità: 1) Restaurant.agent_greeting da Base44
+               2) env var AGENT_GREETING
+               3) stringa hardcoded di emergenza
+    """
+    # 1. Base44
     restaurant = load_restaurant()
     greeting = restaurant.get("agent_greeting")
     if greeting and isinstance(greeting, str) and greeting.strip():
-        print(f"[Restaurant] Uso agent_greeting da Base44: {greeting!r}")
-        return greeting.strip()
-    print(f"[Restaurant] agent_greeting non trovato (restaurant keys: {list(restaurant.keys())}), uso fallback")
-    return "Ciao! Come posso aiutarti?"
+        result = greeting.strip()
+        print(f"[Agent] Saluto: {result!r} (fonte: Base44)")
+        return result
+
+    # 2. Env var (configurabile su Railway senza codice)
+    env_greeting = os.getenv("AGENT_GREETING")
+    if env_greeting and env_greeting.strip():
+        result = env_greeting.strip()
+        print(f"[Agent] Saluto: {result!r} (fonte: env AGENT_GREETING)")
+        return result
+
+    # 3. Fallback di emergenza
+    result = "Pizzeria Corte Del Sole, buonasera. Come posso aiutarla?"
+    print(f"[Agent] Saluto: {result!r} (fonte: fallback hardcoded)")
+    return result
 
 
 def get_opening_hours() -> dict | str | None:
