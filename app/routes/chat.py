@@ -1008,6 +1008,7 @@ class ChatStartRequest(BaseModel):
 
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
+    print(f"[ChatStart] Body ricevuto: {body}")
     new_session_id = str(uuid.uuid4())
 
     conversation = ConversationSession(
