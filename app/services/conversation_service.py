@@ -152,7 +152,9 @@ def fetch_and_save_doughs() -> list[dict]:
             timeout=10,
         )
         response.raise_for_status()
-        raw = response.json()
+        body = response.json()
+        print(f"[Dough] Body keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__}")
+        raw = body.get("entities", body) if isinstance(body, dict) else body
         doughs = [
             {
                 "name": item["name"],
@@ -376,13 +378,12 @@ def load_restaurant() -> dict:
             print(f"[Restaurant] HTTP {response.status_code} ({list(kwargs.keys())[0]})")
             response.raise_for_status()
             data = response.json()
-            print(f"[Restaurant] Body raw: {response.text[:300]}")
-            if isinstance(data, list) and data:
-                result = data[0]
-            elif isinstance(data, dict) and data:
-                result = data
+            print(f"[Restaurant] Body keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}")
+            entities = data.get("entities", []) if isinstance(data, dict) else data
+            if isinstance(entities, list) and entities:
+                result = entities[0]
             else:
-                print(f"[Restaurant] Risposta vuota o formato inatteso: {data!r}")
+                print(f"[Restaurant] Nessun record in entities: {entities!r}")
                 continue
             _restaurant_cache = result
             print(f"[Restaurant] Campi disponibili: {list(_restaurant_cache.keys())}")
@@ -519,12 +520,14 @@ def lookup_customer(phone: str) -> dict | None:
         )
         response.raise_for_status()
         data = response.json()
-        if not isinstance(data, list):
-            print(f"[Customer] Formato inatteso: {type(data).__name__}")
+        print(f"[Customer] Body keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}")
+        entities = data.get("entities", []) if isinstance(data, dict) else data
+        if not isinstance(entities, list):
+            print(f"[Customer] Formato inatteso per entities: {type(entities).__name__}")
             return None
         # Filtra in Python per phone (normalizzato senza spazi)
         phone_norm = re.sub(r"\s+", "", phone)
-        for record in data:
+        for record in entities:
             rec_phone = re.sub(r"\s+", "", record.get("phone") or "")
             if rec_phone == phone_norm:
                 print(f"[Customer] Trovato: {record.get('full_name')}")
