@@ -38,6 +38,7 @@ class ConversationSession(SQLModel, table=True):
     suggested_items_json: str = "[]"
     state: str = "collecting_items"
     completed: bool = False
+    intended_quantity: Optional[int] = None
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

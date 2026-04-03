@@ -22,12 +22,16 @@ app = FastAPI(title="TakeIt Local Core")
 
 @app.on_event("startup")
 def on_startup():
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR"))
-            conn.commit()
-    except Exception:
-        pass  # colonna già esistente
+    for migration_sql in [
+        "ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR",
+        "ALTER TABLE conversationsession ADD COLUMN intended_quantity INTEGER",
+    ]:
+        try:
+            with engine.connect() as conn:
+                conn.execute(text(migration_sql))
+                conn.commit()
+        except Exception:
+            pass  # colonna già esistente
 
     create_db_and_tables()
     synced = sync_menu_to_db()

@@ -344,38 +344,51 @@ def send_whatsapp_confirmation(
 
 
 def load_restaurant() -> dict:
-    """Carica i dati del ristorante dall'entità Restaurant di Base44 (con cache)."""
+    """Carica i dati del ristorante dall'entità Restaurant di Base44 (con cache).
+    Prova prima BASE44_TOKEN (Bearer auth), poi BASE44_API_KEY (query param).
+    """
     global _restaurant_cache
     if _restaurant_cache is not None:
         return _restaurant_cache
 
     token = os.getenv("BASE44_TOKEN")
-    if not token:
-        print("[Restaurant] BASE44_TOKEN non configurato, skip")
+    api_key = os.getenv("BASE44_API_KEY")
+    if not token and not api_key:
+        print("[Restaurant] Nessun token Base44 (BASE44_TOKEN / BASE44_API_KEY) — skip")
         _restaurant_cache = {}
         return {}
 
     url = f"{BASE44_APP}/Restaurant"
-    try:
-        response = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, list) and data:
-            _restaurant_cache = data[0]
-        elif isinstance(data, dict):
-            _restaurant_cache = data
-        else:
-            _restaurant_cache = {}
-        print(f"[Restaurant] Caricato: {list(_restaurant_cache.keys())}")
-        return _restaurant_cache
-    except Exception as e:
-        print(f"[Restaurant] Errore fetch: {type(e).__name__}: {e}")
-        _restaurant_cache = {}
-        return {}
+    attempts = []
+    if token:
+        attempts.append({"headers": {"Authorization": f"Bearer {token}"}})
+    if api_key:
+        attempts.append({"params": {"api_key": api_key}})
+
+    last_err = None
+    for kwargs in attempts:
+        try:
+            response = httpx.get(url, timeout=10, **kwargs)
+            print(f"[Restaurant] HTTP {response.status_code} ({list(kwargs.keys())[0]})")
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list) and data:
+                _restaurant_cache = data[0]
+            elif isinstance(data, dict):
+                _restaurant_cache = data
+            else:
+                _restaurant_cache = {}
+            print(f"[Restaurant] Campi disponibili: {list(_restaurant_cache.keys())}")
+            print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
+            return _restaurant_cache
+        except Exception as e:
+            last_err = e
+            print(f"[Restaurant] Tentativo fallito: {type(e).__name__}: {e}")
+            continue
+
+    print(f"[Restaurant] Tutti i tentativi falliti. Ultimo errore: {last_err}")
+    _restaurant_cache = {}
+    return {}
 
 
 def get_agent_greeting() -> str:
@@ -383,7 +396,9 @@ def get_agent_greeting() -> str:
     restaurant = load_restaurant()
     greeting = restaurant.get("agent_greeting")
     if greeting and isinstance(greeting, str) and greeting.strip():
+        print(f"[Restaurant] Uso agent_greeting da Base44: {greeting!r}")
         return greeting.strip()
+    print(f"[Restaurant] agent_greeting non trovato (restaurant keys: {list(restaurant.keys())}), uso fallback")
     return "Ciao! Come posso aiutarti?"
 
 

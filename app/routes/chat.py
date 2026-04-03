@@ -1,4 +1,5 @@
 import json
+import random
 import uuid
 import re
 
@@ -386,7 +387,48 @@ def split_valid_and_invalid_items(
 
     return valid_items, invalid_items, missing_messages
 
-def determine_state(merged_order: dict, missing_messages: list[str], completed: bool) -> str:
+_DONE_SIGNALS = {
+    "è tutto", "e' tutto", "basta così", "basta cosi", "basta",
+    "ho finito", "per ora è tutto", "per ora e' tutto", "ok è tutto",
+    "okay è tutto", "è tutto qui", "per adesso è tutto", "fine",
+}
+
+_NUMBER_WORDS = {
+    "una": 1, "un": 1, "uno": 1,
+    "due": 2, "tre": 3, "quattro": 4, "cinque": 5, "sei": 6, "sette": 7,
+}
+
+
+def extract_intended_quantity(message: str) -> int | None:
+    """
+    Estrae il numero totale di pizze dichiarate in frasi come
+    'vorrei 2 pizze' o 'ordino tre pizze d'asporto'.
+    Viene usato SOLO quando il messaggio non contiene nomi di pizze specifiche.
+    """
+    msg = message.lower()
+    pattern = r"(\b\d+\b|\b(?:una|un|uno|due|tre|quattro|cinque|sei|sette)\b)\s+pizze?\b"
+    match = re.search(pattern, msg)
+    if not match:
+        return None
+    word = match.group(1).strip()
+    if word.isdigit():
+        return int(word)
+    return _NUMBER_WORDS.get(word)
+
+
+def is_done_signal(message: str) -> bool:
+    """True se il cliente segnala che ha finito di ordinare."""
+    msg = message.lower().strip()
+    return any(signal in msg for signal in _DONE_SIGNALS)
+
+
+def determine_state(
+    merged_order: dict,
+    missing_messages: list[str],
+    completed: bool,
+    intended_quantity: int | None = None,
+    done_signal: bool = False,
+) -> str:
     if completed:
         return "completed"
 
@@ -396,10 +438,17 @@ def determine_state(merged_order: dict, missing_messages: list[str], completed: 
     if not merged_order["items"]:
         return "collecting_items"
 
-    if merged_order["items"] and not merged_order.get("customer_name"):
+    # Rimani in collecting_items finché non viene raggiunto il numero dichiarato
+    # o il cliente segnala che ha finito
+    if intended_quantity and not done_signal:
+        current_count = sum(item.get("quantity", 1) for item in merged_order["items"])
+        if current_count < intended_quantity:
+            return "collecting_items"
+
+    if not merged_order.get("customer_name"):
         return "collecting_name"
 
-    if merged_order["items"] and not merged_order.get("pickup_time"):
+    if not merged_order.get("pickup_time"):
         return "collecting_pickup_time"
 
     return "awaiting_confirmation"
@@ -459,23 +508,28 @@ def build_assistant_response(
             f"Ritiro alle {pickup_time}. Confermo?"
         )
 
-    # Collecting pickup time
+    # Collecting pickup time (ha già il nome, manca solo l’ora)
     if state == "collecting_pickup_time":
-        name_part = f" {customer_name}" if customer_name else ""
-        return f"Ok{name_part}! Per che ora vuoi ritirare?"
+        return "Per che ora vuoi ritirare?"
 
-    # Collecting name
+    # Collecting name — chiedi nome E ora in un unico messaggio
     if state == "collecting_name":
+        if not pickup_time:
+            return "A nome di chi e per che ora?"
         return "A nome di chi metto l’ordine?"
 
-    # Collecting items — brief natural responses
+    # Collecting items — risposte brevissime, niente domande
     if intent in ("add_items", "modify_items", "replace_items"):
-        return "Ok! Altro?"
+        return random.choice(["Ok!", "Aggiunto!", "Perfetto!", "Certo!"])
 
     if intent == "remove_items":
         if not merged_order["items"]:
-            return "Rimosso. Dimmi pure se vuoi aggiungere altro."
-        return "Rimosso! Altro?"
+            return "Rimosso."
+        return "Rimosso!"
+
+    # Segnale "ho finito" senza items: chiedi nome e ora
+    if not merged_order["items"]:
+        return "Certo, dimmi pure!"
 
     # Natural ordering intent (e.g. "vorrei ordinare")
     return "Certo, dimmi pure!"
@@ -1302,6 +1356,19 @@ def chat(request: ChatRequest, session: SessionDep):
     if intent == "cancel_order":
         merged_order["customer_name"] = None
         merged_order["pickup_time"] = None
+        conversation.intended_quantity = None
+
+    # Aggiorna il numero di pizze dichiarato se il cliente lo ha specificato
+    # (solo quando il messaggio non contiene pizze specifiche, per evitare
+    # di sovrascrivere conteggi già correttamente estratti dagli items)
+    if not extracted.get("items"):
+        declared = extract_intended_quantity(request.message)
+        if declared:
+            conversation.intended_quantity = declared
+            print(f"[Chat] intended_quantity aggiornato a {declared}")
+
+    # Segnale di fine ordine (es. 'è tutto', 'ho finito')
+    customer_done = is_done_signal(request.message)
 
     conversation.customer_name = merged_order["customer_name"]
     conversation.pickup_time = merged_order["pickup_time"]
@@ -1412,6 +1479,8 @@ def chat(request: ChatRequest, session: SessionDep):
         merged_order=merged_order,
         missing_messages=missing_messages,
         completed=conversation.completed,
+        intended_quantity=conversation.intended_quantity,
+        done_signal=customer_done,
     )
     conversation.state = state
 
