@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import re
@@ -6,6 +7,7 @@ import httpx
 from openai import OpenAI
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
+BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
 
 MENU_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "menu_data.json")
@@ -497,6 +499,102 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
     open_m = ranges[0][0]
     h, m = divmod(open_m, 60)
     return False, f"{h:02d}:{m:02d}"
+
+
+def lookup_customer(phone: str) -> dict | None:
+    """
+    Cerca il cliente su Base44 per numero di telefono.
+    Restituisce il dict del cliente o None se non trovato / errore.
+    """
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        return None
+
+    try:
+        response = httpx.get(
+            BASE44_CUSTOMER_URL,
+            headers={"Authorization": f"Bearer {token}"},
+            params={"phone": phone},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, list) and data:
+            customer = data[0]
+            print(f"[Customer] Trovato: {customer.get('full_name')}")
+            return customer
+        print("[Customer] Non trovato, nuovo cliente")
+        return None
+    except Exception as e:
+        print(f"[Customer] Errore lookup: {type(e).__name__}: {e}")
+        return None
+
+
+def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> None:
+    """
+    Crea o aggiorna il cliente su Base44 dopo un ordine confermato.
+    Campi: full_name, phone, last_order_date, total_orders, favorite_pizzas.
+    """
+    api_key = os.getenv("BASE44_API_KEY")
+    token = os.getenv("BASE44_TOKEN")
+    if not api_key and not token:
+        print("[Customer] Nessun token, skip upsert")
+        return
+
+    auth_kwargs: dict = (
+        {"params": {"api_key": api_key}}
+        if api_key
+        else {"headers": {"Authorization": f"Bearer {token}"}}
+    )
+    today = datetime.date.today().isoformat()
+
+    existing = lookup_customer(phone) if phone else None
+
+    if existing:
+        customer_id = existing.get("id")
+        # Merge favorite_pizzas senza duplicati
+        prev = existing.get("favorite_pizzas") or []
+        if isinstance(prev, str):
+            prev = [p.strip() for p in prev.split(",") if p.strip()]
+        merged_pizzas = list(dict.fromkeys(prev + [p for p in pizzas if p not in prev]))
+
+        payload = {
+            "full_name": full_name,
+            "phone": phone,
+            "last_order_date": today,
+            "total_orders": int(existing.get("total_orders") or 0) + 1,
+            "favorite_pizzas": merged_pizzas,
+        }
+        try:
+            response = httpx.put(
+                f"{BASE44_CUSTOMER_URL}/{customer_id}",
+                **auth_kwargs,
+                json=payload,
+                timeout=10,
+            )
+            response.raise_for_status()
+            print(f"[Customer] Aggiornato: {full_name} (ordini: {payload['total_orders']})")
+        except Exception as e:
+            print(f"[Customer] Errore update: {type(e).__name__}: {e}")
+    else:
+        payload = {
+            "full_name": full_name,
+            "phone": phone,
+            "last_order_date": today,
+            "total_orders": 1,
+            "favorite_pizzas": pizzas,
+        }
+        try:
+            response = httpx.post(
+                BASE44_CUSTOMER_URL,
+                **auth_kwargs,
+                json=payload,
+                timeout=10,
+            )
+            response.raise_for_status()
+            print(f"[Customer] Creato: {full_name}")
+        except Exception as e:
+            print(f"[Customer] Errore create: {type(e).__name__}: {e}")
 
 
 print("DEBUG conversation_service loaded")

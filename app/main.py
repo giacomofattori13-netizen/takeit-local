@@ -25,6 +25,7 @@ def on_startup():
     for migration_sql in [
         "ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR",
         "ALTER TABLE conversationsession ADD COLUMN intended_quantity INTEGER",
+        "ALTER TABLE conversationsession ADD COLUMN pending_customer_name VARCHAR",
     ]:
         try:
             with engine.connect() as conn:

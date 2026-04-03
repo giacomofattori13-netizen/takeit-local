@@ -31,6 +31,8 @@ from app.services.conversation_service import (
     _PIZZA_TYPE_TO_DOUGH,
     get_agent_greeting,
     validate_pickup_time,
+    lookup_customer,
+    upsert_customer,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -1022,15 +1024,24 @@ class ChatStartRequest(BaseModel):
     test_phone: str | None = None
 
 
+def _italian_title(full_name: str) -> str:
+    """Restituisce 'il signor' o 'la signora' in base al nome (euristica sul finale)."""
+    first = full_name.strip().split()[0] if full_name.strip() else full_name
+    if first.lower().endswith("a"):
+        return f"la signora {full_name}"
+    return f"il signor {full_name}"
+
+
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
     print(f"[ChatStart] Body ricevuto: {body}")
     new_session_id = str(uuid.uuid4())
+    phone = body.test_phone or None
 
     conversation = ConversationSession(
         session_id=new_session_id,
         customer_name=None,
-        customer_phone=body.test_phone or None,
+        customer_phone=phone,
         pickup_time=None,
         items_json="[]",
         state="collecting_items",
@@ -1040,10 +1051,21 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     session.commit()
     session.refresh(conversation)
 
-    if body.test_phone:
-        print(f"[Chat] Start con test_phone: {body.test_phone}")
-
+    # Riconoscimento cliente dal numero di telefono
     greeting = get_agent_greeting()
+    if phone:
+        customer = lookup_customer(phone)
+        if customer:
+            found_name = customer.get("full_name", "").strip()
+            if found_name:
+                # Personalizza il saluto e salva il nome in attesa di conferma
+                base = re.split(r"[.!?]", greeting)[0].strip()
+                greeting = f"{base}! È lei {_italian_title(found_name)}?"
+                conversation.pending_customer_name = found_name
+                session.add(conversation)
+                session.commit()
+
+    print(f"[Agent] Saluto: {greeting!r}")
 
     return ChatStartResponse(
         session_id=conversation.session_id,
@@ -1187,6 +1209,19 @@ def chat(request: ChatRequest, session: SessionDep):
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
+
+    # Gestione conferma/rifiuto identità cliente riconosciuto
+    _pending = conversation.pending_customer_name
+    if _pending and not conversation.customer_name:
+        _positive = any(m in message_lower for m in ["sì", "si", "esatto", "giusto", "corretto", "sono io", "sì sono"])
+        _negative = any(m in message_lower for m in ["no", "sbagliato", "non sono"])
+        if _positive:
+            conversation.customer_name = _pending
+            conversation.pending_customer_name = None
+            print(f"[Customer] Identità confermata: {_pending}")
+        elif _negative:
+            conversation.pending_customer_name = None
+            print("[Customer] Identità rifiutata, trattato come nuovo cliente")
 
     existing_items = json.loads(conversation.items_json)
     existing_suggestions = json.loads(conversation.suggested_items_json)
@@ -1557,6 +1592,16 @@ def chat(request: ChatRequest, session: SessionDep):
             order_number=order.id,
             ai_confidence=ai_confidence,
             items=enriched_items,
+        )
+
+        # Crea o aggiorna il cliente su Base44
+        pizza_names = list(dict.fromkeys(
+            item["pizza_name"] for item in merged_order["items"]
+        ))
+        upsert_customer(
+            full_name=merged_order["customer_name"],
+            phone=conversation.customer_phone,
+            pizzas=pizza_names,
         )
 
     response_message = build_assistant_response(

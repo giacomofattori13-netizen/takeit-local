@@ -39,6 +39,7 @@ class ConversationSession(SQLModel, table=True):
     state: str = "collecting_items"
     completed: bool = False
     intended_quantity: Optional[int] = None
+    pending_customer_name: Optional[str] = None
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
