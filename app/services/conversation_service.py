@@ -492,26 +492,32 @@ def lookup_customer(phone: str) -> dict | None:
         return None
 
     try:
+        print(f"[Customer] GET {BASE44_CUSTOMER_URL}")
         response = httpx.get(
             BASE44_CUSTOMER_URL,
             headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
+        print(f"[Customer] HTTP {response.status_code}")
+        print(f"[Customer] Body raw: {response.text[:800]}")
         response.raise_for_status()
         data = response.json()
-        print(f"[Customer] Body keys: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}")
         entities = data.get("entities", []) if isinstance(data, dict) else data
         if not isinstance(entities, list):
             print(f"[Customer] Formato inatteso per entities: {type(entities).__name__}")
             return None
-        # Filtra in Python per phone (normalizzato senza spazi)
-        phone_norm = re.sub(r"\s+", "", phone)
+        print(f"[Customer] Totale record: {len(entities)}")
+        # Filtra in Python per phone (normalizzato: solo cifre e +)
+        phone_norm = re.sub(r"[\s\-\(\)]", "", phone)
+        print(f"[Customer] Cerco phone normalizzato: {phone_norm!r}")
         for record in entities:
-            rec_phone = re.sub(r"\s+", "", record.get("phone") or "")
+            rec_phone_raw = record.get("phone") or ""
+            rec_phone = re.sub(r"[\s\-\(\)]", "", rec_phone_raw)
+            print(f"[Customer]   record phone raw={rec_phone_raw!r} norm={rec_phone!r}")
             if rec_phone == phone_norm:
                 print(f"[Customer] Trovato: {record.get('full_name')}")
                 return record
-        print("[Customer] Non trovato, nuovo cliente")
+        print(f"[Customer] Non trovato tra {len(entities)} record")
         return None
     except Exception as e:
         print(f"[Customer] Errore lookup: {type(e).__name__}: {e}")
