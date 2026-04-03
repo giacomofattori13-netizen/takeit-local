@@ -313,10 +313,8 @@ def send_whatsapp_confirmation(
             line += f" ({', '.join(extras)})"
         pizza_lines.append(line)
 
-    body = (
-        f"Ciao {customer_name}! \u2705 Ordine confermato: {', '.join(pizza_lines)}. "
-        f"Ritiro alle {pickup_time}. Totale \u20ac{total_amount:.2f}. \u2014 {pizzeria_name}"
-    )
+    content_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
+    content_variables = json.dumps({"1": pizzeria_name, "2": pickup_time})
 
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
@@ -326,7 +324,8 @@ def send_whatsapp_confirmation(
             data={
                 "From": f"whatsapp:{from_number}",
                 "To": f"whatsapp:{phone}",
-                "Body": body,
+                "ContentSid": content_sid,
+                "ContentVariables": content_variables,
             },
             timeout=10,
         )
