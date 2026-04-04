@@ -1,5 +1,6 @@
 import json
 import random
+import time
 import unicodedata
 import uuid
 import re
@@ -1663,7 +1664,7 @@ def chat(request: ChatRequest, session: SessionDep):
             customer_name=merged_order["customer_name"],
             customer_phone=conversation.customer_phone,
             pickup_time=merged_order["pickup_time"],
-            order_number=order.id,
+            order_number=int(time.time()),
             ai_confidence=ai_confidence,
             items=enriched_items,
         )

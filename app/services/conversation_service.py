@@ -178,14 +178,16 @@ def fetch_and_save_doughs() -> list[dict]:
 
 
 def get_dough_surcharge(dough_code: str) -> float:
-    """Restituisce il supplemento dell'impasto; 0.0 se non trovato."""
-    print(f"[Dough] get_dough_surcharge('{dough_code}') — cache: {[d['code'] for d in _dough_cache]}")
-    for dough in _dough_cache:
+    """Restituisce il supplemento dell'impasto; 0.0 se non trovato.
+    Se la cache è vuota (es. worker riavviato) ricarica da file prima di cercare.
+    """
+    cache = _dough_cache if _dough_cache else load_doughs()
+    for dough in cache:
         if dough["code"] == dough_code:
             surcharge = float(dough.get("surcharge", 0.0))
-            print(f"[Dough] Trovato '{dough_code}' → surcharge={surcharge}")
+            print(f"[Dough] {dough_code} → surcharge={surcharge}")
             return surcharge
-    print(f"[Dough] '{dough_code}' non trovato in cache → surcharge=0.0")
+    print(f"[Dough] '{dough_code}' non trovato in cache ({[d['code'] for d in cache]}) → surcharge=0.0")
     return 0.0
 
 
