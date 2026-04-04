@@ -121,13 +121,21 @@ def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]
     for new_item in new_items:
         found = False
         for existing_item in merged:
-            if (
-                existing_item["pizza_name"] == new_item["pizza_name"]
-                and existing_item["pizza_type"] == new_item["pizza_type"]
-                and existing_item.get("add_ingredients", []) == new_item.get("add_ingredients", [])
+            same_name = existing_item["pizza_name"] == new_item["pizza_name"]
+            same_extras = (
+                existing_item.get("add_ingredients", []) == new_item.get("add_ingredients", [])
                 and existing_item.get("remove_ingredients", []) == new_item.get("remove_ingredients", [])
-            ):
-                existing_item["quantity"] += new_item["quantity"]
+            )
+            if same_name and same_extras:
+                if existing_item["pizza_type"] == new_item["pizza_type"]:
+                    # Stesso impasto: accumula quantità
+                    existing_item["quantity"] += new_item["quantity"]
+                else:
+                    # Impasto diverso: sostituisce invece di aggiungere un duplicato.
+                    # Es. capricciosa/classica + capricciosa/integrale → capricciosa/integrale.
+                    existing_item["pizza_type"] = new_item["pizza_type"]
+                    existing_item["dough_type"] = new_item.get("dough_type", "classica")
+                    existing_item["quantity"] = new_item["quantity"]
                 found = True
                 break
 
@@ -1158,7 +1166,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
     dough_items = load_doughs()
 
-    message_lower = request.message.lower()
+    message_lower = unicodedata.normalize("NFC", request.message.lower())
 
     # Carica la sessione prima della chiamata LLM per poter passare lo stato corrente al prompt
     session_statement = select(ConversationSession).where(
