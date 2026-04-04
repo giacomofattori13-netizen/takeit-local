@@ -671,6 +671,11 @@ Rules:
   * "una contadina e una capricciosa integrale" → Contadina dough_type="classica", Capricciosa dough_type="integrale"
   * "una capricciosa, una appia e una margherita impasto integrale" → capricciosa dough_type="classica", appia dough_type="classica", margherita dough_type="integrale"
   * "due margherite integrali e una capricciosa" → margherite dough_type="integrale", capricciosa dough_type="classica"
+- REGOLA IMPASTO GLOBALE: Se il cliente usa un impasto in modo globale per tutte le pizze appena ordinate (es. "tutte napoletane", "tutte integrali", "impasto napoletano per tutte"), assegna quell'impasto a TUTTE le pizze menzionate in quel messaggio.
+- Esempi impasto globale:
+  * "due margherite e una capricciosa tutte napoletane" → Margherita dough_type="napoletana", Capricciosa dough_type="napoletana"
+  * "una marinara e una diavola impasto integrale per tutte" → Marinara dough_type="integrale", Diavola dough_type="integrale"
+  * "tre pizze tutte senza lievito" → tutte dough_type="senza_lievito"
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
