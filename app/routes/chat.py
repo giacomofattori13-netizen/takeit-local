@@ -1160,7 +1160,19 @@ def chat(request: ChatRequest, session: SessionDep):
 
     message_lower = request.message.lower()
 
-    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
+    # Ultimi 2 scambi (4 messaggi) dalla ConversationLog per dare contesto all'LLM
+    recent_logs = session.exec(
+        select(ConversationLog)
+        .where(ConversationLog.session_id == request.session_id)
+        .order_by(ConversationLog.id.desc())
+        .limit(2)
+    ).all()
+    chat_history = []
+    for log in reversed(recent_logs):
+        chat_history.append({"role": "user", "content": log.user_message})
+        chat_history.append({"role": "assistant", "content": log.response_message})
+
+    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items, history=chat_history)
 
     normalized_items = []
 

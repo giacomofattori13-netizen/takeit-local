@@ -838,6 +838,7 @@ def extract_order_from_text(
     message: str,
     menu_items: list[dict],
     dough_items: list[dict] | None = None,
+    history: list[dict] | None = None,
 ) -> dict:
     menu_lines = []
     for item in menu_items:
@@ -858,19 +859,19 @@ def extract_order_from_text(
     print(f"[LLM] menu_items ricevuti: {len(menu_items)}")
     print(f"[LLM] Prime 3 righe menu_text:\n" + "\n".join(menu_lines[:3]) if menu_lines else "[LLM] menu_text vuoto")
 
+    # Ultimi 4 messaggi di storia (2 scambi): sistema sempre presente, storia in mezzo.
+    recent_history = (history or [])[-4:]
+    input_messages = [
+        {"role": "system", "content": build_system_prompt(menu_text, dough_text)},
+        *recent_history,
+        {"role": "user", "content": message},
+    ]
+    print(f"[LLM] Contesto: {len(recent_history)} messaggi di storia + messaggio corrente")
+
     response = client.responses.create(
         model=MODEL_NAME,
         max_output_tokens=512,
-        input=[
-            {
-                "role": "system",
-                "content": build_system_prompt(menu_text, dough_text),
-            },
-            {
-                "role": "user",
-                "content": message,
-            },
-        ],
+        input=input_messages,
     )
 
     raw_text = response.output_text.strip()
