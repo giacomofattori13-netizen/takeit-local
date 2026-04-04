@@ -4,6 +4,7 @@ import time
 import unicodedata
 import uuid
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from typing import Annotated
 
@@ -1084,6 +1085,15 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     new_session_id = str(uuid.uuid4())
     phone = body.test_phone or None
 
+    # Avvia il lookup cliente in parallelo: il phone è già disponibile dal body
+    # prima ancora di creare la sessione DB, così i ~500ms di latenza Base44
+    # si sovrappongono alle operazioni di commit locale.
+    lookup_future = None
+    if phone:
+        print(f"[Customer] Avvio lookup in parallelo per {phone!r}")
+        _executor = ThreadPoolExecutor(max_workers=1)
+        lookup_future = _executor.submit(lookup_customer, phone)
+
     conversation = ConversationSession(
         session_id=new_session_id,
         customer_name=None,
@@ -1100,9 +1110,8 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 
     # Riconoscimento cliente dal numero di telefono
     greeting = get_agent_greeting()
-    if conversation.customer_phone:
-        print(f"[Customer] Avvio lookup per {conversation.customer_phone!r}")
-        customer = lookup_customer(conversation.customer_phone)
+    if lookup_future is not None:
+        customer = lookup_future.result()
         if customer:
             found_name = customer.get("full_name", "").strip()
             if found_name:

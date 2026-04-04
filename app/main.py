@@ -57,6 +57,11 @@ def on_startup():
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "TakeIt local core is running"}
