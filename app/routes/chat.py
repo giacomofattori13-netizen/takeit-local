@@ -543,18 +543,16 @@ def build_assistant_response(
 
     # Order completed
     if state == "completed" and order_saved:
+        name_part = f" {customer_name}" if customer_name else ""
         if _is_mobile_phone(customer_phone):
-            return "Perfetto! Ti arriverà una conferma su WhatsApp. A presto!"
+            return f"Perfetto{name_part}! Ti arriverà una conferma su WhatsApp."
         else:
-            return "Perfetto! Vuoi un riepilogo dell’ordine o ti fidi?"
+            return f"Perfetto{name_part}, a presto!"
 
-    # Full summary before confirmation
+    # Awaiting confirmation — nessun riepilogo, solo chiedi conferma
     if state == "awaiting_confirmation":
         name_part = f" {customer_name}" if customer_name else ""
-        return (
-            f"Perfetto{name_part}! Riepilogo: {items_text}. "
-            f"Ritiro alle {pickup_time}. Confermo?"
-        )
+        return f"Perfetto{name_part}, confermo per le {pickup_time}?"
 
     # Collecting pickup time (ha già il nome, manca solo l’ora)
     if state == "collecting_pickup_time":
