@@ -676,6 +676,8 @@ Rules:
   * "due margherite e una capricciosa tutte napoletane" → Margherita dough_type="napoletana", Capricciosa dough_type="napoletana"
   * "una marinara e una diavola impasto integrale per tutte" → Marinara dough_type="integrale", Diavola dough_type="integrale"
   * "tre pizze tutte senza lievito" → tutte dough_type="senza_lievito"
+  * "una capricciosa, una tirolese e una appia tutte integrali" → Capricciosa dough_type="integrale", Tirolese dough_type="integrale", Appia dough_type="integrale"
+  ATTENZIONE: "tutte [impasto]" significa OGNI pizza elencata nel messaggio, non solo l'ultima.
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
