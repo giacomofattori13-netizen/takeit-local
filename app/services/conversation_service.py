@@ -488,12 +488,19 @@ def lookup_customer(phone: str) -> dict | None:
     """
     Cerca il cliente su Base44 per numero di telefono.
     Scarica tutti i Customer e filtra in Python (Base44 non supporta query params).
+    Restituisce il primo match (o None). Usa lookup_all_customers per i duplicati.
     """
+    matches = _fetch_customers_by_phone(phone)
+    return matches[0] if matches else None
+
+
+def _fetch_customers_by_phone(phone: str) -> list[dict]:
+    """Restituisce TUTTI i record Customer con quel numero di telefono."""
     print(f"[Customer] Inizio lookup per {phone!r}")
     token = os.getenv("BASE44_TOKEN")
     if not token:
         print("[Customer] BASE44_TOKEN non configurato, lookup saltato")
-        return None
+        return []
 
     try:
         print(f"[Customer] GET {BASE44_CUSTOMER_URL}")
@@ -509,23 +516,35 @@ def lookup_customer(phone: str) -> dict | None:
         entities = data.get("entities", []) if isinstance(data, dict) else data
         if not isinstance(entities, list):
             print(f"[Customer] Formato inatteso per entities: {type(entities).__name__}")
-            return None
+            return []
         print(f"[Customer] Totale record: {len(entities)}")
-        # Filtra in Python per phone (normalizzato: solo cifre e +)
         phone_norm = re.sub(r"[\s\-\(\)]", "", phone)
         print(f"[Customer] Cerco phone normalizzato: {phone_norm!r}")
+        matches = []
         for record in entities:
             rec_phone_raw = record.get("phone") or ""
             rec_phone = re.sub(r"[\s\-\(\)]", "", rec_phone_raw)
             print(f"[Customer]   record phone raw={rec_phone_raw!r} norm={rec_phone!r}")
             if rec_phone == phone_norm:
-                print(f"[Customer] Trovato: {record.get('full_name')}")
-                return record
-        print(f"[Customer] Non trovato tra {len(entities)} record")
-        return None
+                matches.append(record)
+        print(f"[Customer] Match trovati: {len(matches)}")
+        return matches
     except Exception as e:
         print(f"[Customer] Errore lookup: {type(e).__name__}: {e}")
-        return None
+        return []
+
+
+def _delete_customer(customer_id: str, auth_kwargs: dict) -> None:
+    try:
+        response = httpx.delete(
+            f"{BASE44_CUSTOMER_URL}/{customer_id}",
+            **auth_kwargs,
+            timeout=10,
+        )
+        response.raise_for_status()
+        print(f"[Customer] Eliminato duplicato id={customer_id}")
+    except Exception as e:
+        print(f"[Customer] Errore eliminazione duplicato id={customer_id}: {type(e).__name__}: {e}")
 
 
 def upsert_customer(
@@ -552,7 +571,69 @@ def upsert_customer(
     )
     today = datetime.date.today().isoformat()
 
-    existing = lookup_customer(phone) if phone else None
+    all_matches = _fetch_customers_by_phone(phone) if phone else []
+
+    # Deduplicazione: se ci sono più record con lo stesso phone, tieni quello
+    # con più ordini e cancella gli altri, sommandone i dati.
+    if len(all_matches) > 1:
+        print(f"[Customer] Trovati {len(all_matches)} duplicati per {phone!r} — unificazione in corso")
+        all_matches.sort(key=lambda r: int(r.get("total_orders") or 0), reverse=True)
+        primary = all_matches[0]
+        duplicates = all_matches[1:]
+
+        # Somma total_orders e total_spend dai duplicati nel primario
+        combined_orders = int(primary.get("total_orders") or 0) + sum(
+            int(r.get("total_orders") or 0) for r in duplicates
+        )
+        combined_spend = round(
+            float(primary.get("total_spend") or 0.0)
+            + sum(float(r.get("total_spend") or 0.0) for r in duplicates),
+            2,
+        )
+        prev_pizzas = primary.get("favorite_pizzas") or []
+        if isinstance(prev_pizzas, str):
+            prev_pizzas = [p.strip() for p in prev_pizzas.split(",") if p.strip()]
+        for dup in duplicates:
+            dup_pizzas = dup.get("favorite_pizzas") or []
+            if isinstance(dup_pizzas, str):
+                dup_pizzas = [p.strip() for p in dup_pizzas.split(",") if p.strip()]
+            for p in dup_pizzas:
+                if p not in prev_pizzas:
+                    prev_pizzas.append(p)
+
+        # Aggiorna il primario con i dati unificati
+        combined_avg = round(combined_spend / combined_orders, 2) if combined_orders else 0.0
+        try:
+            merge_payload = {
+                "total_orders": combined_orders,
+                "total_spend": combined_spend,
+                "average_spend": combined_avg,
+                "favorite_pizzas": prev_pizzas,
+                "is_repeat": True,
+            }
+            resp = httpx.put(
+                f"{BASE44_CUSTOMER_URL}/{primary['id']}",
+                **auth_kwargs,
+                json=merge_payload,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            print(f"[Customer] Primario aggiornato dopo merge: ordini={combined_orders} spend={combined_spend}")
+        except Exception as e:
+            print(f"[Customer] Errore merge primario: {type(e).__name__}: {e}")
+
+        # Cancella i duplicati
+        for dup in duplicates:
+            _delete_customer(dup["id"], auth_kwargs)
+
+        # Usa il primario (aggiornato) come existing
+        primary["total_orders"] = combined_orders
+        primary["total_spend"] = combined_spend
+        primary["average_spend"] = combined_avg
+        primary["favorite_pizzas"] = prev_pizzas
+        existing = primary
+    else:
+        existing = all_matches[0] if all_matches else None
 
     if existing:
         customer_id = existing.get("id")
