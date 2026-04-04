@@ -661,7 +661,9 @@ Rules:
 - Each pizza in the MENU is a standalone product. Gluten-free versions have "(SG)" in their name and are distinct products, not variants.
 - dough_type MUST be one of the exact codes listed in DOUGH TYPES above (e.g. "classica", "integrale", "napoletana", "pinsa_romana", "senza_lievito").
 - NEVER use "Normale", "Standard", "Normal", or any value not in the DOUGH TYPES list.
-- If the user does NOT specify the dough, dough_type MUST be "classica".
+- If the user does NOT specify the dough for a pizza, dough_type MUST be "classica".
+- When the user specifies a dough for a specific pizza, assign it ONLY to that pizza. All other pizzas in the same message that have no dough specified must get dough_type "classica". NEVER propagate a dough type from one pizza to another.
+- Example: "una capricciosa, una appia e una margherita impasto integrale" → capricciosa dough_type="classica", appia dough_type="classica", margherita dough_type="integrale".
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
