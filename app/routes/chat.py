@@ -1534,7 +1534,7 @@ def chat(request: ChatRequest, session: SessionDep):
             )
             print(f"[Fuzzy] '{item['pizza_name']}' → '{fuzzy_item.name if fuzzy_item else None}' sim={similarity:.2f}")
 
-            if fuzzy_item and similarity >= 0.80:
+            if fuzzy_item and similarity >= 0.85:
                 # Auto-accetta: rinomina e riconvalida
                 print(f"[Fuzzy] Auto-accettato '{item['pizza_name']}' → '{fuzzy_item.name}'")
                 item["pizza_name"] = fuzzy_item.name
@@ -1547,7 +1547,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
                 continue
 
-            if fuzzy_item and similarity >= 0.60:
+            if fuzzy_item and similarity >= 0.75:
                 # Chiedi conferma
                 missing_messages.append(f"Vuoi dire la {fuzzy_item.name}?")
                 new_suggestions.append(fuzzy_item.name)
