@@ -199,47 +199,6 @@ def is_dough_available(dough_code: str) -> bool:
     return True  # impasti non elencati sono considerati validi (es. default classica)
 
 
-_DOUGH_WORD_TO_CODE: dict[str, str] = {
-    "integrale": "integrale",
-    "integrali": "integrale",
-    "napoletana": "napoletana",
-    "napoletane": "napoletana",
-    "pinsa": "pinsa_romana",
-    "pinsa romana": "pinsa_romana",
-    "senza lievito": "senza_lievito",
-}
-
-# Pattern che cattura i modificatori globali d'impasto.
-# Gruppo 1: impasto (es. "integrali", "napoletane", "pinsa", "senza lievito")
-_GLOBAL_DOUGH_PATTERN = re.compile(
-    r"\b(?:tutte(?:\s+e\s+due)?|entrambe)\s+"
-    r"(integrali|integrale|napoletane|napoletana|pinsa(?:\s+romana)?|senza\s+lievito)"
-    r"\b",
-    re.IGNORECASE,
-)
-
-
-def preprocess_message(text: str) -> tuple[str, str | None]:
-    """
-    Cerca frasi di impasto globale (es. 'tutte e due integrali', 'entrambe napoletane').
-    Restituisce (testo_pulito, dough_code | None).
-    Il testo_pulito ha la frase modificatrice rimossa così l'LLM non la scambia per un nome pizza.
-    """
-    match = _GLOBAL_DOUGH_PATTERN.search(text)
-    if not match:
-        return text, None
-
-    raw_dough = match.group(1).strip().lower()
-    dough_code = _DOUGH_WORD_TO_CODE.get(raw_dough)
-    if not dough_code:
-        return text, None
-
-    cleaned = _GLOBAL_DOUGH_PATTERN.sub("", text).strip(" ,.")
-    print(f"[Preprocess] Trovato modificatore globale: {match.group(0)!r} → dough_code={dough_code!r}")
-    print(f"[Preprocess] Testo originale: {text!r} → pulito: {cleaned!r}")
-    return cleaned, dough_code
-
-
 def get_next_order_number() -> int:
     """
     Restituisce il prossimo numero ordine progressivo: conta gli Order su Base44 e aggiunge 1.
@@ -828,15 +787,7 @@ Rules:
   * "tre pizze tutte senza lievito" → tutte dough_type="senza_lievito"
   * "una capricciosa, una tirolese e una appia tutte integrali" → Capricciosa dough_type="integrale", Tirolese dough_type="integrale", Appia dough_type="integrale"
   ATTENZIONE: "tutte [impasto]" significa OGNI pizza elencata nel messaggio, non solo l'ultima.
-- REGOLA ASSOLUTA — MODIFICATORI DI IMPASTO GLOBALE: Le seguenti frasi NON sono mai nomi di pizze. Sono modificatori di impasto che si applicano a TUTTE le pizze già estratte nel messaggio corrente. Non creare mai un item con queste frasi come pizza_name. Non estrarre item aggiuntivi per queste frasi. Invece, aggiorna il dough_type di tutti gli item del messaggio:
-  * "tutte integrali" → dough_type="integrale" per tutti gli item
-  * "tutte e due integrali" → dough_type="integrale" per tutti gli item
-  * "tutte napoletane" → dough_type="napoletana" per tutti gli item
-  * "tutte pinsa" / "tutte in pinsa" → dough_type="pinsa_romana" per tutti gli item
-  * "tutte senza lievito" → dough_type="senza_lievito" per tutti gli item
-  * "entrambe integrali" / "entrambe napoletane" / "entrambe [impasto]" → dough_type corrispondente per tutti gli item
-  * "tutte con impasto [X]" / "impasto [X] per tutte" → dough_type=X per tutti gli item
-- ESEMPIO CRITICO: input="una margherita e una baita tutte e due integrali" → output=[{{"pizza_name": "Margherita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}}, {{"pizza_name": "Baita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}}]. MAI aggiungere un terzo item chiamato "Integrali" o "Tutte e due integrali".
+- IMPORTANTE: le parole "tutte", "entrambe", "tutti" quando seguite da un tipo di impasto (integrale, napoletana, pinsa, senza lievito) NON sono nomi di pizze. Applica quell'impasto a tutte le pizze estratte in questo messaggio e non aggiungere nessun item extra. Esempio: "una margherita e una baita tutte e due integrali" → estrai solo Margherita e Baita entrambe con dough_type="integrale", senza aggiungere nessun terzo item.
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
