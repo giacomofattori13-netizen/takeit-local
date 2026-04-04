@@ -795,7 +795,7 @@ Rules:
   * "tutte senza lievito" → dough_type="senza_lievito" per tutti gli item
   * "entrambe integrali" / "entrambe napoletane" / "entrambe [impasto]" → dough_type corrispondente per tutti gli item
   * "tutte con impasto [X]" / "impasto [X] per tutte" → dough_type=X per tutti gli item
-- ESEMPIO CRITICO: input="una margherita e una baita tutte e due integrali" → output=[{"pizza_name": "Margherita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}, {"pizza_name": "Baita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}]. MAI aggiungere un terzo item chiamato "Integrali" o "Tutte e due integrali".
+- ESEMPIO CRITICO: input="una margherita e una baita tutte e due integrali" → output=[{{"pizza_name": "Margherita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}}, {{"pizza_name": "Baita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}}]. MAI aggiungere un terzo item chiamato "Integrali" o "Tutte e due integrali".
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
