@@ -745,6 +745,26 @@ def infer_quantity_from_message(message: str) -> int:
 
     return 1
 
+_ITALIAN_QTY = {
+    "un": 1, "una": 1, "uno": 1, "due": 2, "tre": 3,
+    "quattro": 4, "cinque": 5, "sei": 6, "sette": 7,
+    "otto": 8, "nove": 9, "dieci": 10,
+}
+
+def _parse_explicit_quantity(message: str, pizza_name: str) -> int:
+    """Ritorna la quantità esplicita per una pizza nel messaggio, default 1."""
+    if not pizza_name:
+        return 1
+    msg = unicodedata.normalize("NFC", re.sub(r"\b\d{1,2}:\d{2}\b", "", message.lower()))
+    prefix = re.escape(pizza_name.lower()[:5])
+    nums = "|".join(re.escape(k) for k in _ITALIAN_QTY)
+    m = re.search(rf"\b({nums}|\d+)\s+\w*{prefix}", msg)
+    if m:
+        q = m.group(1)
+        return int(q) if q.isdigit() else _ITALIAN_QTY.get(q, 1)
+    return 1
+
+
 def extract_ingredient_changes(message: str) -> tuple[list[str], list[str]]:
     message_lower = message.lower()
 
@@ -1335,6 +1355,12 @@ def chat(request: ChatRequest, session: SessionDep):
         history=chat_history,
         current_state=conversation.state,
     )
+
+    # Sovrascrivi le quantità con il valore esplicito dal messaggio corrente.
+    # L'LLM tende ad accumulare quantità dalla storia; qui usiamo solo ciò che
+    # il cliente ha detto adesso: se non c'è un numero esplicito, quantity=1.
+    for _item in extracted.get("items", []):
+        _item["quantity"] = _parse_explicit_quantity(request.message, _item.get("pizza_name", ""))
 
     normalized_items = []
 
