@@ -1189,6 +1189,134 @@ def chat(request: ChatRequest, session: SessionDep):
         session.commit()
         session.refresh(conversation)
 
+    # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
+    # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.
+    # La risposta del cliente è gestita con puro Python: sì/no/chiedi di nuovo.
+    if conversation.state == "awaiting_confirmation":
+        _confirm_words = {"si", "sì", "ok", "va bene", "confermo", "certo", "esatto", "perfetto", "yes"}
+        _cancel_words  = {"no", "annulla", "cancella", "stop"}
+        _is_confirm = any(w in message_lower for w in _confirm_words)
+        _is_cancel  = any(w in message_lower for w in _cancel_words)
+
+        existing_items = json.loads(conversation.items_json)
+        merged_order = {
+            "customer_name": conversation.customer_name,
+            "pickup_time":   conversation.pickup_time,
+            "items":         existing_items,
+        }
+
+        if _is_confirm and not conversation.completed:
+            # Salva ordine
+            order = Order(
+                customer_name=merged_order["customer_name"],
+                pickup_time=merged_order["pickup_time"],
+                status="new",
+            )
+            session.add(order)
+            session.commit()
+            session.refresh(order)
+
+            for _item in merged_order["items"]:
+                session.add(OrderItem(
+                    order_id=order.id,
+                    pizza_name=_item["pizza_name"],
+                    pizza_type=_item["pizza_type"],
+                    quantity=_item["quantity"],
+                    add_ingredients_json=json.dumps(_item.get("add_ingredients", []), ensure_ascii=False),
+                    remove_ingredients_json=json.dumps(_item.get("remove_ingredients", []), ensure_ascii=False),
+                ))
+            session.commit()
+
+            conversation.completed = True
+            conversation.state = "completed"
+            session.add(conversation)
+            session.commit()
+
+            # Pricing e salvataggio Base44
+            enriched_items = []
+            for _item in merged_order["items"]:
+                _menu_item = session.exec(
+                    select(MenuItem).where(
+                        MenuItem.name == _item["pizza_name"],
+                        MenuItem.pizza_type == _item["pizza_type"],
+                    )
+                ).first()
+                _base = round(_menu_item.price, 2) if _menu_item else 0.0
+                _is_sg = "(SG)" in _item.get("pizza_name", "")
+                _dough_code = _item.get("dough_type", "classica")
+                _surcharge = 0.0 if _is_sg else get_dough_surcharge(_dough_code)
+                _extras = round(_surcharge + len(_item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
+                _total = round((_base + _extras) * _item["quantity"], 2)
+                enriched_items.append({**_item, "base_price": _base, "extras_price": _extras, "total_price": _total})
+
+            save_order_to_base44(
+                customer_name=merged_order["customer_name"],
+                customer_phone=conversation.customer_phone,
+                pickup_time=merged_order["pickup_time"],
+                order_number=get_next_order_number(),
+                ai_confidence=0.95,
+                items=enriched_items,
+            )
+            pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
+            order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
+            upsert_customer(
+                full_name=merged_order["customer_name"],
+                phone=conversation.customer_phone,
+                pizzas=pizza_names,
+                total_amount=order_total,
+            )
+
+            name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
+            _resp = (
+                f"Perfetto{name_part}! Ti arriverà una conferma su WhatsApp."
+                if _is_mobile_phone(conversation.customer_phone)
+                else f"Perfetto{name_part}, a presto!"
+            )
+            _extracted_stub = {"intent": "confirm_order", "items": [], "customer_name": None, "pickup_time": None}
+
+        elif _is_cancel:
+            conversation.items_json = "[]"
+            conversation.customer_name = None
+            conversation.pickup_time = None
+            conversation.state = "collecting_items"
+            conversation.completed = False
+            session.add(conversation)
+            session.commit()
+            merged_order["items"] = []
+            _resp = "Va bene, ordine annullato. Dimmi pure se vuoi ricominciare."
+            _extracted_stub = {"intent": "cancel_order", "items": [], "customer_name": None, "pickup_time": None}
+
+        else:
+            # Messaggio ambiguo — richiedi conferma di nuovo
+            name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
+            _resp = f"Perfetto{name_part}, confermo per le {merged_order.get('pickup_time')}?"
+            _extracted_stub = {"intent": "unknown", "items": [], "customer_name": None, "pickup_time": None}
+
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps(_extracted_stub, ensure_ascii=False),
+            merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+            response_message=_resp,
+            valid=_is_confirm,
+            missing_items_json="[]",
+            state=conversation.state,
+        ))
+        session.commit()
+        print(f"[Confirm] fast-path: confirm={_is_confirm} cancel={_is_cancel} → {_resp!r}")
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order=_extracted_stub,
+            merged_order=merged_order,
+            valid=_is_confirm,
+            missing_items=[],
+            response_message=_resp,
+            order_id=order.id if _is_confirm else None,
+            state=conversation.state,
+        )
+    # ── FINE FAST PATH ────────────────────────────────────────────────────────
+
     # Ultimi 2 scambi (4 messaggi) dalla ConversationLog per dare contesto all'LLM
     recent_logs = session.exec(
         select(ConversationLog)
