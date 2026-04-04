@@ -1203,6 +1203,7 @@ def chat(request: ChatRequest, session: SessionDep):
             "items":         existing_items,
         }
 
+        order = None
         if _is_confirm and not conversation.completed:
             # Salva ordine
             order = Order(
@@ -1310,7 +1311,7 @@ def chat(request: ChatRequest, session: SessionDep):
             valid=_is_confirm,
             missing_items=[],
             response_message=_resp,
-            order_id=order.id if _is_confirm else None,
+            order_id=order.id if order is not None else None,
             state=conversation.state,
         )
     # ── FINE FAST PATH ────────────────────────────────────────────────────────
