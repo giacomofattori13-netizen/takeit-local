@@ -1,5 +1,6 @@
 import json
 import random
+import unicodedata
 import uuid
 import re
 
@@ -388,6 +389,51 @@ def split_valid_and_invalid_items(
             valid_items.append(item)
 
     return valid_items, invalid_items, missing_messages
+
+_WORD_TO_DIGIT = {
+    "uno": "1", "una": "1", "due": "2", "tre": "3", "quattro": "4",
+    "cinque": "5", "sei": "6", "sette": "7", "otto": "8", "nove": "9",
+}
+
+
+def normalize_pizza_name(name: str) -> str:
+    """Minuscolo → rimuovi accenti → numeri in lettere → cifre."""
+    s = name.lower().strip()
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    for word, digit in _WORD_TO_DIGIT.items():
+        s = re.sub(rf"\b{word}\b", digit, s)
+    return s
+
+
+def fuzzy_find_pizza(
+    requested_name: str,
+    pizza_type: str,
+    db_session: "Session",
+) -> tuple["MenuItem | None", float]:
+    """
+    Cerca la pizza più simile nel DB usando distanza di Levenshtein (SequenceMatcher).
+    Priorità: stessa pizza_type; fallback: qualsiasi tipo.
+    Ritorna (menu_item, similarity) dove similarity è 0.0–1.0.
+    """
+    norm_req = normalize_pizza_name(requested_name)
+    all_items = db_session.exec(select(MenuItem).where(MenuItem.available == True)).all()  # noqa: E712
+
+    best_item: "MenuItem | None" = None
+    best_sim = 0.0
+
+    for mi in all_items:
+        norm_mi = normalize_pizza_name(mi.name)
+        sim = SequenceMatcher(None, norm_req, norm_mi).ratio()
+        # Preferisci stesso pizza_type con un piccolo boost
+        if mi.pizza_type == pizza_type:
+            sim = min(sim + 0.02, 1.0)
+        if sim > best_sim:
+            best_sim = sim
+            best_item = mi
+
+    return best_item, best_sim
+
 
 _DONE_SIGNALS = {
     "è tutto", "e' tutto", "basta così", "basta cosi", "basta",
@@ -1434,18 +1480,44 @@ def chat(request: ChatRequest, session: SessionDep):
 
         if not menu_item or not menu_item.available:
             if is_custom:
-                # 👉 VALIDAZIONE BASE (Margherita)
-                base_statement = select(MenuItem).where(
-                    MenuItem.name == item["pizza_name"],
-                    MenuItem.pizza_type == item["pizza_type"],
-                )
-                base_item = session.exec(base_statement).first()
-
+                # VALIDAZIONE BASE: cerca la pizza base senza varianti
+                base_item = session.exec(
+                    select(MenuItem).where(
+                        MenuItem.name == item["pizza_name"],
+                        MenuItem.pizza_type == item["pizza_type"],
+                    )
+                ).first()
                 if base_item and base_item.available:
                     valid_items.append(item)
                     continue
 
-            # 👉 davvero non valida
+            # Fuzzy matching sul nome
+            fuzzy_item, similarity = fuzzy_find_pizza(
+                item["pizza_name"], item["pizza_type"], session
+            )
+            print(f"[Fuzzy] '{item['pizza_name']}' → '{fuzzy_item.name if fuzzy_item else None}' sim={similarity:.2f}")
+
+            if fuzzy_item and similarity >= 0.80:
+                # Auto-accetta: rinomina e riconvalida
+                print(f"[Fuzzy] Auto-accettato '{item['pizza_name']}' → '{fuzzy_item.name}'")
+                item["pizza_name"] = fuzzy_item.name
+                item["pizza_type"] = fuzzy_item.pizza_type
+                dough_code = item.get("dough_type", "classica")
+                if is_dough_available(dough_code):
+                    valid_items.append(item)
+                else:
+                    invalid_items.append(item)
+                    missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
+                continue
+
+            if fuzzy_item and similarity >= 0.60:
+                # Chiedi conferma
+                missing_messages.append(f"Vuoi dire la {fuzzy_item.name}?")
+                new_suggestions.append(fuzzy_item.name)
+                invalid_items.append(item)
+                continue
+
+            # Sotto 60%: pizza non esiste
             invalid_items.append(item)
             message, suggestions = build_missing_item_message(session, item)
             missing_messages.append(message)
