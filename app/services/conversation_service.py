@@ -526,10 +526,16 @@ def lookup_customer(phone: str) -> dict | None:
         return None
 
 
-def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> None:
+def upsert_customer(
+    full_name: str,
+    phone: str | None,
+    pizzas: list[str],
+    total_amount: float = 0.0,
+) -> None:
     """
     Crea o aggiorna il cliente su Base44 dopo un ordine confermato.
-    Campi: full_name, phone, last_order_date, total_orders, favorite_pizzas.
+    Aggiorna: total_orders, last_order_date, favorite_pizzas, total_spend, average_spend.
+    Crea con: is_repeat=False.
     """
     api_key = os.getenv("BASE44_API_KEY")
     token = os.getenv("BASE44_TOKEN")
@@ -548,18 +554,26 @@ def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> Non
 
     if existing:
         customer_id = existing.get("id")
+
         # Merge favorite_pizzas senza duplicati
         prev = existing.get("favorite_pizzas") or []
         if isinstance(prev, str):
             prev = [p.strip() for p in prev.split(",") if p.strip()]
         merged_pizzas = list(dict.fromkeys(prev + [p for p in pizzas if p not in prev]))
 
+        new_total_orders = int(existing.get("total_orders") or 0) + 1
+        new_total_spend = round(float(existing.get("total_spend") or 0.0) + total_amount, 2)
+        new_average_spend = round(new_total_spend / new_total_orders, 2)
+
         payload = {
             "full_name": full_name,
             "phone": phone,
             "last_order_date": today,
-            "total_orders": int(existing.get("total_orders") or 0) + 1,
+            "total_orders": new_total_orders,
             "favorite_pizzas": merged_pizzas,
+            "total_spend": new_total_spend,
+            "average_spend": new_average_spend,
+            "is_repeat": True,
         }
         try:
             response = httpx.put(
@@ -569,7 +583,10 @@ def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> Non
                 timeout=10,
             )
             response.raise_for_status()
-            print(f"[Customer] Aggiornato: {full_name} (ordini: {payload['total_orders']})")
+            print(
+                f"[Customer] Aggiornato: {full_name} | ordini={new_total_orders} "
+                f"total_spend={new_total_spend} avg={new_average_spend}"
+            )
         except Exception as e:
             print(f"[Customer] Errore update: {type(e).__name__}: {e}")
     else:
@@ -579,6 +596,9 @@ def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> Non
             "last_order_date": today,
             "total_orders": 1,
             "favorite_pizzas": pizzas,
+            "total_spend": round(total_amount, 2),
+            "average_spend": round(total_amount, 2),
+            "is_repeat": False,
         }
         try:
             response = httpx.post(
@@ -588,7 +608,7 @@ def upsert_customer(full_name: str, phone: str | None, pizzas: list[str]) -> Non
                 timeout=10,
             )
             response.raise_for_status()
-            print(f"[Customer] Creato: {full_name}")
+            print(f"[Customer] Creato: {full_name} | total_spend={payload['total_spend']}")
         except Exception as e:
             print(f"[Customer] Errore create: {type(e).__name__}: {e}")
 

@@ -1674,10 +1674,12 @@ def chat(request: ChatRequest, session: SessionDep):
         pizza_names = list(dict.fromkeys(
             item["pizza_name"] for item in merged_order["items"]
         ))
+        order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
         upsert_customer(
             full_name=merged_order["customer_name"],
             phone=conversation.customer_phone,
             pizzas=pizza_names,
+            total_amount=order_total,
         )
 
     response_message = build_assistant_response(
