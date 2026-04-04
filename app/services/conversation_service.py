@@ -798,6 +798,7 @@ Rules:
 - Never drop an explicitly requested pizza just because it is not present in the MENU.
 - If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request even if it is not in the MENU.
 - If no pizza is clearly mentioned, return an empty items array.
+- REGOLA CRITICA SULLE QUANTITÀ: Estrai SOLO le pizze e le quantità menzionate nel MESSAGGIO CORRENTE. NON sommare, NON riestrarre, NON accumulare item dalla storia della conversazione. La storia è solo contesto — gli item dell'ordine vengono gestiti dal backend.
 - pickup_time should be a simple string like "20:30" when present.
 - customer_name should be extracted when clearly present.
 - Each item must always include "add_ingredients" and "remove_ingredients".
@@ -839,6 +840,7 @@ def extract_order_from_text(
     menu_items: list[dict],
     dough_items: list[dict] | None = None,
     history: list[dict] | None = None,
+    current_state: str | None = None,
 ) -> dict:
     menu_lines = []
     for item in menu_items:
@@ -861,12 +863,23 @@ def extract_order_from_text(
 
     # Ultimi 4 messaggi di storia (2 scambi): sistema sempre presente, storia in mezzo.
     recent_history = (history or [])[-4:]
+
+    # Istruzione sullo stato corrente: aiuta l'LLM a non re-estrarre item dalla storia
+    state_instruction = ""
+    if current_state == "awaiting_confirmation":
+        state_instruction = (
+            "\n\nCURRENT STATE: awaiting_confirmation — il cliente sta confermando l'ordine. "
+            "Se dice sì/ok/confermo/va bene/perfetto, rispondi con "
+            "{\"intent\": \"confirmation\", \"items\": [], \"customer_name\": null, \"pickup_time\": null}. "
+            "NON re-estrarre item dalla storia della conversazione."
+        )
+
     input_messages = [
-        {"role": "system", "content": build_system_prompt(menu_text, dough_text)},
+        {"role": "system", "content": build_system_prompt(menu_text, dough_text) + state_instruction},
         *recent_history,
         {"role": "user", "content": message},
     ]
-    print(f"[LLM] Contesto: {len(recent_history)} messaggi di storia + messaggio corrente")
+    print(f"[LLM] Contesto: stato={current_state!r}, storia={len(recent_history)} msg")
 
     response = client.responses.create(
         model=MODEL_NAME,

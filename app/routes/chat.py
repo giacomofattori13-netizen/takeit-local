@@ -1160,6 +1160,25 @@ def chat(request: ChatRequest, session: SessionDep):
 
     message_lower = request.message.lower()
 
+    # Carica la sessione prima della chiamata LLM per poter passare lo stato corrente al prompt
+    session_statement = select(ConversationSession).where(
+        ConversationSession.session_id == request.session_id
+    )
+    conversation = session.exec(session_statement).first()
+    if not conversation:
+        conversation = ConversationSession(
+            session_id=request.session_id,
+            customer_name=None,
+            pickup_time=None,
+            items_json="[]",
+            suggested_items_json="[]",
+            state="collecting_items",
+            completed=False,
+        )
+        session.add(conversation)
+        session.commit()
+        session.refresh(conversation)
+
     # Ultimi 2 scambi (4 messaggi) dalla ConversationLog per dare contesto all'LLM
     recent_logs = session.exec(
         select(ConversationLog)
@@ -1172,7 +1191,13 @@ def chat(request: ChatRequest, session: SessionDep):
         chat_history.append({"role": "user", "content": log.user_message})
         chat_history.append({"role": "assistant", "content": log.response_message})
 
-    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items, history=chat_history)
+    extracted = extract_order_from_text(
+        request.message,
+        menu_items_for_llm,
+        dough_items,
+        history=chat_history,
+        current_state=conversation.state,
+    )
 
     normalized_items = []
 
@@ -1262,25 +1287,6 @@ def chat(request: ChatRequest, session: SessionDep):
     if extracted.get("items") and extracted.get("intent") == "unknown":
         extracted["intent"] = "add_items"
 
-    session_statement = select(ConversationSession).where(
-        ConversationSession.session_id == request.session_id
-    )
-    conversation = session.exec(session_statement).first()
-
-    if not conversation:
-        conversation = ConversationSession(
-            session_id=request.session_id,
-            customer_name=None,
-            pickup_time=None,
-            items_json="[]",
-            suggested_items_json="[]",
-            state="collecting_items",
-            completed=False,
-        )
-        session.add(conversation)
-        session.commit()
-        session.refresh(conversation)
-
     # Gestione conferma/rifiuto identità cliente riconosciuto
     _pending = conversation.pending_customer_name
     if _pending and not conversation.customer_name:
@@ -1337,7 +1343,9 @@ def chat(request: ChatRequest, session: SessionDep):
 
     is_simple_confirmation = (
         any(marker in message_lower for marker in confirmation_markers)
-        and not extracted.get("items")
+        # In awaiting_confirmation lo stato è già noto: ignora eventuali item
+        # re-estratti dall'LLM per effetto del contesto della storia.
+        and (not extracted.get("items") or conversation.state == "awaiting_confirmation")
         and not extracted.get("customer_name")
         and not extracted.get("pickup_time")
     )
