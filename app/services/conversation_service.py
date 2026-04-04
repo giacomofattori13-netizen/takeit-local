@@ -841,12 +841,9 @@ def extract_order_from_text(
 ) -> dict:
     menu_lines = []
     for item in menu_items:
-        ingredients_text = ", ".join(item.get("ingredients", [])) or "n.d."
-        line = (
-            f'- {item["name"]} | impasto: {item.get("dough_type", "classica")} | '
-            f'categoria: {item["category"]} | prezzo: €{item["price"]} | '
-            f'ingredienti: {ingredients_text}'
-        )
+        # Ingredienti esclusi dal prompt per ridurre i token (~1800 token risparmiati su 78 pizze).
+        # L'LLM non ha bisogno della lista ingredienti per estrarre nome, quantità e modifiche.
+        line = f'- {item["name"]} | {item["category"]} | €{item["price"]}'
         menu_lines.append(line)
 
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
@@ -863,6 +860,7 @@ def extract_order_from_text(
 
     response = client.responses.create(
         model=MODEL_NAME,
+        max_output_tokens=512,
         input=[
             {
                 "role": "system",
