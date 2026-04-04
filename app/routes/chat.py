@@ -27,6 +27,7 @@ from app.services.conversation_service import (
     load_menu_from_base44,
     load_doughs,
     save_order_to_base44,
+    get_next_order_number,
     get_dough_surcharge,
     is_dough_available,
     INGREDIENT_EXTRA_PRICE,
@@ -1664,7 +1665,7 @@ def chat(request: ChatRequest, session: SessionDep):
             customer_name=merged_order["customer_name"],
             customer_phone=conversation.customer_phone,
             pickup_time=merged_order["pickup_time"],
-            order_number=int(time.time()),
+            order_number=get_next_order_number(),
             ai_confidence=ai_confidence,
             items=enriched_items,
         )

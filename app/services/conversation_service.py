@@ -199,6 +199,34 @@ def is_dough_available(dough_code: str) -> bool:
     return True  # impasti non elencati sono considerati validi (es. default classica)
 
 
+def get_next_order_number() -> int:
+    """
+    Restituisce il prossimo numero ordine progressivo: conta gli Order su Base44 e aggiunge 1.
+    Fallback: numero random a 4 cifre.
+    """
+    import random as _random
+    token = os.getenv("BASE44_TOKEN")
+    if token:
+        try:
+            response = httpx.get(
+                BASE44_ORDER_URL,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            entities = data.get("entities", []) if isinstance(data, dict) else data
+            count = len(entities) if isinstance(entities, list) else 0
+            next_num = count + 1
+            print(f"[Order] Ordini esistenti: {count} → prossimo numero: {next_num}")
+            return next_num
+        except Exception as e:
+            print(f"[Order] Errore conteggio ordini: {type(e).__name__}: {e} → uso fallback random")
+    fallback = _random.randint(1000, 9999)
+    print(f"[Order] Fallback numero ordine random: {fallback}")
+    return fallback
+
+
 def save_order_to_base44(
     customer_name: str,
     customer_phone: str | None,
