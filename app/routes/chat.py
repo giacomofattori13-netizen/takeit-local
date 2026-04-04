@@ -29,10 +29,12 @@ from app.services.conversation_service import (
     load_doughs,
     save_order_to_base44,
     get_next_order_number,
+    preprocess_message,
     get_dough_surcharge,
     is_dough_available,
     INGREDIENT_EXTRA_PRICE,
     _PIZZA_TYPE_TO_DOUGH,
+    _DOUGH_TO_PIZZA_TYPE,
     get_agent_greeting,
     validate_pickup_time,
     lookup_customer,
@@ -1199,13 +1201,25 @@ def chat(request: ChatRequest, session: SessionDep):
         chat_history.append({"role": "user", "content": log.user_message})
         chat_history.append({"role": "assistant", "content": log.response_message})
 
+    # Pre-processing: rimuove frasi di impasto globale prima della chiamata LLM
+    # così l'LLM non le interpreta come nomi di pizza.
+    preprocessed_message, global_dough_override = preprocess_message(request.message)
+
     extracted = extract_order_from_text(
-        request.message,
+        preprocessed_message,
         menu_items_for_llm,
         dough_items,
         history=chat_history,
         current_state=conversation.state,
     )
+
+    # Applica l'impasto globale a tutti gli item estratti
+    if global_dough_override:
+        pizza_type_override = _DOUGH_TO_PIZZA_TYPE.get(global_dough_override, "Normale")
+        for item in extracted.get("items", []):
+            item["dough_type"] = global_dough_override
+            item["pizza_type"] = pizza_type_override
+        print(f"[Preprocess] dough_override={global_dough_override!r} applicato a {len(extracted.get('items', []))} item")
 
     normalized_items = []
 

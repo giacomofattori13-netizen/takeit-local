@@ -199,6 +199,47 @@ def is_dough_available(dough_code: str) -> bool:
     return True  # impasti non elencati sono considerati validi (es. default classica)
 
 
+_DOUGH_WORD_TO_CODE: dict[str, str] = {
+    "integrale": "integrale",
+    "integrali": "integrale",
+    "napoletana": "napoletana",
+    "napoletane": "napoletana",
+    "pinsa": "pinsa_romana",
+    "pinsa romana": "pinsa_romana",
+    "senza lievito": "senza_lievito",
+}
+
+# Pattern che cattura i modificatori globali d'impasto.
+# Gruppo 1: impasto (es. "integrali", "napoletane", "pinsa", "senza lievito")
+_GLOBAL_DOUGH_PATTERN = re.compile(
+    r"\b(?:tutte(?:\s+e\s+due)?|entrambe)\s+"
+    r"(integrali|integrale|napoletane|napoletana|pinsa(?:\s+romana)?|senza\s+lievito)"
+    r"\b",
+    re.IGNORECASE,
+)
+
+
+def preprocess_message(text: str) -> tuple[str, str | None]:
+    """
+    Cerca frasi di impasto globale (es. 'tutte e due integrali', 'entrambe napoletane').
+    Restituisce (testo_pulito, dough_code | None).
+    Il testo_pulito ha la frase modificatrice rimossa così l'LLM non la scambia per un nome pizza.
+    """
+    match = _GLOBAL_DOUGH_PATTERN.search(text)
+    if not match:
+        return text, None
+
+    raw_dough = match.group(1).strip().lower()
+    dough_code = _DOUGH_WORD_TO_CODE.get(raw_dough)
+    if not dough_code:
+        return text, None
+
+    cleaned = _GLOBAL_DOUGH_PATTERN.sub("", text).strip(" ,.")
+    print(f"[Preprocess] Trovato modificatore globale: {match.group(0)!r} → dough_code={dough_code!r}")
+    print(f"[Preprocess] Testo originale: {text!r} → pulito: {cleaned!r}")
+    return cleaned, dough_code
+
+
 def get_next_order_number() -> int:
     """
     Restituisce il prossimo numero ordine progressivo: conta gli Order su Base44 e aggiunge 1.
