@@ -787,7 +787,15 @@ Rules:
   * "tre pizze tutte senza lievito" → tutte dough_type="senza_lievito"
   * "una capricciosa, una tirolese e una appia tutte integrali" → Capricciosa dough_type="integrale", Tirolese dough_type="integrale", Appia dough_type="integrale"
   ATTENZIONE: "tutte [impasto]" significa OGNI pizza elencata nel messaggio, non solo l'ultima.
-- IMPORTANTE: frasi come "tutte integrali", "tutte e due integrali", "entrambe napoletane", "tutte napoletane", "tutte senza lievito" NON sono nomi di pizze. Sono modificatori di impasto da applicare a TUTTE le pizze del messaggio. Non inserire mai "Integrali", "Napoletane" o simili come pizza_name.
+- REGOLA ASSOLUTA — MODIFICATORI DI IMPASTO GLOBALE: Le seguenti frasi NON sono mai nomi di pizze. Sono modificatori di impasto che si applicano a TUTTE le pizze già estratte nel messaggio corrente. Non creare mai un item con queste frasi come pizza_name. Non estrarre item aggiuntivi per queste frasi. Invece, aggiorna il dough_type di tutti gli item del messaggio:
+  * "tutte integrali" → dough_type="integrale" per tutti gli item
+  * "tutte e due integrali" → dough_type="integrale" per tutti gli item
+  * "tutte napoletane" → dough_type="napoletana" per tutti gli item
+  * "tutte pinsa" / "tutte in pinsa" → dough_type="pinsa_romana" per tutti gli item
+  * "tutte senza lievito" → dough_type="senza_lievito" per tutti gli item
+  * "entrambe integrali" / "entrambe napoletane" / "entrambe [impasto]" → dough_type corrispondente per tutti gli item
+  * "tutte con impasto [X]" / "impasto [X] per tutte" → dough_type=X per tutti gli item
+- ESEMPIO CRITICO: input="una margherita e una baita tutte e due integrali" → output=[{"pizza_name": "Margherita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}, {"pizza_name": "Baita", "dough_type": "integrale", "quantity": 1, "add_ingredients": [], "remove_ingredients": []}]. MAI aggiungere un terzo item chiamato "Integrali" o "Tutte e due integrali".
 - Always use the exact "code" value from DOUGH TYPES, never the "name".
 - If the user says "senza glutine", use the "(SG)" version of the pizza name from the MENU (e.g. "Pusteria (SG)") and set dough_type to "classica" (the SG pizza has its own price).
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
