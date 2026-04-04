@@ -799,7 +799,7 @@ Rules:
 - Never drop an explicitly requested pizza just because it is not present in the MENU.
 - If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request even if it is not in the MENU.
 - If no pizza is clearly mentioned, return an empty items array.
-- REGOLA CRITICA SULLE QUANTITÀ: Estrai SOLO le pizze e le quantità menzionate nel MESSAGGIO CORRENTE. NON sommare, NON riestrarre, NON accumulare item dalla storia della conversazione. La storia è solo contesto — gli item dell'ordine vengono gestiti dal backend.
+- REGOLA ASSOLUTA — MESSAGGIO CORRENTE ONLY: Analizza ESCLUSIVAMENTE l'ultimo messaggio dell'utente (l'ultimo turno). NON guardare i messaggi precedenti per estrarre pizze. Gli item già ordinati sono salvati dal backend — non riestrarre mai pizze dalla storia. Se l'ultimo messaggio non contiene nuove pizze (es. è un orario, un nome, una conferma, una risposta sì/no), restituisci items=[]. Esempi: "alle 20:30" → items=[], "Mario" → items=[], "sì" → items=[], "una capricciosa" → items=[Capricciosa].
 - pickup_time should be a simple string like "20:30" when present.
 - customer_name should be extracted when clearly present.
 - Each item must always include "add_ingredients" and "remove_ingredients".
