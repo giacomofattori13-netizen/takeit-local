@@ -1453,6 +1453,13 @@ def chat(request: ChatRequest, session: SessionDep):
         completed=conversation.completed,
         intended_quantity=conversation.intended_quantity,
     )
+    # Override esplicito: se intended_quantity è dichiarato e non raggiunto,
+    # forza collecting_items indipendentemente da ciò che determine_state ha calcolato.
+    if conversation.intended_quantity and state not in ("collecting_items", "completed"):
+        _collected = sum(int(item.get("quantity") or 1) for item in merged_order.get("items", []))
+        if _collected < conversation.intended_quantity:
+            print(f"[State] intended_quantity={conversation.intended_quantity} _collected={_collected} → forza collecting_items")
+            state = "collecting_items"
     conversation.state = state
 
     if valid and not conversation.completed and intent == "confirm_order":
