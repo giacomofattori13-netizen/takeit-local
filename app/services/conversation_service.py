@@ -840,13 +840,9 @@ def extract_order_from_text(
     message: str,
     menu_items: list[dict],
     dough_items: list[dict] | None = None,
-    history: list[dict] | None = None,
-    current_state: str | None = None,
 ) -> dict:
     menu_lines = []
     for item in menu_items:
-        # Ingredienti esclusi dal prompt per ridurre i token (~1800 token risparmiati su 78 pizze).
-        # L'LLM non ha bisogno della lista ingredienti per estrarre nome, quantità e modifiche.
         line = f'- {item["name"]} | {item["category"]} | €{item["price"]}'
         menu_lines.append(line)
 
@@ -859,28 +855,11 @@ def extract_order_from_text(
         dough_lines.append(f'- {d["name"]} (code: {d["code"]}) | supplemento: {surcharge_text}')
     dough_text = "\n".join(dough_lines)
 
-    print(f"[LLM] menu_items ricevuti: {len(menu_items)}")
-    print(f"[LLM] Prime 3 righe menu_text:\n" + "\n".join(menu_lines[:3]) if menu_lines else "[LLM] menu_text vuoto")
-
-    # Ultimi 4 messaggi di storia (2 scambi): sistema sempre presente, storia in mezzo.
-    recent_history = (history or [])[-4:]
-
-    # Istruzione sullo stato corrente: aiuta l'LLM a non re-estrarre item dalla storia
-    state_instruction = ""
-    if current_state == "awaiting_confirmation":
-        state_instruction = (
-            "\n\nCURRENT STATE: awaiting_confirmation — il cliente sta confermando l'ordine. "
-            "Se dice sì/ok/confermo/va bene/perfetto, rispondi con "
-            "{\"intent\": \"confirmation\", \"items\": [], \"customer_name\": null, \"pickup_time\": null}. "
-            "NON re-estrarre item dalla storia della conversazione."
-        )
-
     input_messages = [
-        {"role": "system", "content": build_system_prompt(menu_text, dough_text) + state_instruction},
-        *recent_history,
+        {"role": "system", "content": build_system_prompt(menu_text, dough_text)},
         {"role": "user", "content": message},
     ]
-    print(f"[LLM] Contesto: stato={current_state!r}, storia={len(recent_history)} msg")
+    print(f"[LLM] Estrazione da messaggio corrente: {message!r}")
 
     response = client.responses.create(
         model=MODEL_NAME,

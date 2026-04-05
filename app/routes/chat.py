@@ -745,26 +745,6 @@ def infer_quantity_from_message(message: str) -> int:
 
     return 1
 
-_ITALIAN_QTY = {
-    "un": 1, "una": 1, "uno": 1, "due": 2, "tre": 3,
-    "quattro": 4, "cinque": 5, "sei": 6, "sette": 7,
-    "otto": 8, "nove": 9, "dieci": 10,
-}
-
-def _parse_explicit_quantity(message: str, pizza_name: str) -> int:
-    """Ritorna la quantità esplicita per una pizza nel messaggio, default 1."""
-    if not pizza_name:
-        return 1
-    msg = unicodedata.normalize("NFC", re.sub(r"\b\d{1,2}:\d{2}\b", "", message.lower()))
-    prefix = re.escape(pizza_name.lower()[:5])
-    nums = "|".join(re.escape(k) for k in _ITALIAN_QTY)
-    m = re.search(rf"\b({nums}|\d+)\s+\w*{prefix}", msg)
-    if m:
-        q = m.group(1)
-        return int(q) if q.isdigit() else _ITALIAN_QTY.get(q, 1)
-    return 1
-
-
 def extract_ingredient_changes(message: str) -> tuple[list[str], list[str]]:
     message_lower = message.lower()
 
@@ -1336,437 +1316,115 @@ def chat(request: ChatRequest, session: SessionDep):
         )
     # ── FINE FAST PATH ────────────────────────────────────────────────────────
 
-    # Ultimi 2 scambi (4 messaggi) dalla ConversationLog per dare contesto all'LLM
-    recent_logs = session.exec(
-        select(ConversationLog)
-        .where(ConversationLog.session_id == request.session_id)
-        .order_by(ConversationLog.id.desc())
-        .limit(2)
-    ).all()
-    chat_history = []
-    for log in reversed(recent_logs):
-        chat_history.append({"role": "user", "content": log.user_message})
-        chat_history.append({"role": "assistant", "content": log.response_message})
+    # ── NORMAL PATH ──────────────────────────────────────────────────────────────
 
-    extracted = extract_order_from_text(
-        request.message,
-        menu_items_for_llm,
-        dough_items,
-        history=chat_history,
-        current_state=conversation.state,
-    )
-
-    # Sovrascrivi le quantità con il valore esplicito dal messaggio corrente.
-    # L'LLM tende ad accumulare quantità dalla storia; qui usiamo solo ciò che
-    # il cliente ha detto adesso: se non c'è un numero esplicito, quantity=1.
-    for _item in extracted.get("items", []):
-        _item["quantity"] = _parse_explicit_quantity(request.message, _item.get("pizza_name", ""))
-
-    normalized_items = []
-
-    for item in extracted.get("items", []):
-        if item.get("pizza_name") == "Pizza personalizzata":
-            custom = build_custom_pizza_from_message(
-                request.message,
-                menu_items_for_llm,
-            )
-
-            if custom:
-                normalized_items.append(custom)
-                continue
-
-            fallback_unknown_items = fallback_extract_unknown_items(
-                request.message,
-                menu_items_for_llm,
-            )
-
-            if fallback_unknown_items:
-                for fallback_item in fallback_unknown_items:
-                    fallback_item.setdefault("add_ingredients", [])
-                    fallback_item.setdefault("remove_ingredients", [])
-                normalized_items.extend(fallback_unknown_items)
-                continue
-
-        item.setdefault("add_ingredients", [])
-        item.setdefault("remove_ingredients", [])
-        normalized_items.append(item)
-
-    if normalized_items:
-        extracted["items"] = normalized_items
-
-    if not extracted.get("items"):
-        forced_custom = build_custom_pizza_from_message(
-            request.message,
-            menu_items_for_llm,
-        )
-
-        if forced_custom:
-            extracted["items"] = [forced_custom]
-            if extracted.get("intent") == "unknown":
-                extracted["intent"] = "add_items"
-
-    if not extracted.get("items"):
-        fallback_unknown_items = fallback_extract_unknown_items(
-            request.message,
-            menu_items_for_llm,
-        )
-
-        if fallback_unknown_items:
-            for item in fallback_unknown_items:
-                item.setdefault("add_ingredients", [])
-                item.setdefault("remove_ingredients", [])
-            extracted["items"] = fallback_unknown_items
-            if extracted.get("intent") == "unknown":
-                extracted["intent"] = "add_items"
-
-    segments = split_order_segments(request.message)
-
-    if len(segments) > 1:
-        segmented_items = extract_items_from_segments(segments, menu_items_for_llm)
-        if segmented_items:
-            extracted["items"] = segmented_items
-            extracted["intent"] = "add_items"
-
-    # fallback menu items dal testo, se ancora non ci sono item
-    if not extracted.get("items"):
-        fallback_menu_items = fallback_extract_menu_items_from_message(
-            request.message,
-            menu_items_for_llm,
-        )
-        if fallback_menu_items:
-            extracted["items"] = fallback_menu_items
-            if extracted.get("intent") == "unknown":
-                extracted["intent"] = "add_items"
-
-    for item in extracted.get("items", []):
-        item.setdefault("add_ingredients", [])
-        item.setdefault("remove_ingredients", [])
-
-    if "senza glutine" in message_lower or "gluten free" in message_lower:
-        for item in extracted.get("items", []):
-            item["pizza_type"] = "Senza glutine"
-            item["dough_type"] = "senza_glutine"
-
-    if extracted.get("items") and extracted.get("intent") == "unknown":
-        extracted["intent"] = "add_items"
-
-    # Gestione conferma/rifiuto identità cliente riconosciuto
+    # Gestione identità cliente riconosciuto da telefono
     _pending = conversation.pending_customer_name
     if _pending and not conversation.customer_name:
-        _positive = any(m in message_lower for m in ["sì", "si", "esatto", "giusto", "corretto", "sono io", "sì sono"])
+        _positive = any(m in message_lower for m in ["sì", "si", "esatto", "giusto", "corretto", "sono io"])
         _negative = any(m in message_lower for m in ["no", "sbagliato", "non sono"])
         if _positive:
             conversation.customer_name = _pending
             conversation.pending_customer_name = None
-            print(f"[Customer] Identità confermata: {_pending}")
         elif _negative:
             conversation.pending_customer_name = None
-            print("[Customer] Identità rifiutata, trattato come nuovo cliente")
+
+    # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
+    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
 
     existing_items = json.loads(conversation.items_json)
-    existing_suggestions = json.loads(conversation.suggested_items_json)
-
-    chosen_suggestion = extract_choice_from_suggestions(
-        request.message,
-        existing_suggestions,
-    )
-    selected_from_suggestions = chosen_suggestion is not None
-
-    if chosen_suggestion:
-        chosen_quantity = infer_quantity_from_message(message_lower)
-        _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-        extracted["items"] = [
-            {
-                "pizza_name": chosen_suggestion,
-                "pizza_type": "Senza glutine" if _is_gf else "Normale",
-                "dough_type": "senza_glutine" if _is_gf else "classica",
-                "quantity": chosen_quantity,
-                "add_ingredients": [],
-                "remove_ingredients": [],
-            }
-        ]
-        extracted["intent"] = "add_items"
-
-    merged_order = {
-        "customer_name": conversation.customer_name,
-        "pickup_time": conversation.pickup_time,
-        "items": existing_items,
-    }
-
+    new_items = extracted.get("items", [])
+    for item in new_items:
+        item.setdefault("add_ingredients", [])
+        item.setdefault("remove_ingredients", [])
     intent = extracted.get("intent", "unknown")
 
-    confirmation_markers = [
-        "sì",
-        "si",
-        "va bene",
-        "ok",
-        "perfetto",
-        "confermo",
-    ]
-
-    is_simple_confirmation = (
-        any(marker in message_lower for marker in confirmation_markers)
-        # In awaiting_confirmation lo stato è già noto: ignora eventuali item
-        # re-estratti dall'LLM per effetto del contesto della storia.
-        and (not extracted.get("items") or conversation.state == "awaiting_confirmation")
-        and not extracted.get("customer_name")
-        and not extracted.get("pickup_time")
-    )
-
-    correction_markers = [
-        "no aspetta",
-        "anzi",
-        "correggo",
-        "ho sbagliato",
-        "volevo dire",
-        "una sola",
-        "solo una",
-        "non due ma una",
-        "allora fai",
-    ]
-
-    add_markers = [
-        "aggiungi",
-        "aggiungi anche",
-        "fammi anche",
-        "metti anche",
-    ]
-
-    remove_markers = [
-        "togli",
-        "leva",
-        "rimuovi",
-    ]
-
-    replace_markers = [
-        "invece",
-        "al posto di",
-        "sostituisci",
-    ]
-
-    cancel_markers = [
-        "annulla tutto",
-        "cancella tutto",
-        "annulla ordine",
-    ]
-
-    existing_items_invalid = has_invalid_items(session, existing_items)
-
-    has_existing_order = len(existing_items) > 0
-    has_new_items = len(extracted.get("items", [])) > 0
-
-    has_add_marker = any(marker in message_lower for marker in add_markers)
-    has_correction_marker = any(marker in message_lower for marker in correction_markers)
-    has_remove_marker = any(marker in message_lower for marker in remove_markers)
-    has_replace_marker = any(marker in message_lower for marker in replace_markers)
-    has_cancel_marker = any(marker in message_lower for marker in cancel_markers)
-
-    if has_add_marker:
-        intent = "add_items"
-
-    if has_correction_marker:
-        intent = "modify_items"
-
-    if has_remove_marker:
-        intent = "remove_items"
-
-    if has_replace_marker:
-        intent = "replace_items"
-
-    if has_cancel_marker:
-        intent = "cancel_order"
-
-    # Se esiste già un ordine e il cliente manda nuove pizze senza marker di replace/remove/cancel,
-    # trattiamo il messaggio come aggiunta, non come sostituzione.
-    if (
-        has_existing_order
-        and has_new_items
-        and not selected_from_suggestions
-        and not has_remove_marker
-        and not has_replace_marker
-        and not has_cancel_marker
-        and not has_correction_marker
-    ):
-        intent = "add_items"
-
-    if extracted.get("customer_name"):
-        merged_order["customer_name"] = extracted["customer_name"]
-
+    # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
     if extracted.get("pickup_time"):
         pt = extracted["pickup_time"]
         is_valid, suggestion = validate_pickup_time(pt)
         if not is_valid:
-            if suggestion:
-                pickup_time_error = f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
-            else:
-                pickup_time_error = f"Mi dispiace, alle {pt} siamo chiusi."
+            pickup_time_error = (
+                f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
+                if suggestion else f"Mi dispiace, alle {pt} siamo chiusi."
+            )
         else:
-            merged_order["pickup_time"] = pt
+            conversation.pickup_time = pt
 
-    if selected_from_suggestions:
-        valid_existing_items = keep_only_valid_existing_items(session, existing_items)
-        merged_order["items"] = merge_items(
-            valid_existing_items,
-            extracted.get("items", []),
-        )
-    elif (
-        existing_items_invalid
-        and has_new_items
-        and not has_add_marker
-        and not has_remove_marker
-        and not has_replace_marker
-        and not has_cancel_marker
-        and not has_correction_marker
-    ):
-        # L'utente sta sostituendo un item non valido: conserva i valid esistenti e aggiungi i nuovi
-        valid_existing_items = keep_only_valid_existing_items(session, existing_items)
-        merged_order["items"] = merge_items(valid_existing_items, extracted.get("items", []))
-        intent = "add_items"
-    else:
-        merged_order["items"] = apply_intent_to_items(
-            existing_items=existing_items,
-            new_items=extracted.get("items", []),
-            intent=intent,
-        )
+    # 3. Aggiorna nome cliente
+    if extracted.get("customer_name"):
+        conversation.customer_name = extracted["customer_name"]
 
+    # 4. Merge semplice: sessione = fonte di verità
     if intent == "cancel_order":
-        merged_order["customer_name"] = None
-        merged_order["pickup_time"] = None
-        conversation.intended_quantity = None
+        merged_items = []
+        conversation.customer_name = None
+        conversation.pickup_time = None
+    elif intent == "replace_items" and new_items:
+        merged_items = new_items
+    elif intent == "remove_items" and new_items:
+        remove_names = {ni["pizza_name"].lower() for ni in new_items}
+        merged_items = [ei for ei in existing_items if ei["pizza_name"].lower() not in remove_names]
+    elif new_items:
+        # Stessa pizza + stesso impasto → somma quantità; altrimenti aggiungi
+        merged_items = list(existing_items)
+        for ni in new_items:
+            for ei in merged_items:
+                if ei["pizza_name"] == ni["pizza_name"] and ei["pizza_type"] == ni["pizza_type"]:
+                    ei["quantity"] += ni["quantity"]
+                    break
+            else:
+                merged_items.append(ni)
+    else:
+        merged_items = existing_items
 
-    # Aggiorna il numero di pizze dichiarato se il cliente lo ha specificato
-    # (solo quando il messaggio non contiene pizze specifiche, per evitare
-    # di sovrascrivere conteggi già correttamente estratti dagli items)
-    if not extracted.get("items"):
-        declared = extract_intended_quantity(request.message)
-        if declared:
-            conversation.intended_quantity = declared
-            print(f"[Chat] intended_quantity aggiornato a {declared}")
+    merged_order = {
+        "customer_name": conversation.customer_name,
+        "pickup_time": conversation.pickup_time,
+        "items": merged_items,
+    }
+    conversation.items_json = json.dumps(merged_items, ensure_ascii=False)
 
-    # Segnale di fine ordine (es. 'è tutto', 'ho finito')
-    customer_done = is_done_signal(request.message)
-
-    conversation.customer_name = merged_order["customer_name"]
-    conversation.pickup_time = merged_order["pickup_time"]
-    conversation.items_json = json.dumps(merged_order["items"], ensure_ascii=False)
-
+    # 5. Validazione item contro DB (nessun fuzzy matching)
     valid_items = []
     invalid_items = []
     missing_messages = []
-    new_suggestions = []
+    if pickup_time_error:
+        missing_messages.append(pickup_time_error)
 
-    db_menu_count = session.exec(select(MenuItem)).all()
-    print(f"[Chat] DB SQLite MenuItem: {len(db_menu_count)} righe totali")
-    print(f"[Chat] Items da validare: {[(i['pizza_name'], i['pizza_type']) for i in merged_order['items']]}")
-
-    for item in merged_order["items"]:
-        statement = select(MenuItem).where(
-            MenuItem.name == item["pizza_name"],
-            MenuItem.pizza_type == item["pizza_type"],
-        )
-        menu_item = session.exec(statement).first()
-        print(f"[Chat] Validazione '{item['pizza_name']}' ({item['pizza_type']}): {'OK' if menu_item and menu_item.available else 'NON TROVATO nel DB'}")
-
-        is_custom = bool(item.get("add_ingredients") or item.get("remove_ingredients"))
-
-        if not menu_item or not menu_item.available:
-            if is_custom:
-                # VALIDAZIONE BASE: cerca la pizza base senza varianti
-                base_item = session.exec(
-                    select(MenuItem).where(
-                        MenuItem.name == item["pizza_name"],
-                        MenuItem.pizza_type == item["pizza_type"],
-                    )
-                ).first()
-                if base_item and base_item.available:
-                    valid_items.append(item)
-                    continue
-
-            # Fuzzy matching sul nome
-            fuzzy_item, similarity = fuzzy_find_pizza(
-                item["pizza_name"], item["pizza_type"], session
+    for item in merged_items:
+        menu_item = session.exec(
+            select(MenuItem).where(
+                MenuItem.name == item["pizza_name"],
+                MenuItem.pizza_type == item["pizza_type"],
             )
-            print(f"[Fuzzy] '{item['pizza_name']}' → '{fuzzy_item.name if fuzzy_item else None}' sim={similarity:.2f}")
-
-            if fuzzy_item and similarity >= 0.85:
-                # Auto-accetta: rinomina e riconvalida
-                print(f"[Fuzzy] Auto-accettato '{item['pizza_name']}' → '{fuzzy_item.name}'")
-                item["pizza_name"] = fuzzy_item.name
-                item["pizza_type"] = fuzzy_item.pizza_type
-                dough_code = item.get("dough_type", "classica")
-                if is_dough_available(dough_code):
-                    valid_items.append(item)
-                else:
-                    invalid_items.append(item)
-                    missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
-                continue
-
-            if fuzzy_item and similarity >= 0.75:
-                # Chiedi conferma
-                missing_messages.append(f"Vuoi dire la {fuzzy_item.name}?")
-                new_suggestions.append(fuzzy_item.name)
-                invalid_items.append(item)
-                continue
-
-            # Sotto 60%: pizza non esiste
-            invalid_items.append(item)
-            message, suggestions = build_missing_item_message(session, item)
-            missing_messages.append(message)
-            new_suggestions.extend(suggestions)
-        else:
-            # Controlla disponibilità impasto
+        ).first()
+        if menu_item and menu_item.available:
             dough_code = item.get("dough_type", "classica")
-            if not is_dough_available(dough_code):
-                invalid_items.append(item)
-                missing_messages.append(f"L'impasto '{dough_code}' non è al momento disponibile.")
-            else:
+            if is_dough_available(dough_code):
                 valid_items.append(item)
+            else:
+                invalid_items.append(item)
+                missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
+        else:
+            msg, _ = build_missing_item_message(session, item)
+            missing_messages.append(msg)
+            invalid_items.append(item)
 
-    if is_simple_confirmation and not existing_suggestions:
-        if (
-            merged_order.get("customer_name") is not None
-            and merged_order.get("pickup_time") is not None
-            and len(valid_items) > 0
-            and len(invalid_items) == 0
-        ):
-            intent = "confirm_order"
+    missing_items = [f'{item["pizza_name"]} ({item["pizza_type"]})' for item in invalid_items]
 
-    if is_simple_confirmation and intent == "unknown":
-        intent = "confirmation"
-
-    conversation.suggested_items_json = json.dumps(new_suggestions, ensure_ascii=False)
-
-    missing_items = [
-        f'{item["pizza_name"]} ({item["pizza_type"]})'
-        for item in invalid_items
-    ]
-
-    new_valid_items = []
-    existing_keys = {
-        (
-            item["pizza_name"],
-            item["pizza_type"],
-            tuple(item.get("add_ingredients", [])),
-            tuple(item.get("remove_ingredients", [])),
-        )
-        for item in existing_items
-    }
-
-    for item in valid_items:
-        key = (
-            item["pizza_name"],
-            item["pizza_type"],
-            tuple(item.get("add_ingredients", [])),
-            tuple(item.get("remove_ingredients", [])),
-        )
-        if key not in existing_keys or intent in {
-            "add_items",
-            "modify_items",
-            "replace_items",
-            "remove_items",
-        }:
-            new_valid_items.append(item)
+    # 6. Rilevamento conferma semplice
+    _confirm_words = {"sì", "si", "va bene", "ok", "perfetto", "confermo"}
+    is_confirmation = (
+        any(m in message_lower for m in _confirm_words)
+        and not new_items
+        and not extracted.get("customer_name")
+        and not extracted.get("pickup_time")
+    )
+    if is_confirmation and not missing_messages and valid_items \
+            and merged_order.get("customer_name") and merged_order.get("pickup_time"):
+        intent = "confirm_order"
 
     valid = (
         len(invalid_items) == 0
@@ -1782,8 +1440,6 @@ def chat(request: ChatRequest, session: SessionDep):
         merged_order=merged_order,
         missing_messages=missing_messages,
         completed=conversation.completed,
-        intended_quantity=conversation.intended_quantity,
-        done_signal=customer_done,
     )
     conversation.state = state
 
@@ -1798,34 +1454,24 @@ def chat(request: ChatRequest, session: SessionDep):
         session.refresh(order)
 
         for item in merged_order["items"]:
-            order_item = OrderItem(
+            session.add(OrderItem(
                 order_id=order.id,
                 pizza_name=item["pizza_name"],
                 pizza_type=item["pizza_type"],
                 quantity=item["quantity"],
-                add_ingredients_json=json.dumps(
-                    item.get("add_ingredients", []),
-                    ensure_ascii=False,
-                ),
-                remove_ingredients_json=json.dumps(
-                    item.get("remove_ingredients", []),
-                    ensure_ascii=False,
-                ),
-            )
-            session.add(order_item)
-
+                add_ingredients_json=json.dumps(item.get("add_ingredients", []), ensure_ascii=False),
+                remove_ingredients_json=json.dumps(item.get("remove_ingredients", []), ensure_ascii=False),
+            ))
         session.commit()
 
         conversation.completed = True
         conversation.state = "completed"
-        conversation.suggested_items_json = "[]"
         session.add(conversation)
         session.commit()
 
         order_id = order.id
         order_saved = True
 
-        # Arricchisci ogni item con i prezzi e calcola total_amount
         enriched_items = []
         for item in merged_order["items"]:
             menu_item = session.exec(
@@ -1838,34 +1484,20 @@ def chat(request: ChatRequest, session: SessionDep):
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
             dough_code = item.get("dough_type", "classica")
             dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
-            add_count = len(item.get("add_ingredients", []))
-            extras_price = round(dough_surcharge + add_count * INGREDIENT_EXTRA_PRICE, 2)
+            extras_price = round(dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
             total_price = round((base_price + extras_price) * item["quantity"], 2)
-            print(f"[Pricing] Pizza: {item['pizza_name']}, base_price: {base_price}, dough: {dough_code}, dough_surcharge: {dough_surcharge}, aggiunte: {add_count}, extras_price: {extras_price}, total_price: {total_price}")
-            enriched_items.append({
-                **item,
-                "base_price": base_price,
-                "extras_price": extras_price,
-                "total_price": total_price,
-            })
-
-        # Confidenza AI: 0.75 se nel turno precedente erano presenti suggerimenti
-        # (item invalidi già corretti), 0.9 se l'ordine è arrivato diretto
-        ai_confidence = 0.75 if existing_suggestions else 0.9
+            enriched_items.append({**item, "base_price": base_price, "extras_price": extras_price, "total_price": total_price})
 
         save_order_to_base44(
             customer_name=merged_order["customer_name"],
             customer_phone=conversation.customer_phone,
             pickup_time=merged_order["pickup_time"],
             order_number=get_next_order_number(),
-            ai_confidence=ai_confidence,
+            ai_confidence=0.9,
             items=enriched_items,
         )
 
-        # Crea o aggiorna il cliente su Base44
-        pizza_names = list(dict.fromkeys(
-            item["pizza_name"] for item in merged_order["items"]
-        ))
+        pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
         order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
         upsert_customer(
             full_name=merged_order["customer_name"],
@@ -1880,7 +1512,7 @@ def chat(request: ChatRequest, session: SessionDep):
         missing_messages=missing_messages,
         order_saved=order_saved,
         intent=intent,
-        new_valid_items=new_valid_items,
+        new_valid_items=valid_items,
         customer_phone=conversation.customer_phone,
         pickup_time_error=pickup_time_error,
     )
