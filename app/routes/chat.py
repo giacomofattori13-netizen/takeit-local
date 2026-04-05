@@ -575,6 +575,9 @@ def build_assistant_response(
 
     # Collecting items — risposte brevissime, niente domande
     if intent in ("add_items", "modify_items", "replace_items"):
+        if not new_valid_items:
+            # Il cliente ha dichiarato una quantità senza specificare le pizze
+            return "Certo, dimmi pure!"
         return random.choice(["Ok!", "Aggiunto!", "Perfetto!", "Certo!"])
 
     if intent == "remove_items":
@@ -1361,6 +1364,7 @@ def chat(request: ChatRequest, session: SessionDep):
         merged_items = []
         conversation.customer_name = None
         conversation.pickup_time = None
+        conversation.intended_quantity = None
     elif intent == "replace_items" and new_items:
         merged_items = new_items
     elif intent == "remove_items" and new_items:
@@ -1433,6 +1437,13 @@ def chat(request: ChatRequest, session: SessionDep):
         and merged_order.get("pickup_time") is not None
     )
 
+    # Aggiorna quantità dichiarata (es. "vorrei due pizze") solo quando
+    # il messaggio non contiene pizze specifiche
+    if not new_items:
+        declared = extract_intended_quantity(request.message)
+        if declared:
+            conversation.intended_quantity = declared
+
     order_id = None
     order_saved = False
 
@@ -1440,6 +1451,7 @@ def chat(request: ChatRequest, session: SessionDep):
         merged_order=merged_order,
         missing_messages=missing_messages,
         completed=conversation.completed,
+        intended_quantity=conversation.intended_quantity,
     )
     conversation.state = state
 
