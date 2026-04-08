@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import httpx
 from openai import OpenAI
@@ -442,8 +443,30 @@ def fetch_and_save_restaurant() -> dict:
     return load_restaurant()
 
 
+_GREETING_PATTERN = re.compile(r"buon pomeriggio|buonasera|buongiorno", re.IGNORECASE)
+
+
+def _time_greeting() -> str:
+    """Restituisce il saluto corretto in base all'ora corrente (Europe/Rome)."""
+    hour = datetime.datetime.now(ZoneInfo("Europe/Rome")).hour
+    if 6 <= hour < 12:
+        return "buongiorno"
+    if 12 <= hour < 18:
+        return "buon pomeriggio"
+    return "buonasera"  # 18-05
+
+
+def _apply_time_greeting(text: str) -> str:
+    """Sostituisce buongiorno/buon pomeriggio/buonasera nel testo con il saluto
+    corretto per l'orario corrente. Se nessuno è presente, antepone il saluto."""
+    greeting = _time_greeting()
+    if _GREETING_PATTERN.search(text):
+        return _GREETING_PATTERN.sub(greeting, text)
+    return f"{greeting.capitalize()}, {text}"
+
+
 def get_agent_greeting() -> str:
-    """Restituisce il saluto dell'agente.
+    """Restituisce il saluto dell'agente con saluto temporale corretto.
     Priorità: 1) Restaurant.agent_greeting da Base44
                2) env var AGENT_GREETING
                3) stringa hardcoded di emergenza
@@ -452,19 +475,19 @@ def get_agent_greeting() -> str:
     restaurant = load_restaurant()
     greeting = restaurant.get("agent_greeting")
     if greeting and isinstance(greeting, str) and greeting.strip():
-        result = greeting.strip()
+        result = _apply_time_greeting(greeting.strip())
         print(f"[Agent] Saluto: {result!r} (fonte: Base44)")
         return result
 
     # 2. Env var (configurabile su Railway senza codice)
     env_greeting = os.getenv("AGENT_GREETING")
     if env_greeting and env_greeting.strip():
-        result = env_greeting.strip()
+        result = _apply_time_greeting(env_greeting.strip())
         print(f"[Agent] Saluto: {result!r} (fonte: env AGENT_GREETING)")
         return result
 
     # 3. Fallback di emergenza
-    result = "Pizzeria Corte Del Sole, buonasera. Come posso aiutarla?"
+    result = _apply_time_greeting("Pizzeria Corte Del Sole, buonasera. Come posso aiutarla?")
     print(f"[Agent] Saluto: {result!r} (fonte: fallback hardcoded)")
     return result
 
