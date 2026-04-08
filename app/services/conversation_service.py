@@ -381,9 +381,8 @@ def send_whatsapp_confirmation(
 
 
 def load_restaurant() -> dict:
-    """Carica i dati del ristorante da restaurant_data.json (generato da export_menu.py).
-    Il file viene letto una sola volta e tenuto in cache per tutta la durata del processo.
-    Per aggiornare: rieseguire export_menu.py e riavviare il server.
+    """Carica i dati del ristorante da restaurant_data.json (fallback statico).
+    Viene chiamata solo se fetch_and_save_restaurant() fallisce o se BASE44_TOKEN non è configurato.
     """
     global _restaurant_cache
     if _restaurant_cache:
@@ -404,6 +403,42 @@ def load_restaurant() -> dict:
     except Exception as e:
         print(f"[Restaurant] Errore lettura {path}: {type(e).__name__}: {e}")
         return {}
+
+
+def fetch_and_save_restaurant() -> dict:
+    """
+    Scarica i dati del ristorante dall'endpoint Restaurant di Base44, salva su
+    restaurant_data.json e aggiorna la cache. Se il fetch fallisce, carica da file.
+    Chiamata all'avvio del server così ogni deploy/riavvio prende il saluto aggiornato.
+    """
+    global _restaurant_cache
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        print("[Restaurant] BASE44_TOKEN non configurato, carico da file")
+        return load_restaurant()
+
+    url = f"{BASE44_APP}/Restaurant"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        body = response.json()
+        print(f"[Restaurant] Body keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__}")
+        entities = body.get("entities", body) if isinstance(body, dict) else body
+        # Prende il primo record Restaurant disponibile
+        data = entities[0] if isinstance(entities, list) and entities else (body if isinstance(body, dict) else {})
+        with open(RESTAURANT_JSON_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        _restaurant_cache = data if isinstance(data, dict) else {}
+        print(f"[Restaurant] Scaricato da Base44, salvato. Campi: {list(_restaurant_cache.keys())}")
+        print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
+        return _restaurant_cache
+    except Exception as e:
+        print(f"[Restaurant] Errore fetch Base44: {type(e).__name__}: {e} — carico da file")
+        return load_restaurant()
 
 
 def get_agent_greeting() -> str:

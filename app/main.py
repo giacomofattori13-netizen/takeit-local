@@ -15,7 +15,7 @@ from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
 from app.services.menu_sync import sync_menu_to_db
-from app.services.conversation_service import fetch_and_save_doughs, load_restaurant
+from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant
 
 app = FastAPI(title="TakeIt Local Core")
 
@@ -44,7 +44,7 @@ def on_startup():
     doughs = fetch_and_save_doughs()
     print(f"[Startup] Impasti disponibili: {[d['name'] for d in doughs]}")
 
-    restaurant = load_restaurant()
+    restaurant = fetch_and_save_restaurant()
     print(f"[Startup] Restaurant: {list(restaurant.keys()) if restaurant else 'non caricato'}")
 
     _twilio_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"]
