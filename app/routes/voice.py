@@ -1,8 +1,11 @@
+import os
 import uuid
+from pathlib import Path
 from xml.sax.saxutils import escape
 
-from fastapi import APIRouter, Depends, Form, Query
-from fastapi.responses import Response
+import httpx
+from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi.responses import FileResponse, Response
 from sqlmodel import Session
 
 from app.db import get_session
@@ -12,34 +15,91 @@ from app.services.conversation_service import get_agent_greeting
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
-_POLLY = "Polly.Giorgio"
+# Directory temporanea per i file MP3 generati da ElevenLabs
+AUDIO_DIR = Path("/tmp/takeit_audio")
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
 _GATHER_ATTRS = 'input="speech" language="it-IT" speechTimeout="auto"'
+_POLLY_FALLBACK = "Polly.Giorgio"
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
 
-def _twiml_gather(session_id: str, say_text: str) -> str:
-    """TwiML che dice qualcosa e rimane in ascolto per il turno successivo."""
+def _public_base_url() -> str:
+    return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
+
+
+def _synthesize(text: str) -> str | None:
+    """Chiama ElevenLabs TTS, salva l'MP3 in AUDIO_DIR e restituisce il filename.
+    Restituisce None se le credenziali mancano o la chiamata fallisce."""
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    if not api_key or not voice_id:
+        print("[ElevenLabs] Credenziali mancanti, fallback a Polly")
+        return None
+    try:
+        resp = httpx.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json={"text": text, "model_id": os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        filename = f"{uuid.uuid4()}.mp3"
+        (AUDIO_DIR / filename).write_bytes(resp.content)
+        print(f"[ElevenLabs] Audio generato: {filename} ({len(resp.content)} bytes)")
+        return filename
+    except Exception as e:
+        print(f"[ElevenLabs] Errore: {type(e).__name__}: {e} — fallback a Polly")
+        return None
+
+
+def _audio_element(text: str) -> str:
+    """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>."""
+    filename = _synthesize(text)
+    if filename:
+        url = f"{_public_base_url()}/voice/audio/{filename}"
+        return f"<Play>{escape(url)}</Play>"
+    return f'<Say voice="{_POLLY_FALLBACK}">{escape(text)}</Say>'
+
+
+def _twiml_gather(session_id: str, text: str) -> str:
+    """TwiML che riproduce l'audio e rimane in ascolto per il turno successivo."""
+    audio = _audio_element(text)
+    no_input = _audio_element(_NO_INPUT_MSG)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<Response>\n"
         f"  <Gather {_GATHER_ATTRS} "
         f'action="/voice/gather?session_id={session_id}" method="POST">\n'
-        f'    <Say voice="{_POLLY}">{escape(say_text)}</Say>\n'
+        f"    {audio}\n"
         "  </Gather>\n"
-        f'  <Say voice="{_POLLY}">{escape(_NO_INPUT_MSG)}</Say>\n'
+        f"  {no_input}\n"
         "</Response>"
     )
 
 
-def _twiml_end(say_text: str) -> str:
-    """TwiML che dice qualcosa e chiude la chiamata."""
+def _twiml_end(text: str) -> str:
+    """TwiML che riproduce l'audio e chiude la chiamata."""
+    audio = _audio_element(text)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<Response>\n"
-        f'  <Say voice="{_POLLY}">{escape(say_text)}</Say>\n'
+        f"  {audio}\n"
         "  <Hangup/>\n"
         "</Response>"
     )
+
+
+@router.get("/audio/{filename}")
+def serve_audio(filename: str):
+    """Serve i file MP3 generati da ElevenLabs a Twilio."""
+    # Blocca path traversal: accetta solo UUID.mp3
+    if not filename.endswith(".mp3") or "/" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = AUDIO_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Audio not found")
+    return FileResponse(path, media_type="audio/mpeg")
 
 
 @router.post("/incoming")
