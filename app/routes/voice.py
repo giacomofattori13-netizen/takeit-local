@@ -12,7 +12,7 @@ from app.services.conversation_service import get_agent_greeting
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
-_POLLY = "Polly.Bianca"
+_POLLY = "Polly.Giorgio"
 _GATHER_ATTRS = 'input="speech" language="it-IT" speechTimeout="auto"'
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
