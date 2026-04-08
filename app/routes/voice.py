@@ -164,7 +164,9 @@ def voice_gather(
     # Log del customer_phone nella sessione prima di chiamare il motore di chat
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
-    print(f"[Voice] Sessione {session_id}: customer_phone={_conv.customer_phone!r if _conv else 'NOT FOUND'} stato={_conv.state!r if _conv else 'N/A'}")
+    _phone = _conv.customer_phone if _conv else "NOT FOUND"
+    _state = _conv.state if _conv else "N/A"
+    print(f"[Voice] Sessione {session_id}: customer_phone={_phone!r} stato={_state!r}")
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
     result = chat(chat_request, session)
