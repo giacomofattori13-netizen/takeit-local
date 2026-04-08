@@ -14,6 +14,7 @@ from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
+from app.routes.voice import router as voice_router
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant
 
@@ -88,3 +89,4 @@ app.include_router(sessions_router)
 app.include_router(tts_router)
 app.include_router(logs_router)
 app.include_router(owner_command_router)
+app.include_router(voice_router)
