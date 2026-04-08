@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import re
+import time
 
 import httpx
 from openai import OpenAI
@@ -15,13 +16,13 @@ MENU_JSON_PATH = os.path.normpath(
 DOUGH_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dough_data.json")
 )
-RESTAURANT_JSON_PATH = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "restaurant_data.json")
-)
 
 _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
 _restaurant_cache: dict | None = None
+_restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
+
+RESTAURANT_CACHE_TTL = 600  # 10 minuti
 
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
@@ -380,65 +381,65 @@ def send_whatsapp_confirmation(
         print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
 
 
+def _fetch_restaurant_from_base44() -> dict | None:
+    """Fa la GET a Base44 e restituisce il dict del ristorante, o None in caso di errore."""
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        print("[Restaurant] BASE44_TOKEN non configurato, skip fetch")
+        return None
+    url = f"{BASE44_APP}/Restaurant"
+    try:
+        response = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        response.raise_for_status()
+        body = response.json()
+        entities = body.get("entities", body) if isinstance(body, dict) else body
+        data = entities[0] if isinstance(entities, list) and entities else (body if isinstance(body, dict) else None)
+        if not isinstance(data, dict):
+            print("[Restaurant] Risposta Base44 non valida")
+            return None
+        return data
+    except Exception as e:
+        print(f"[Restaurant] Errore fetch Base44: {type(e).__name__}: {e}")
+        return None
+
+
 def load_restaurant() -> dict:
-    """Carica i dati del ristorante da restaurant_data.json (fallback statico).
-    Viene chiamata solo se fetch_and_save_restaurant() fallisce o se BASE44_TOKEN non è configurato.
+    """Restituisce i dati del ristorante con cache in memoria e TTL di 10 minuti.
+
+    - Se la cache è valida (< 10 min), la restituisce direttamente.
+    - Se è scaduta, tenta un refresh da Base44.
+    - Se Base44 non risponde, usa i dati cached precedenti come fallback.
+    - Non dipende da nessun file su disco.
     """
-    global _restaurant_cache
-    if _restaurant_cache:
+    global _restaurant_cache, _restaurant_cache_ts
+    now = time.monotonic()
+
+    if _restaurant_cache and (now - _restaurant_cache_ts) < RESTAURANT_CACHE_TTL:
         return _restaurant_cache
 
-    path = RESTAURANT_JSON_PATH
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        _restaurant_cache = data if isinstance(data, dict) else {}
-        print(f"[Restaurant] Caricato da file: {path}")
-        print(f"[Restaurant] Campi: {list(_restaurant_cache.keys())}")
+    fresh = _fetch_restaurant_from_base44()
+    if fresh is not None:
+        _restaurant_cache = fresh
+        _restaurant_cache_ts = now
+        print(f"[Restaurant] Cache aggiornata da Base44. Campi: {list(_restaurant_cache.keys())}")
         print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
         return _restaurant_cache
-    except FileNotFoundError:
-        print(f"[Restaurant] File non trovato: {path} — esegui scripts/export_menu.py")
-        return {}
-    except Exception as e:
-        print(f"[Restaurant] Errore lettura {path}: {type(e).__name__}: {e}")
-        return {}
+
+    # Base44 non disponibile — usa cache precedente se esiste
+    if _restaurant_cache:
+        age = int(now - _restaurant_cache_ts)
+        print(f"[Restaurant] Base44 non disponibile, uso cache precedente (età {age}s)")
+        return _restaurant_cache
+
+    print("[Restaurant] Nessun dato disponibile: né Base44 né cache")
+    return {}
 
 
 def fetch_and_save_restaurant() -> dict:
-    """
-    Scarica i dati del ristorante dall'endpoint Restaurant di Base44, salva su
-    restaurant_data.json e aggiorna la cache. Se il fetch fallisce, carica da file.
-    Chiamata all'avvio del server così ogni deploy/riavvio prende il saluto aggiornato.
-    """
-    global _restaurant_cache
-    token = os.getenv("BASE44_TOKEN")
-    if not token:
-        print("[Restaurant] BASE44_TOKEN non configurato, carico da file")
-        return load_restaurant()
-
-    url = f"{BASE44_APP}/Restaurant"
-    try:
-        response = httpx.get(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        response.raise_for_status()
-        body = response.json()
-        print(f"[Restaurant] Body keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__}")
-        entities = body.get("entities", body) if isinstance(body, dict) else body
-        # Prende il primo record Restaurant disponibile
-        data = entities[0] if isinstance(entities, list) and entities else (body if isinstance(body, dict) else {})
-        with open(RESTAURANT_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        _restaurant_cache = data if isinstance(data, dict) else {}
-        print(f"[Restaurant] Scaricato da Base44, salvato. Campi: {list(_restaurant_cache.keys())}")
-        print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
-        return _restaurant_cache
-    except Exception as e:
-        print(f"[Restaurant] Errore fetch Base44: {type(e).__name__}: {e} — carico da file")
-        return load_restaurant()
+    """Alias usato all'avvio in main.py: forza un refresh da Base44 ignorando il TTL."""
+    global _restaurant_cache_ts
+    _restaurant_cache_ts = 0.0  # azzera il TTL così load_restaurant fa sempre il fetch
+    return load_restaurant()
 
 
 def get_agent_greeting() -> str:
