@@ -325,12 +325,16 @@ def send_whatsapp_confirmation(
     from_number = os.getenv("TWILIO_WHATSAPP_FROM")
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
+    print(f"[WhatsApp] Invio a customer_phone={customer_phone!r} customer_name={customer_name!r}")
+    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={'✓ ' + from_number if from_number else '✗'}")
+
     if not all([account_sid, auth_token, from_number]):
-        print("[WhatsApp] Variabili Twilio non configurate, skip")
+        print("[WhatsApp] Variabili Twilio mancanti, skip")
         return
 
     # Normalizza il numero: rimuovi spazi/trattini/parentesi
     phone = re.sub(r"[\s\-\(\)]", "", customer_phone or "")
+    print(f"[WhatsApp] Numero normalizzato: {phone!r}")
     if not phone:
         print("[WhatsApp] Numero non disponibile, skip")
         return
@@ -340,6 +344,7 @@ def send_whatsapp_confirmation(
         return
     if not phone.startswith("+"):
         phone = f"+39{phone}"
+    print(f"[WhatsApp] Numero destinatario finale: {phone!r}")
 
     pizza_lines = []
     for item in items:
