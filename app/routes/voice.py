@@ -36,20 +36,34 @@ def _synthesize(text: str) -> str | None:
     if not api_key or not voice_id:
         print("[ElevenLabs] Credenziali mancanti, fallback a Polly")
         return None
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    payload = {"text": text, "model_id": model_id}
+    print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
     try:
         resp = httpx.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            url,
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-            json={"text": text, "model_id": os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")},
+            json=payload,
             timeout=15,
         )
+        print(f"[ElevenLabs] HTTP {resp.status_code} content-type={resp.headers.get('content-type')} size={len(resp.content)}")
+        if resp.status_code != 200:
+            print(f"[ElevenLabs] Errore risposta: {resp.text}")
+            return None
         resp.raise_for_status()
         filename = f"{uuid.uuid4()}.mp3"
         (AUDIO_DIR / filename).write_bytes(resp.content)
-        print(f"[ElevenLabs] Audio generato: {filename} ({len(resp.content)} bytes)")
+        print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
         return filename
+    except httpx.TimeoutException as e:
+        print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
+        return None
+    except httpx.HTTPStatusError as e:
+        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code}: {e.response.text} — fallback a Polly")
+        return None
     except Exception as e:
-        print(f"[ElevenLabs] Errore: {type(e).__name__}: {e} — fallback a Polly")
+        print(f"[ElevenLabs] Errore inatteso {type(e).__name__}: {e} — fallback a Polly")
         return None
 
 
