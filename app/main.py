@@ -14,7 +14,7 @@ from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
-from app.routes.voice import router as voice_router
+from app.routes.voice import router as voice_router, prewarm_audio_cache
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant
 
@@ -47,6 +47,8 @@ def on_startup():
 
     restaurant = fetch_and_save_restaurant()
     print(f"[Startup] Restaurant: {list(restaurant.keys()) if restaurant else 'non caricato'}")
+
+    prewarm_audio_cache()
 
     _twilio_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"]
     _present = [v for v in _twilio_vars if os.getenv(v)]

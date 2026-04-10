@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import uuid
@@ -24,20 +25,38 @@ _GATHER_ATTRS = 'input="speech" language="it-IT" speechTimeout="auto"'
 _POLLY_FALLBACK = "Polly.Giorgio"
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
+# Cache in memoria: testo → filename MP3. Evita chiamate ripetute a ElevenLabs.
+_AUDIO_CACHE: dict[str, str] = {}
+
+# Frasi pre-generate all'avvio del server
+_CACHED_PHRASES = [
+    "Certo, dimmi pure!",
+    "Che nome metto?",
+    "Per che ora?",
+    "Perfetto, confermo?",
+    _NO_INPUT_MSG,
+]
+
 
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
 
 
 def _synthesize(text: str) -> str | None:
-    """Chiama ElevenLabs TTS, salva l'MP3 in AUDIO_DIR e restituisce il filename.
-    Restituisce None se le credenziali mancano o la chiamata fallisce."""
+    """Chiama ElevenLabs TTS (sync). Controlla la cache prima.
+    Usata solo per il prewarm all'avvio; i route handler usano _synthesize_async."""
+    if text in _AUDIO_CACHE:
+        cached = _AUDIO_CACHE[text]
+        if (AUDIO_DIR / cached).exists():
+            print(f"[ElevenLabs] Cache hit: {text!r}")
+            return cached
+
     api_key = os.getenv("ELEVENLABS_API_KEY")
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
     if not api_key or not voice_id:
         print("[ElevenLabs] Credenziali mancanti, fallback a Polly")
         return None
-    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {"text": text, "model_id": model_id}
     print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
@@ -48,7 +67,7 @@ def _synthesize(text: str) -> str | None:
             json=payload,
             timeout=15,
         )
-        print(f"[ElevenLabs] HTTP {resp.status_code} content-type={resp.headers.get('content-type')} size={len(resp.content)}")
+        print(f"[ElevenLabs] HTTP {resp.status_code} size={len(resp.content)}")
         if resp.status_code != 200:
             print(f"[ElevenLabs] Errore risposta: {resp.text}")
             return None
@@ -68,41 +87,77 @@ def _synthesize(text: str) -> str | None:
         return None
 
 
-def _audio_element(text: str) -> str:
+async def _synthesize_async(text: str) -> str | None:
+    """Chiama ElevenLabs TTS (async). Controlla la cache prima."""
+    if text in _AUDIO_CACHE:
+        cached = _AUDIO_CACHE[text]
+        if (AUDIO_DIR / cached).exists():
+            print(f"[ElevenLabs] Cache hit: {text!r}")
+            return cached
+
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    if not api_key or not voice_id:
+        print("[ElevenLabs] Credenziali mancanti, fallback a Polly")
+        return None
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    payload = {"text": text, "model_id": model_id}
+    print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                url,
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+        print(f"[ElevenLabs] HTTP {resp.status_code} size={len(resp.content)}")
+        if resp.status_code != 200:
+            print(f"[ElevenLabs] Errore risposta: {resp.text}")
+            return None
+        resp.raise_for_status()
+        filename = f"{uuid.uuid4()}.mp3"
+        (AUDIO_DIR / filename).write_bytes(resp.content)
+        print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
+        return filename
+    except httpx.TimeoutException as e:
+        print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
+        return None
+    except httpx.HTTPStatusError as e:
+        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code}: {e.response.text} — fallback a Polly")
+        return None
+    except Exception as e:
+        print(f"[ElevenLabs] Errore inatteso {type(e).__name__}: {e} — fallback a Polly")
+        return None
+
+
+async def _audio_element_async(text: str) -> str:
     """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>."""
-    filename = _synthesize(text)
+    filename = await _synthesize_async(text)
     if filename:
         url = f"{_public_base_url()}/voice/audio/{filename}"
         return f"<Play>{escape(url)}</Play>"
     return f'<Say voice="{_POLLY_FALLBACK}">{escape(text)}</Say>'
 
 
-def _twiml_gather(session_id: str, text: str) -> str:
-    """TwiML che riproduce l'audio e rimane in ascolto per il turno successivo."""
-    audio = _audio_element(text)
-    no_input = _audio_element(_NO_INPUT_MSG)
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<Response>\n"
-        f"  <Gather {_GATHER_ATTRS} "
-        f'action="/voice/gather?session_id={session_id}" method="POST">\n'
-        f"    {audio}\n"
-        "  </Gather>\n"
-        f"  {no_input}\n"
-        "</Response>"
-    )
-
-
-def _twiml_end(text: str) -> str:
-    """TwiML che riproduce l'audio e chiude la chiamata."""
-    audio = _audio_element(text)
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<Response>\n"
-        f"  {audio}\n"
-        "  <Hangup/>\n"
-        "</Response>"
-    )
+def prewarm_audio_cache() -> None:
+    """Pre-genera gli audio più frequenti all'avvio e li mette in cache.
+    Chiamata da main.py on_startup (sync)."""
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if not api_key:
+        print("[ElevenLabs] Prewarm skip: ELEVENLABS_API_KEY non configurata")
+        return
+    print(f"[ElevenLabs] Prewarm di {len(_CACHED_PHRASES)} frasi frequenti...")
+    cached_count = 0
+    for phrase in _CACHED_PHRASES:
+        filename = _synthesize(phrase)
+        if filename:
+            _AUDIO_CACHE[phrase] = filename
+            cached_count += 1
+            print(f"[ElevenLabs] Cached: {phrase!r} → {filename}")
+        else:
+            print(f"[ElevenLabs] Prewarm fallito per: {phrase!r}")
+    print(f"[ElevenLabs] Prewarm completato: {cached_count}/{len(_CACHED_PHRASES)} frasi in cache")
 
 
 @router.get("/audio/{filename}")
@@ -118,7 +173,7 @@ def serve_audio(filename: str):
 
 
 @router.post("/incoming")
-def voice_incoming(
+async def voice_incoming(
     From: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
@@ -141,11 +196,26 @@ def voice_incoming(
     greeting = get_agent_greeting()
     print(f"[Voice] Saluto: {greeting!r}")
 
-    return Response(content=_twiml_gather(session_id, greeting), media_type="application/xml")
+    # Genera in parallelo l'audio del saluto e dell'eventuale no-input timeout
+    audio, no_input = await asyncio.gather(
+        _audio_element_async(greeting),
+        _audio_element_async(_NO_INPUT_MSG),
+    )
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f"  <Gather {_GATHER_ATTRS} "
+        f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+        f"    {audio}\n"
+        "  </Gather>\n"
+        f"  {no_input}\n"
+        "</Response>"
+    )
+    return Response(content=twiml, media_type="application/xml")
 
 
 @router.post("/gather")
-def voice_gather(
+async def voice_gather(
     session_id: str = Query(...),
     SpeechResult: str = Form(default=""),
     session: Session = Depends(get_session),
@@ -159,10 +229,23 @@ def voice_gather(
     print(f"[Voice] Gather session={session_id!r} speech={speech!r}")
 
     if not speech:
-        twiml = _twiml_gather(session_id, "Non ho capito. Può ripetere?")
+        # Genera in parallelo "non ho capito" + fallback no-input (spesso cached)
+        audio, no_input = await asyncio.gather(
+            _audio_element_async("Non ho capito. Può ripetere?"),
+            _audio_element_async(_NO_INPUT_MSG),
+        )
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  <Gather {_GATHER_ATTRS} "
+            f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+            f"    {audio}\n"
+            "  </Gather>\n"
+            f"  {no_input}\n"
+            "</Response>"
+        )
         return Response(content=twiml, media_type="application/xml")
 
-    # Log del customer_phone nella sessione prima di chiamare il motore di chat
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
     _phone = _conv.customer_phone if _conv else "NOT FOUND"
@@ -170,28 +253,56 @@ def voice_gather(
     print(f"[Voice] Sessione {session_id}: customer_phone={_phone!r} stato={_state!r}")
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
-    result = chat(chat_request, session)
+
+    # Esegui chat() (OpenAI + DB) in un thread separato per non bloccare l'event loop
+    result = await asyncio.to_thread(chat, chat_request, session)
 
     reply = result.response_message
     print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r}")
 
     if result.state == "completed":
-        # Invia WhatsApp PRIMA di restituire il TwiML con <Hangup>
+        # Genera audio e invia WhatsApp in parallelo
         phone = _conv.customer_phone if _conv else None
         merged = result.merged_order or {}
         items = merged.get("items", [])
         total = round(sum(i.get("total_price", 0.0) for i in items), 2)
         print(f"[WhatsApp] Invio a {phone!r}...")
-        wa_status = send_whatsapp_confirmation(
-            customer_name=merged.get("customer_name", ""),
-            customer_phone=phone,
-            pickup_time=merged.get("pickup_time", ""),
-            items=items,
-            total_amount=total,
+
+        audio, wa_status = await asyncio.gather(
+            _audio_element_async(reply),
+            asyncio.to_thread(
+                send_whatsapp_confirmation,
+                merged.get("customer_name", ""),
+                phone,
+                merged.get("pickup_time", ""),
+                items,
+                total,
+            ),
         )
         print(f"[WhatsApp] Risultato: {wa_status}")
-        twiml = _twiml_end(reply)
+
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {audio}\n"
+            "  <Hangup/>\n"
+            "</Response>"
+        )
     else:
-        twiml = _twiml_gather(session_id, reply)
+        # Genera in parallelo: audio risposta + audio no-input (quasi sempre cached)
+        audio, no_input = await asyncio.gather(
+            _audio_element_async(reply),
+            _audio_element_async(_NO_INPUT_MSG),
+        )
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  <Gather {_GATHER_ATTRS} "
+            f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+            f"    {audio}\n"
+            "  </Gather>\n"
+            f"  {no_input}\n"
+            "</Response>"
+        )
 
     return Response(content=twiml, media_type="application/xml")
