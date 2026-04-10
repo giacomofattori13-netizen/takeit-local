@@ -225,6 +225,11 @@ async def voice_incoming(
                 base = re.split(r"[.!?]", greeting)[0].strip()
                 greeting = f"{base}! È lei {_italian_title(found_name)}?"
                 conversation.pending_customer_name = found_name
+                # Salva le pizze preferite per il flusso "solite"
+                raw_fav = customer.get("favorite_pizzas") or []
+                if isinstance(raw_fav, str):
+                    raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
+                conversation.favorite_pizzas_json = json.dumps(raw_fav[:5], ensure_ascii=False)
                 session.add(conversation)
                 session.commit()
             else:

@@ -1091,6 +1091,17 @@ def _italian_title(full_name: str) -> str:
     return f"il signor {full_name}"
 
 
+def _format_pizza_list(pizzas: list[str]) -> str:
+    """Formatta una lista di pizze in italiano: 'A', 'A e B', 'A, B e C'."""
+    if not pizzas:
+        return ""
+    if len(pizzas) == 1:
+        return pizzas[0]
+    if len(pizzas) == 2:
+        return f"{pizzas[0]} e {pizzas[1]}"
+    return ", ".join(pizzas[:-1]) + f" e {pizzas[-1]}"
+
+
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
     print(f"[ChatStart] Body ricevuto: {body}")
@@ -1131,6 +1142,11 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
                 base = re.split(r"[.!?]", greeting)[0].strip()
                 greeting = f"{base}! È lei {_italian_title(found_name)}?"
                 conversation.pending_customer_name = found_name
+                # Salva le pizze preferite per il flusso "solite"
+                raw_fav = customer.get("favorite_pizzas") or []
+                if isinstance(raw_fav, str):
+                    raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
+                conversation.favorite_pizzas_json = json.dumps(raw_fav[:5], ensure_ascii=False)
                 session.add(conversation)
                 session.commit()
     else:
@@ -1339,6 +1355,201 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.pending_customer_name = None
         elif _negative:
             conversation.pending_customer_name = None
+
+    # ── CONFIRMING_USUAL: skip LLM dove possibile ────────────────────────────
+
+    fav_pizzas_session = json.loads(conversation.favorite_pizzas_json or "[]")
+
+    # Gestore: il cliente risponde alla domanda "Ti faccio le solite?"
+    if conversation.state == "confirming_usual":
+        fav_list = fav_pizzas_session[:3]
+        _yes_usual = any(w in message_lower for w in [
+            "sì", "si", "ok", "va bene", "certo", "esatto", "dai", "perfetto", "confermo",
+            "sì grazie", "si grazie", "sì certo", "si certo",
+        ])
+        _no_usual = any(w in message_lower for w in [
+            "no", "no grazie", "diverso", "diversi", "altri", "altre", "cambio", "diversa",
+        ])
+
+        if _yes_usual and fav_list:
+            # Aggiungi le pizze preferite alla sessione
+            existing_items = json.loads(conversation.items_json)
+            added = []
+            for pizza_name in fav_list:
+                menu_item = session.exec(
+                    select(MenuItem).where(
+                        MenuItem.name == pizza_name,
+                        MenuItem.available == True,
+                    )
+                ).first()
+                if menu_item and not any(ei["pizza_name"] == pizza_name for ei in existing_items + added):
+                    added.append({
+                        "pizza_name": menu_item.name,
+                        "pizza_type": menu_item.pizza_type,
+                        "quantity": 1,
+                        "dough_type": "classica",
+                        "add_ingredients": [],
+                        "remove_ingredients": [],
+                    })
+            merged_items_usual = existing_items + added
+            conversation.items_json = json.dumps(merged_items_usual, ensure_ascii=False)
+            conversation.intended_quantity = None
+            merged_order_usual = {
+                "customer_name": conversation.customer_name,
+                "pickup_time": conversation.pickup_time,
+                "items": merged_items_usual,
+            }
+            state_usual = determine_state(
+                merged_order=merged_order_usual,
+                missing_messages=[],
+                completed=conversation.completed,
+            )
+            conversation.state = state_usual
+            session.add(conversation)
+            session.commit()
+            _resp_usual = build_assistant_response(
+                merged_order=merged_order_usual,
+                state=state_usual,
+                missing_messages=[],
+                order_saved=False,
+                intent="add_items",
+                new_valid_items=added,
+                customer_phone=conversation.customer_phone,
+            )
+            session.add(ConversationLog(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order_json=json.dumps({"intent": "confirm_usual", "items": added}, ensure_ascii=False),
+                merged_order_json=json.dumps(merged_order_usual, ensure_ascii=False),
+                response_message=_resp_usual,
+                valid=bool(added),
+                missing_items_json="[]",
+                state=state_usual,
+            ))
+            session.commit()
+            print(f"[Usual] Confermate {len(added)} pizze abituali → stato={state_usual!r}")
+            return ChatResponse(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order={"intent": "confirm_usual", "items": added},
+                merged_order=merged_order_usual,
+                valid=bool(added),
+                missing_items=[],
+                response_message=_resp_usual,
+                order_id=None,
+                state=state_usual,
+            )
+
+        elif _no_usual:
+            conversation.state = "collecting_items"
+            session.add(conversation)
+            session.commit()
+            _resp_usual = "Dimmi pure cosa vuoi!"
+            _merged_now = {
+                "customer_name": conversation.customer_name,
+                "pickup_time": conversation.pickup_time,
+                "items": json.loads(conversation.items_json),
+            }
+            session.add(ConversationLog(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order_json=json.dumps({"intent": "decline_usual", "items": [], "customer_name": None, "pickup_time": None}, ensure_ascii=False),
+                merged_order_json=json.dumps(_merged_now, ensure_ascii=False),
+                response_message=_resp_usual,
+                valid=False,
+                missing_items_json="[]",
+                state="collecting_items",
+            ))
+            session.commit()
+            print("[Usual] Rifiutate pizze abituali → collecting_items")
+            return ChatResponse(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order={"intent": "decline_usual", "items": [], "customer_name": None, "pickup_time": None},
+                merged_order=_merged_now,
+                valid=False,
+                missing_items=[],
+                response_message=_resp_usual,
+                order_id=None,
+                state="collecting_items",
+            )
+
+        else:
+            # Risposta ambigua: ripeti la domanda senza chiamare l'LLM
+            pizza_list_str = _format_pizza_list(fav_list)
+            _resp_usual = f"Ti faccio le solite? {pizza_list_str}"
+            _merged_now = {
+                "customer_name": conversation.customer_name,
+                "pickup_time": conversation.pickup_time,
+                "items": json.loads(conversation.items_json),
+            }
+            session.add(ConversationLog(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order_json=json.dumps({"intent": "unknown", "items": [], "customer_name": None, "pickup_time": None}, ensure_ascii=False),
+                merged_order_json=json.dumps(_merged_now, ensure_ascii=False),
+                response_message=_resp_usual,
+                valid=False,
+                missing_items_json="[]",
+                state="confirming_usual",
+            ))
+            session.commit()
+            return ChatResponse(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order={"intent": "unknown", "items": [], "customer_name": None, "pickup_time": None},
+                merged_order=_merged_now,
+                valid=False,
+                missing_items=[],
+                response_message=_resp_usual,
+                order_id=None,
+                state="confirming_usual",
+            )
+
+    # Trigger: transizione a confirming_usual (prima della chiamata LLM)
+    if (
+        fav_pizzas_session
+        and conversation.state == "collecting_items"
+        and not json.loads(conversation.items_json)  # carrello vuoto
+        and (
+            extract_intended_quantity(request.message) is not None
+            or any(w in message_lower for w in ["solite", "stesse", "stessa cosa", "al solito"])
+        )
+    ):
+        conversation.state = "confirming_usual"
+        session.add(conversation)
+        session.commit()
+        fav_list = fav_pizzas_session[:3]
+        pizza_list_str = _format_pizza_list(fav_list)
+        _resp_usual = f"Ti faccio le solite? {pizza_list_str}"
+        _merged_now = {
+            "customer_name": conversation.customer_name,
+            "pickup_time": conversation.pickup_time,
+            "items": [],
+        }
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps({"intent": "order_intent", "items": [], "customer_name": None, "pickup_time": None}, ensure_ascii=False),
+            merged_order_json=json.dumps(_merged_now, ensure_ascii=False),
+            response_message=_resp_usual,
+            valid=False,
+            missing_items_json="[]",
+            state="confirming_usual",
+        ))
+        session.commit()
+        print(f"[Usual] Trigger: {len(fav_list)} pizze abituali → confirming_usual")
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={"intent": "order_intent", "items": [], "customer_name": None, "pickup_time": None},
+            merged_order=_merged_now,
+            valid=False,
+            missing_items=[],
+            response_message=_resp_usual,
+            order_id=None,
+            state="confirming_usual",
+        )
 
     # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
     extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)

@@ -27,6 +27,7 @@ def on_startup():
         "ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR",
         "ALTER TABLE conversationsession ADD COLUMN intended_quantity INTEGER",
         "ALTER TABLE conversationsession ADD COLUMN pending_customer_name VARCHAR",
+        "ALTER TABLE conversationsession ADD COLUMN favorite_pizzas_json VARCHAR DEFAULT '[]'",
     ]:
         try:
             with engine.connect() as conn:
