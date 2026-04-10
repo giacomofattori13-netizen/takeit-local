@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -13,7 +14,11 @@ from sqlmodel import Session
 from app.db import get_session
 from app.models import ConversationSession
 from app.schemas import ChatRequest
-from app.services.conversation_service import get_agent_greeting, send_whatsapp_confirmation
+from app.services.conversation_service import (
+    get_agent_greeting,
+    lookup_customer,
+    send_whatsapp_confirmation,
+)
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -40,6 +45,14 @@ _CACHED_PHRASES = [
 
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
+
+
+def _italian_title(full_name: str) -> str:
+    """'il signor' o 'la signora' in base al nome (euristica sul finale)."""
+    first = full_name.strip().split()[0] if full_name.strip() else full_name
+    if first.lower().endswith("a"):
+        return f"la signora {full_name}"
+    return f"il signor {full_name}"
 
 
 def _synthesize(text: str) -> str | None:
@@ -177,9 +190,16 @@ async def voice_incoming(
     From: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
-    """Webhook Twilio Voice: crea sessione, risponde con saluto + Gather speech."""
+    """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {caller_phone!r}")
+
+    # Avvia il lookup cliente subito in background: il phone è già disponibile
+    # prima ancora della sessione DB, così i ~500ms di Base44 si sovrappongono.
+    lookup_task = None
+    if caller_phone:
+        print(f"[Voice] Customer lookup per {caller_phone}")
+        lookup_task = asyncio.to_thread(lookup_customer, caller_phone)
 
     session_id = str(uuid.uuid4())
     conversation = ConversationSession(
@@ -194,6 +214,24 @@ async def voice_incoming(
     print(f"[Voice] Sessione creata: {session_id}")
 
     greeting = get_agent_greeting()
+
+    # Attendi il lookup (si sovrappone alle operazioni DB sopra)
+    if lookup_task is not None:
+        customer = await lookup_task
+        if customer:
+            found_name = (customer.get("full_name") or "").strip()
+            if found_name:
+                print(f"[Voice] Cliente trovato: {found_name}")
+                base = re.split(r"[.!?]", greeting)[0].strip()
+                greeting = f"{base}! È lei {_italian_title(found_name)}?"
+                conversation.pending_customer_name = found_name
+                session.add(conversation)
+                session.commit()
+            else:
+                print("[Voice] Cliente non trovato")
+        else:
+            print("[Voice] Cliente non trovato")
+
     print(f"[Voice] Saluto: {greeting!r}")
 
     # Genera in parallelo l'audio del saluto e dell'eventuale no-input timeout
