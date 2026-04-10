@@ -222,9 +222,10 @@ async def voice_incoming(
             found_name = (customer.get("full_name") or "").strip()
             if found_name:
                 print(f"[Voice] Cliente trovato: {found_name}")
-                base = re.split(r"[.!?]", greeting)[0].strip()
-                greeting = f"{base}! È lei {_italian_title(found_name)}?"
-                conversation.pending_customer_name = found_name
+                # Saluta direttamente per nome — il numero è conferma sufficiente
+                first_name = found_name.split()[0]
+                greeting = f"Ciao {first_name}! Come posso aiutarti?"
+                conversation.customer_name = found_name
                 # Salva le pizze preferite per il flusso "solite"
                 raw_fav = customer.get("favorite_pizzas") or []
                 if isinstance(raw_fav, str):
