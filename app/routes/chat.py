@@ -28,6 +28,7 @@ from app.services.conversation_service import (
     load_menu_from_base44,
     load_doughs,
     save_order_to_base44,
+    send_whatsapp_confirmation,
     get_next_order_number,
     get_dough_surcharge,
     is_dough_available,
@@ -1259,6 +1260,13 @@ def chat(request: ChatRequest, session: SessionDep):
                 ai_confidence=0.95,
                 items=enriched_items,
             )
+            send_whatsapp_confirmation(
+                customer_name=merged_order["customer_name"],
+                customer_phone=conversation.customer_phone,
+                pickup_time=merged_order["pickup_time"],
+                items=enriched_items,
+                total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
+            )
             pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
             order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
             upsert_customer(
@@ -1514,6 +1522,13 @@ def chat(request: ChatRequest, session: SessionDep):
             order_number=get_next_order_number(),
             ai_confidence=0.9,
             items=enriched_items,
+        )
+        send_whatsapp_confirmation(
+            customer_name=merged_order["customer_name"],
+            customer_phone=conversation.customer_phone,
+            pickup_time=merged_order["pickup_time"],
+            items=enriched_items,
+            total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
         )
 
         pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))

@@ -304,13 +304,6 @@ def save_order_to_base44(
         print(f"[Base44] Errore generico: {type(e).__name__}: {e}")
         return
 
-    send_whatsapp_confirmation(
-        customer_name=customer_name,
-        customer_phone=customer_phone,
-        pickup_time=pickup_time,
-        items=items,
-        total_amount=total_amount,
-    )
 
 
 def send_whatsapp_confirmation(
@@ -319,7 +312,9 @@ def send_whatsapp_confirmation(
     pickup_time: str,
     items: list[dict],
     total_amount: float,
-) -> None:
+) -> str:
+    """Invia la conferma WhatsApp. Restituisce una stringa di stato:
+    'inviato:<status_code>', 'skip:<motivo>', 'errore:<msg>'."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     from_number = os.getenv("TWILIO_WHATSAPP_FROM")
@@ -330,18 +325,18 @@ def send_whatsapp_confirmation(
 
     if not all([account_sid, auth_token, from_number]):
         print("[WhatsApp] Variabili Twilio mancanti, skip")
-        return
+        return "skip:credenziali_mancanti"
 
     # Normalizza il numero: rimuovi spazi/trattini/parentesi
     phone = re.sub(r"[\s\-\(\)]", "", customer_phone or "")
     print(f"[WhatsApp] Numero normalizzato: {phone!r}")
     if not phone:
         print("[WhatsApp] Numero non disponibile, skip")
-        return
+        return "skip:numero_mancante"
     # Numeri fissi: formato locale (0...) o internazionale italiano (+390...)
     if phone.startswith("0") or phone.startswith("+390"):
         print(f"[WhatsApp] Numero fisso ({phone}), skip")
-        return
+        return "skip:numero_fisso"
     if not phone.startswith("+"):
         phone = f"+39{phone}"
     print(f"[WhatsApp] Numero destinatario finale: {phone!r}")
@@ -381,10 +376,13 @@ def send_whatsapp_confirmation(
         )
         print(f"[WhatsApp] Risposta Twilio: status={response.status_code} body={response.text}")
         response.raise_for_status()
+        return f"inviato:{response.status_code}"
     except httpx.HTTPStatusError as e:
         print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text}")
+        return f"errore:HTTP_{e.response.status_code}"
     except Exception as e:
         print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
+        return f"errore:{type(e).__name__}"
 
 
 def _fetch_restaurant_from_base44() -> dict | None:

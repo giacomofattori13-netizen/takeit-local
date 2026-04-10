@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from pathlib import Path
@@ -11,7 +12,7 @@ from sqlmodel import Session
 from app.db import get_session
 from app.models import ConversationSession
 from app.schemas import ChatRequest
-from app.services.conversation_service import get_agent_greeting
+from app.services.conversation_service import get_agent_greeting, send_whatsapp_confirmation
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -175,6 +176,20 @@ def voice_gather(
     print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r}")
 
     if result.state == "completed":
+        # Invia WhatsApp PRIMA di restituire il TwiML con <Hangup>
+        phone = _conv.customer_phone if _conv else None
+        merged = result.merged_order or {}
+        items = merged.get("items", [])
+        total = round(sum(i.get("total_price", 0.0) for i in items), 2)
+        print(f"[WhatsApp] Invio a {phone!r}...")
+        wa_status = send_whatsapp_confirmation(
+            customer_name=merged.get("customer_name", ""),
+            customer_phone=phone,
+            pickup_time=merged.get("pickup_time", ""),
+            items=items,
+            total_amount=total,
+        )
+        print(f"[WhatsApp] Risultato: {wa_status}")
         twiml = _twiml_end(reply)
     else:
         twiml = _twiml_gather(session_id, reply)
