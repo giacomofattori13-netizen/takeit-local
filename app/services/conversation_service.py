@@ -504,16 +504,96 @@ def get_opening_hours() -> dict | str | None:
 _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
+def _round_to_nearest_15(total_minutes: int) -> int:
+    """Arrotonda ai 15 minuti più vicini (es. 19:07 → 19:00, 19:08 → 19:15)."""
+    return ((total_minutes + 7) // 15) * 15
+
+
+def _round_up_to_15(total_minutes: int) -> int:
+    """Arrotonda al successivo multiplo di 15 minuti (ceiling)."""
+    return ((total_minutes + 14) // 15) * 15
+
+
+def resolve_pickup_time(raw: str) -> str:
     """
-    Controlla se pickup_time rientra negli orari di apertura del giorno corrente.
+    Normalizza un orario di ritiro grezzo in "HH:MM" (timezone Europe/Rome).
+
+    Regole applicate:
+    1. Orario ambiguo (ore 1-12): scegli il più vicino nel futuro tra AM e PM.
+    2. "prima_possibile" / "prima possibile" / "subito": ora corrente + 20 min,
+       arrotondato al prossimo multiplo di 15 min.
+    3. Arrotonda sempre ai 15 minuti più vicini.
+    """
+    rome = ZoneInfo("Europe/Rome")
+    now = datetime.datetime.now(tz=rome)
+    now_total = now.hour * 60 + now.minute
+
+    lowered = raw.strip().lower()
+    if (
+        re.search(r"prima.{0,10}possibile|appena.{0,5}possibile", lowered)
+        or lowered in ("prima_possibile", "asap", "subito")
+    ):
+        target_total = _round_up_to_15(now_total + 20)
+        if target_total >= 24 * 60:
+            target_total -= 24 * 60
+        h, m = divmod(target_total, 60)
+        print(f"[Hours] 'prima possibile' → {h:02d}:{m:02d} (ora attuale: {now.hour:02d}:{now.minute:02d})")
+        return f"{h:02d}:{m:02d}"
+
+    m_match = re.match(r"^(\d{1,2})(?::(\d{2}))?$", raw.strip())
+    if not m_match:
+        return raw  # formato non riconosciuto, ritorna as-is
+
+    hour = int(m_match.group(1))
+    minute = int(m_match.group(2)) if m_match.group(2) else 0
+
+    # Regola 1: orario ambiguo (1-12) → AM vs PM, scegli il più vicino nel futuro
+    if 1 <= hour <= 12:
+        am_total = hour * 60 + minute
+        pm_total = (hour + 12) * 60 + minute
+
+        def _minutes_until(target: int) -> int:
+            diff = target % (24 * 60) - now_total
+            if diff < 0:
+                diff += 24 * 60
+            return diff
+
+        if _minutes_until(pm_total) < _minutes_until(am_total):
+            hour = (hour + 12) % 24
+            print(f"[Hours] Orario ambiguo '{raw}' risolto come {hour:02d}:{minute:02d} (ora: {now.hour:02d}:{now.minute:02d})")
+
+    # Regola 3: arrotonda ai 15 minuti più vicini
+    total = _round_to_nearest_15(hour * 60 + minute)
+    if total >= 24 * 60:
+        total -= 24 * 60
+
+    h, m = divmod(total, 60)
+    result = f"{h:02d}:{m:02d}"
+    if result != raw.strip():
+        print(f"[Hours] Orario normalizzato: '{raw}' → '{result}'")
+    return result
+
+
+def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None, str | None]:
+    """
+    Controlla se pickup_time rientra negli orari di apertura del giorno corrente
+    ed è nel futuro rispetto all'orario attuale (timezone Europe/Rome).
+
     opening_hours atteso: {"monday": "closed"|"HH:MM-HH:MM", "tuesday": ..., ...}
-    Restituisce (is_valid, nearest_open_slot).
-    Se opening_hours non è configurato o non parsabile, restituisce (True, None).
+
+    Restituisce (is_valid, nearest_open_slot, closing_time).
+    - is_valid: True se l'orario è valido
+    - nearest_open_slot: orario suggerito (HH:MM) se non valido
+    - closing_time: orario di chiusura (HH:MM), valorizzato solo quando il problema
+      è che l'orario richiesto supera la chiusura di oggi
     """
+    rome = ZoneInfo("Europe/Rome")
+    now = datetime.datetime.now(tz=rome)
+    now_total = now.hour * 60 + now.minute
+
     opening_hours = get_opening_hours()
     if not opening_hours or not isinstance(opening_hours, dict):
-        return True, None
+        return True, None, None
 
     def parse_time(t: str) -> int:
         p = t.strip().split(":")
@@ -534,14 +614,14 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
         parts = pickup_time.strip().split(":")
         pickup_minutes = int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
     except (ValueError, IndexError):
-        return True, None
+        return True, None, None
 
     today_name = _WEEKDAY_NAMES[datetime.date.today().weekday()]
     today_slot = opening_hours.get(today_name, "")
     today_range = parse_range(today_slot)
 
     if today_range is None:
-        # Oggi chiusi — cerca il prossimo giorno aperto e suggerisci l'orario di apertura
+        # Oggi chiusi — cerca il prossimo giorno aperto
         for i in range(1, 7):
             next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
             next_slot = opening_hours.get(next_day, "")
@@ -549,29 +629,38 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None]:
             if next_range:
                 h, m = divmod(next_range[0], 60)
                 print(f"[Hours] Oggi ({today_name}) chiusi, prossima apertura: {next_day} {h:02d}:{m:02d}")
-                return False, f"{h:02d}:{m:02d}"
-        return False, None
+                return False, f"{h:02d}:{m:02d}", None
+        return False, None, None
 
-    open_m, close_m = today_range
-    if open_m <= pickup_minutes <= close_m:
-        return True, None
+    open_min, close_min = today_range
 
-    # Orario fuori range — suggerisci l'apertura di oggi se non ancora raggiunta
-    if pickup_minutes < open_m:
-        h, m = divmod(open_m, 60)
-        return False, f"{h:02d}:{m:02d}"
+    # Prima dell'apertura
+    if pickup_minutes < open_min:
+        h, m = divmod(open_min, 60)
+        return False, f"{h:02d}:{m:02d}", None
 
-    # Dopo la chiusura — suggerisci il prossimo giorno aperto
-    for i in range(1, 7):
-        next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
-        next_slot = opening_hours.get(next_day, "")
-        next_range = parse_range(next_slot)
-        if next_range:
-            h, m = divmod(next_range[0], 60)
-            print(f"[Hours] Dopo chiusura ({today_name}), prossima apertura: {next_day} {h:02d}:{m:02d}")
-            return False, f"{h:02d}:{m:02d}"
+    # Dopo la chiusura → suggerisci l'ultimo slot (chiusura - 15 min)
+    if pickup_minutes > close_min:
+        last_slot = max(close_min - 15, open_min)
+        close_h, close_m = divmod(close_min, 60)
+        last_h, last_m = divmod(last_slot, 60)
+        print(f"[Hours] Richiesta {pickup_time} dopo chiusura {close_h:02d}:{close_m:02d}")
+        return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
 
-    return False, None
+    # Dentro gli orari — ma già passato per oggi
+    if pickup_minutes < now_total:
+        next_slot = _round_up_to_15(now_total)
+        if next_slot <= close_min:
+            h, m = divmod(next_slot, 60)
+            print(f"[Hours] Orario {pickup_time} già passato, prossimo slot: {h:02d}:{m:02d}")
+            return False, f"{h:02d}:{m:02d}", None
+        # Nessun slot rimasto oggi
+        last_slot = max(close_min - 15, open_min)
+        close_h, close_m = divmod(close_min, 60)
+        last_h, last_m = divmod(last_slot, 60)
+        return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
+
+    return True, None, None
 
 
 def lookup_customer(phone: str) -> dict | None:
@@ -862,7 +951,7 @@ Rules:
 - If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request even if it is not in the MENU.
 - If no pizza is clearly mentioned, return an empty items array.
 - REGOLA ASSOLUTA — MESSAGGIO CORRENTE ONLY: Analizza ESCLUSIVAMENTE l'ultimo messaggio dell'utente (l'ultimo turno). NON guardare i messaggi precedenti per estrarre pizze. Gli item già ordinati sono salvati dal backend — non riestrarre mai pizze dalla storia. Se l'ultimo messaggio non contiene nuove pizze (es. è un orario, un nome, una conferma, una risposta sì/no), restituisci items=[]. Esempi: "alle 20:30" → items=[], "Mario" → items=[], "sì" → items=[], "una capricciosa" → items=[Capricciosa].
-- pickup_time should be a simple string like "20:30" when present.
+- pickup_time should be a simple string like "20:30" when present. If the user says "prima possibile", "il prima possibile", "subito" or similar expressions meaning "as soon as possible", output "prima_possibile" as pickup_time.
 - customer_name should be extracted when clearly present.
 - Each item must always include "add_ingredients" and "remove_ingredients".
 - If there are no ingredient changes, use empty arrays.

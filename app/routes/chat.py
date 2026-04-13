@@ -36,6 +36,7 @@ from app.services.conversation_service import (
     _PIZZA_TYPE_TO_DOUGH,
     get_agent_greeting,
     validate_pickup_time,
+    resolve_pickup_time,
     lookup_customer,
     upsert_customer,
 )
@@ -1564,13 +1565,19 @@ def chat(request: ChatRequest, session: SessionDep):
     # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
     if extracted.get("pickup_time"):
-        pt = extracted["pickup_time"]
-        is_valid, suggestion = validate_pickup_time(pt)
+        pt = resolve_pickup_time(extracted["pickup_time"])
+        is_valid, suggestion, closing_time = validate_pickup_time(pt)
         if not is_valid:
-            pickup_time_error = (
-                f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
-                if suggestion else f"Mi dispiace, alle {pt} siamo chiusi."
-            )
+            if closing_time:
+                pickup_time_error = (
+                    f"Mi dispiace, chiudiamo alle {closing_time}. L'ultimo orario disponibile è le {suggestion}."
+                    if suggestion else f"Mi dispiace, alle {pt} siamo già chiusi."
+                )
+            else:
+                pickup_time_error = (
+                    f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
+                    if suggestion else f"Mi dispiace, alle {pt} siamo chiusi."
+                )
         else:
             conversation.pickup_time = pt
 
