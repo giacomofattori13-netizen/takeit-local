@@ -1133,7 +1133,9 @@ def extract_order_from_text(
 ) -> dict:
     menu_lines = []
     for item in menu_items:
-        line = f'- {item["name"]} | {item["category"]} | €{item["price"]}'
+        ingredients = item.get("ingredients") or []
+        ings_str = f' [{", ".join(ingredients)}]' if ingredients else ""
+        line = f'- {item["name"]}{ings_str}'
         menu_lines.append(line)
 
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
