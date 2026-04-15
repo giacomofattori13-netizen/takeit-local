@@ -1602,12 +1602,19 @@ def chat(request: ChatRequest, session: SessionDep):
         remove_names = {ni["pizza_name"].lower() for ni in new_items}
         merged_items = [ei for ei in existing_items if ei["pizza_name"].lower() not in remove_names]
     elif new_items:
-        # Stessa pizza + stesso impasto → somma quantità; altrimenti aggiungi
+        # Stessa pizza + stesso impasto → somma quantità e aggiorna ingredienti; altrimenti aggiungi
         merged_items = list(existing_items)
         for ni in new_items:
+            ni_add = ni.get("add_ingredients") or []
+            ni_rem = ni.get("remove_ingredients") or []
             for ei in merged_items:
                 if ei["pizza_name"] == ni["pizza_name"] and ei["pizza_type"] == ni["pizza_type"]:
                     ei["quantity"] += ni["quantity"]
+                    # Aggiorna ingredienti solo se il nuovo item ne dichiara
+                    if ni_add:
+                        ei["add_ingredients"] = ni_add
+                    if ni_rem:
+                        ei["remove_ingredients"] = ni_rem
                     break
             else:
                 merged_items.append(ni)
