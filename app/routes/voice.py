@@ -15,6 +15,7 @@ from app.db import get_session
 from app.models import ConversationSession
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
+    build_closed_message,
     get_agent_greeting,
     is_agent_active,
     lookup_customer,
@@ -230,9 +231,7 @@ async def voice_incoming(
     # Controlla agent_active prima di qualsiasi altra operazione
     if not is_agent_active():
         print("[Voice] agent_active=False → chiusura chiamata")
-        closed_audio = await _audio_element_async(
-            "Siamo temporaneamente chiusi. Richiameremo appena possibile. Grazie!"
-        )
+        closed_audio = await _audio_element_async(build_closed_message())
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"

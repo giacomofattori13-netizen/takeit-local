@@ -515,6 +515,94 @@ def get_opening_hours() -> dict | str | None:
 
 
 _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_WEEKDAY_IT   = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"]
+
+
+def build_closed_message() -> str:
+    """Genera un messaggio di chiusura dinamico in base agli orari di apertura.
+
+    Casi:
+    1. Giorno di chiusura settimanale → 'Siamo chiusi oggi. Riapriamo [giorno] alle [ora].'
+    2. Prima dell'orario di apertura odierno → 'Al momento siamo chiusi. Apriamo alle [ora] di oggi.'
+    3. Dopo la chiusura odierna → 'Siamo chiusi per questa sera. Riapriamo [giorno] alle [ora].'
+    4. Dentro gli orari ma agent_active=False (chiusura straordinaria) →
+       'Siamo temporaneamente chiusi per questa sera. Riapriamo regolarmente [giorno].'
+    5. Fallback (nessun dato orari) → messaggio generico.
+    """
+    rome = ZoneInfo("Europe/Rome")
+    now = datetime.datetime.now(tz=rome)
+    now_total = now.hour * 60 + now.minute
+    today_idx = now.weekday()  # 0 = lunedì
+
+    opening_hours = get_opening_hours()
+    if not opening_hours or not isinstance(opening_hours, dict):
+        return "Siamo temporaneamente chiusi. Richiameremo appena possibile. Grazie!"
+
+    def _parse_range(slot: str) -> tuple[int, int] | None:
+        if not slot or slot.strip().lower() == "closed":
+            return None
+        halves = slot.strip().split("-", 1)
+        if len(halves) != 2:
+            return None
+        try:
+            def _pt(t: str) -> int:
+                p = t.strip().split(":")
+                return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
+            return _pt(halves[0]), _pt(halves[1])
+        except Exception:
+            return None
+
+    def _fmt(minutes: int) -> str:
+        """Converte minuti dall'inizio della giornata in stringa parlata: 'le 19' o 'le 19:30'."""
+        h, m = divmod(minutes, 60)
+        return str(h) if m == 0 else f"{h}:{m:02d}"
+
+    def _next_open(offset_start: int = 1) -> tuple[int | None, int | None]:
+        """Restituisce (weekday_index, open_minutes) del prossimo giorno aperto."""
+        for i in range(offset_start, 7):
+            day_idx = (today_idx + i) % 7
+            slot = opening_hours.get(_WEEKDAY_NAMES[day_idx], "")
+            r = _parse_range(slot)
+            if r:
+                return day_idx, r[0]
+        return None, None
+
+    today_range = _parse_range(opening_hours.get(_WEEKDAY_NAMES[today_idx], ""))
+
+    # Caso 1 — giorno di chiusura settimanale
+    if today_range is None:
+        next_idx, next_open_min = _next_open(1)
+        if next_idx is not None:
+            return (
+                f"Siamo chiusi oggi. Riapriamo {_WEEKDAY_IT[next_idx]} "
+                f"alle {_fmt(next_open_min)}. La aspettiamo!"
+            )
+        return "Siamo chiusi oggi. Riapriamo presto. La aspettiamo!"
+
+    open_min, close_min = today_range
+
+    # Caso 2 — prima dell'apertura odierna
+    if now_total < open_min:
+        return f"Al momento siamo chiusi. Apriamo alle {_fmt(open_min)} di oggi. La aspettiamo!"
+
+    # Caso 3 — dopo la chiusura odierna
+    if now_total >= close_min:
+        next_idx, next_open_min = _next_open(1)
+        if next_idx is not None:
+            return (
+                f"Siamo chiusi per questa sera. Riapriamo {_WEEKDAY_IT[next_idx]} "
+                f"alle {_fmt(next_open_min)}. La aspettiamo!"
+            )
+        return "Siamo chiusi per questa sera. Riapriamo presto. La aspettiamo!"
+
+    # Caso 4 — dentro gli orari ma agent_active=False (chiusura straordinaria)
+    next_idx, next_open_min = _next_open(1)
+    if next_idx is not None:
+        return (
+            f"Siamo temporaneamente chiusi per questa sera. "
+            f"Riapriamo regolarmente {_WEEKDAY_IT[next_idx]} alle {_fmt(next_open_min)}. Grazie!"
+        )
+    return "Siamo temporaneamente chiusi per questa sera. Riapriamo presto. Grazie!"
 
 
 def _round_to_nearest_15(total_minutes: int) -> int:

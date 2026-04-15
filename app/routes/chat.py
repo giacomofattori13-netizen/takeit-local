@@ -24,6 +24,7 @@ from app.models import (
 )
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
 from app.services.conversation_service import (
+    build_closed_message,
     extract_order_from_text,
     load_menu_from_base44,
     load_doughs,
@@ -1122,7 +1123,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
             session_id="",
             state="closed",
             completed=False,
-            response_message="Siamo temporaneamente chiusi. Riprovi più tardi, grazie!",
+            response_message=build_closed_message(),
         )
     new_session_id = str(uuid.uuid4())
     phone = body.test_phone or None
@@ -1191,7 +1192,7 @@ def chat(request: ChatRequest, session: SessionDep):
             merged_order={},
             valid=False,
             missing_items=[],
-            response_message="Siamo temporaneamente chiusi. Riprovi più tardi, grazie!",
+            response_message=build_closed_message(),
             order_id=None,
             state="closed",
         )
