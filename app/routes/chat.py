@@ -1663,12 +1663,15 @@ def chat(request: ChatRequest, session: SessionDep):
         and merged_order.get("pickup_time") is not None
     )
 
-    # Aggiorna quantità dichiarata (es. "vorrei due pizze") solo quando
-    # il messaggio non contiene pizze specifiche
-    if not new_items:
-        declared = extract_intended_quantity(request.message)
-        if declared:
-            conversation.intended_quantity = declared
+    # Aggiorna quantità dichiarata (es. "vorrei due pizze") — sempre, anche quando
+    # l'LLM ha già estratto item specifici (altrimenti intended_quantity resta None
+    # se l'LLM estrae un item generico dalla frase di dichiarazione).
+    declared = extract_intended_quantity(request.message)
+    if declared:
+        conversation.intended_quantity = declared
+
+    _items_count = sum(int(i.get("quantity") or 1) for i in merged_items)
+    print(f"[Session] intended_quantity={conversation.intended_quantity} items_count={_items_count}")
 
     order_id = None
     order_saved = False
