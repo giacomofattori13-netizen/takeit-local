@@ -1351,6 +1351,10 @@ def chat(request: ChatRequest, session: SessionDep):
                         MenuItem.pizza_type == _item["pizza_type"],
                     )
                 ).first()
+                if not _menu_item:
+                    _menu_item = session.exec(
+                        select(MenuItem).where(MenuItem.name == _item["pizza_name"])
+                    ).first()
                 _base = round(_menu_item.price, 2) if _menu_item else 0.0
                 _is_sg = "(SG)" in _item.get("pizza_name", "")
                 _dough_code = _item.get("dough_type", "classica")
@@ -1806,6 +1810,15 @@ def chat(request: ChatRequest, session: SessionDep):
                 MenuItem.pizza_type == item["pizza_type"],
             )
         ).first()
+        # Fallback: il dough_type è una preferenza del cliente, non una voce separata
+        # nel DB (che ha solo pizza_type="Normale"). Se non trovato con pizza_type
+        # specifico, cerca per solo nome — se esiste la pizza è valida.
+        if not menu_item:
+            menu_item = session.exec(
+                select(MenuItem).where(MenuItem.name == item["pizza_name"])
+            ).first()
+            if menu_item:
+                item["pizza_type"] = menu_item.pizza_type
         if menu_item and menu_item.available:
             dough_code = item.get("dough_type", "classica")
             if is_dough_available(dough_code):
@@ -1916,6 +1929,10 @@ def chat(request: ChatRequest, session: SessionDep):
                     MenuItem.pizza_type == item["pizza_type"],
                 )
             ).first()
+            if not menu_item:
+                menu_item = session.exec(
+                    select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                ).first()
             base_price = round(menu_item.price, 2) if menu_item else 0.0
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
             dough_code = item.get("dough_type", "classica")
