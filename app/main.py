@@ -29,6 +29,7 @@ def on_startup():
         "ALTER TABLE conversationsession ADD COLUMN pending_customer_name VARCHAR",
         "ALTER TABLE conversationsession ADD COLUMN favorite_pizzas_json VARCHAR DEFAULT '[]'",
         "ALTER TABLE conversationsession ADD COLUMN no_input_count INTEGER DEFAULT 0",
+        "ALTER TABLE conversationsession ADD COLUMN upsell_done BOOLEAN DEFAULT FALSE",
     ]:
         try:
             with engine.connect() as conn:

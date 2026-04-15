@@ -42,6 +42,7 @@ class ConversationSession(SQLModel, table=True):
     pending_customer_name: Optional[str] = None
     favorite_pizzas_json: str = "[]"
     no_input_count: int = 0
+    upsell_done: bool = False
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
