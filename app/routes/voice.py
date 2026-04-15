@@ -46,7 +46,7 @@ _CACHED_PHRASES = [
 ]
 
 # Stati in cui la risposta può essere semplice/cached → vale la pena speculare
-_SPECULATIVE_STATES = {"collecting_items", "confirming_usual", "upselling"}
+_SPECULATIVE_STATES = {"collecting_items", "confirming_usual"}
 
 
 def _public_base_url() -> str:

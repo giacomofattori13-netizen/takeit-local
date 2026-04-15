@@ -500,7 +500,6 @@ def determine_state(
     completed: bool,
     intended_quantity: int | None = None,
     done_signal: bool = False,
-    upsell_done: bool = False,
 ) -> str:
     if completed:
         return "completed"
@@ -522,10 +521,6 @@ def determine_state(
         return "collecting_name"
 
     if not merged_order.get("pickup_time"):
-        # Upsell opportunity: 1 pizza, nome già noto, prima volta
-        item_count = sum(int(i.get("quantity") or 1) for i in merged_order["items"])
-        if item_count == 1 and not upsell_done:
-            return "upselling"
         return "collecting_pickup_time"
 
     return "awaiting_confirmation"
@@ -553,7 +548,6 @@ def build_assistant_response(
     pickup_time_error: str | None = None,
     removed_names: list[str] | None = None,
     not_found_names: list[str] | None = None,
-    upsell_pizza: str | None = None,
 ) -> str:
     customer_name = merged_order.get("customer_name")
     pickup_time = merged_order.get("pickup_time")
@@ -605,12 +599,6 @@ def build_assistant_response(
     # Collecting name
     if state == "collecting_name":
         return "Che nome metto?"
-
-    # Upselling — proponi una pizza speciale
-    if state == "upselling":
-        if upsell_pizza:
-            return f"Aggiungiamo qualcosa? Abbiamo {upsell_pizza} stasera."
-        return "Aggiungiamo qualcosa?"
 
     # Collecting items — risposte brevissime, niente domande
     if intent in ("add_items", "modify_items", "replace_items"):
@@ -751,17 +739,6 @@ def _italian_title(full_name: str) -> str:
     if first.lower().endswith("a"):
         return f"la signora {full_name}"
     return f"il signor {full_name}"
-
-
-def _pick_upsell_pizza(menu_items: list[dict], cart_names: set[str]) -> str | None:
-    """Restituisce il nome di una pizza_speciale disponibile non già nel carrello."""
-    candidates = [
-        m["name"] for m in menu_items
-        if m.get("category") == "pizza_speciale"
-        and m.get("available", True)
-        and m["name"].lower() not in cart_names
-    ]
-    return random.choice(candidates) if candidates else None
 
 
 def _format_pizza_list(pizzas: list[str]) -> str:
@@ -1262,47 +1239,6 @@ def chat(request: ChatRequest, session: SessionDep):
             state="confirming_usual",
         )
 
-    # ── FAST PATH: upselling ─────────────────────────────────────────────────
-    # Se il cliente risponde "no" all'upsell, salta a collecting_pickup_time.
-    # Qualsiasi altra risposta (es. "una capricciosa") passa all'LLM normalmente.
-    _came_from_upselling = (conversation.state == "upselling")
-    if _came_from_upselling:
-        _no_upsell = {"no", "no grazie", "no grazie mille", "basta", "basta così",
-                      "va bene così", "così va bene", "non voglio altro", "solo questa"}
-        if any(w in message_lower for w in _no_upsell):
-            conversation.upsell_done = True
-            conversation.state = "collecting_pickup_time"
-            session.add(conversation)
-            session.commit()
-            _merged_now = {
-                "customer_name": conversation.customer_name,
-                "pickup_time": conversation.pickup_time,
-                "items": json.loads(conversation.items_json),
-            }
-            session.add(ConversationLog(
-                session_id=request.session_id,
-                user_message=request.message,
-                extracted_order_json=json.dumps({"intent": "decline_upsell", "items": []}, ensure_ascii=False),
-                merged_order_json=json.dumps(_merged_now, ensure_ascii=False),
-                response_message="Per che ora?",
-                valid=False,
-                missing_items_json="[]",
-                state="collecting_pickup_time",
-            ))
-            session.commit()
-            print("[Upsell] Rifiutato → collecting_pickup_time")
-            return ChatResponse(
-                session_id=request.session_id,
-                user_message=request.message,
-                extracted_order={"intent": "decline_upsell", "items": []},
-                merged_order=_merged_now,
-                valid=False,
-                missing_items=[],
-                response_message="Per che ora?",
-                order_id=None,
-                state="collecting_pickup_time",
-            )
-
     # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
     extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
 
@@ -1473,16 +1409,11 @@ def chat(request: ChatRequest, session: SessionDep):
     order_id = None
     order_saved = False
 
-    # Se stiamo uscendo da upselling (qualsiasi risposta non-no), segna come fatto
-    if _came_from_upselling:
-        conversation.upsell_done = True
-
     state = determine_state(
         merged_order=merged_order,
         missing_messages=missing_messages,
         completed=conversation.completed,
         intended_quantity=conversation.intended_quantity,
-        upsell_done=conversation.upsell_done,
     )
     # Override esplicito: se intended_quantity è dichiarato e non raggiunto,
     # forza collecting_items indipendentemente da ciò che determine_state ha calcolato.
@@ -1492,13 +1423,6 @@ def chat(request: ChatRequest, session: SessionDep):
             print(f"[State] intended_quantity={conversation.intended_quantity} _collected={_collected} → forza collecting_items")
             state = "collecting_items"
     conversation.state = state
-
-    # Scegli pizza per l'upsell (solo quando si entra in stato upselling)
-    _upsell_pizza: str | None = None
-    if state == "upselling":
-        _cart_names = {i["pizza_name"].lower() for i in merged_items}
-        _upsell_pizza = _pick_upsell_pizza(menu_items_for_llm, _cart_names)
-        print(f"[Upsell] Proposta: {_upsell_pizza!r}")
 
     if valid and not conversation.completed and intent == "confirm_order":
         order = Order(
@@ -1592,7 +1516,6 @@ def chat(request: ChatRequest, session: SessionDep):
         pickup_time_error=pickup_time_error,
         removed_names=removed_names,
         not_found_names=not_found_names,
-        upsell_pizza=_upsell_pizza,
     )
 
     session.add(conversation)
