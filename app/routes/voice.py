@@ -19,7 +19,6 @@ from app.services.conversation_service import (
     get_agent_greeting,
     is_agent_active,
     lookup_customer,
-    send_whatsapp_confirmation,
 )
 
 router = APIRouter(prefix="/voice", tags=["voice"])
@@ -396,26 +395,9 @@ async def voice_gather(
     print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
 
     if result.state == "completed":
-        # Genera audio e invia WhatsApp in parallelo
-        phone = _conv.customer_phone if _conv else None
-        merged = result.merged_order or {}
-        items = merged.get("items", [])
-        total = round(sum(i.get("total_price", 0.0) for i in items), 2)
-        print(f"[WhatsApp] Invio a {phone!r}...")
-
-        audio, wa_status = await asyncio.gather(
-            _audio_element_async(reply),
-            asyncio.to_thread(
-                send_whatsapp_confirmation,
-                merged.get("customer_name", ""),
-                phone,
-                merged.get("pickup_time", ""),
-                items,
-                total,
-            ),
-        )
-        print(f"[WhatsApp] Risultato: {wa_status}")
-
+        # La conferma WhatsApp/SMS è già inviata dentro chat() con gli item arricchiti;
+        # qui generiamo solo l'audio di chiusura.
+        audio = await _audio_element_async(reply)
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"

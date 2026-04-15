@@ -352,10 +352,15 @@ def _send_sms_fallback(
 ) -> str:
     """Invia SMS di conferma ordine come fallback al WhatsApp.
     Restituisce 'sms_inviato:<status>', 'sms_skip:<motivo>', 'sms_errore:<msg>'."""
-    sms_from = os.getenv("TWILIO_NUMBER") or os.getenv("TWILIO_WHATSAPP_FROM")
-    if not sms_from:
-        print("[SMS] TWILIO_NUMBER non configurato, skip")
+    raw_sms_from = os.getenv("TWILIO_NUMBER") or os.getenv("TWILIO_WHATSAPP_FROM")
+    print(f"[SMS] TWILIO_NUMBER={os.getenv('TWILIO_NUMBER')!r} TWILIO_WHATSAPP_FROM={os.getenv('TWILIO_WHATSAPP_FROM')!r}")
+    if not raw_sms_from:
+        print("[SMS] Nessun numero mittente configurato (TWILIO_NUMBER / TWILIO_WHATSAPP_FROM), skip")
         return "sms_skip:numero_mittente_mancante"
+
+    # Rimuovi eventuale prefisso "whatsapp:" che non è valido per SMS
+    sms_from = raw_sms_from.removeprefix("whatsapp:")
+    print(f"[SMS] From normalizzato: {sms_from!r} (raw: {raw_sms_from!r})")
 
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
     pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
@@ -371,6 +376,8 @@ def _send_sms_fallback(
         f"Totale: {total_str} - Ritiro alle {time_str}.{contact_str}"
     )
 
+    print(f"[SMS] Tentativo invio → From={sms_from!r} To={phone!r}")
+    print(f"[SMS] Body ({len(body)} chars): {body!r}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
         resp = httpx.post(
@@ -379,15 +386,17 @@ def _send_sms_fallback(
             data={"From": sms_from, "To": phone, "Body": body},
             timeout=10,
         )
-        print(f"[SMS] Risposta Twilio: status={resp.status_code} body={resp.text[:200]}")
+        print(f"[SMS] Risposta Twilio: status={resp.status_code} body={resp.text[:500]}")
         resp.raise_for_status()
-        print(f"[SMS] Inviato a {phone}")
+        print(f"[SMS] Inviato con successo a {phone!r}")
         return f"sms_inviato:{resp.status_code}"
     except httpx.HTTPStatusError as e:
-        print(f"[SMS] Errore HTTP {e.response.status_code}: {e.response.text[:200]}")
+        print(f"[SMS] Errore HTTP {e.response.status_code}: {e.response.text}")
         return f"sms_errore:HTTP_{e.response.status_code}"
     except Exception as e:
-        print(f"[SMS] Errore: {e}")
+        import traceback
+        print(f"[SMS] Errore inatteso {type(e).__name__}: {e}")
+        print(f"[SMS] Traceback:\n{traceback.format_exc()}")
         return f"sms_errore:{type(e).__name__}"
 
 
@@ -406,49 +415,60 @@ def send_whatsapp_confirmation(
     from_number = os.getenv("TWILIO_WHATSAPP_FROM")
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
-    print(f"[WhatsApp] Invio a customer_phone={customer_phone!r} customer_name={customer_name!r}")
-    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={'✓ ' + from_number if from_number else '✗'}")
+    print(f"[WhatsApp] === INIZIO INVIO CONFERMA ===")
+    print(f"[WhatsApp] customer_name={customer_name!r} customer_phone={customer_phone!r}")
+    print(f"[WhatsApp] pickup_time={pickup_time!r} total_amount={total_amount} items={len(items)}")
+    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={from_number!r if from_number else '✗'}")
 
     if not all([account_sid, auth_token, from_number]):
-        print("[WhatsApp] Variabili Twilio mancanti, skip")
+        missing = [k for k, v in {"TWILIO_ACCOUNT_SID": account_sid, "TWILIO_AUTH_TOKEN": auth_token, "TWILIO_WHATSAPP_FROM": from_number}.items() if not v]
+        print(f"[WhatsApp] Variabili mancanti: {missing} → skip")
         return "skip:credenziali_mancanti"
 
     phone = _normalize_phone(customer_phone)
-    print(f"[WhatsApp] Numero normalizzato: {phone!r}")
+    print(f"[WhatsApp] Numero raw={customer_phone!r} → normalizzato={phone!r}")
     if not phone:
-        print("[WhatsApp] Numero non disponibile o fisso, skip")
+        print(f"[WhatsApp] Numero non valido o fisso, skip invio")
         return "skip:numero_non_valido"
-    print(f"[WhatsApp] Numero destinatario finale: {phone!r}")
 
-    pizza_lines = _build_pizza_lines(items)
     content_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
     content_variables = json.dumps({"1": pizzeria_name, "2": pickup_time})
+    wa_from = f"whatsapp:{from_number}"
+    wa_to = f"whatsapp:{phone}"
 
+    print(f"[WhatsApp] POST Messages.json → From={wa_from!r} To={wa_to!r}")
+    print(f"[WhatsApp] ContentSid={content_sid} ContentVariables={content_variables}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
         response = httpx.post(
             url,
             auth=(account_sid, auth_token),
             data={
-                "From": f"whatsapp:{from_number}",
-                "To": f"whatsapp:{phone}",
+                "From": wa_from,
+                "To": wa_to,
                 "ContentSid": content_sid,
                 "ContentVariables": content_variables,
             },
             timeout=10,
         )
-        print(f"[WhatsApp] Risposta Twilio: status={response.status_code} body={response.text}")
+        print(f"[WhatsApp] Risposta: status={response.status_code} body={response.text}")
         response.raise_for_status()
+        print(f"[WhatsApp] Inviato con successo")
         return f"inviato:{response.status_code}"
     except httpx.HTTPStatusError as e:
         wa_status = f"errore:HTTP_{e.response.status_code}"
         print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text} → fallback SMS")
         sms_status = _send_sms_fallback(phone, items, pickup_time, total_amount, account_sid, auth_token)
+        print(f"[WhatsApp] SMS fallback risultato: {sms_status}")
         return f"{wa_status}|{sms_status}"
     except Exception as e:
+        import traceback
         wa_status = f"errore:{type(e).__name__}"
-        print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e} → fallback SMS")
+        print(f"[WhatsApp] Errore inatteso {type(e).__name__}: {e}")
+        print(f"[WhatsApp] Traceback:\n{traceback.format_exc()}")
+        print(f"[WhatsApp] → fallback SMS")
         sms_status = _send_sms_fallback(phone, items, pickup_time, total_amount, account_sid, auth_token)
+        print(f"[WhatsApp] SMS fallback risultato: {sms_status}")
         return f"{wa_status}|{sms_status}"
 
 
