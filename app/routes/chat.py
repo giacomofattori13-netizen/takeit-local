@@ -1520,9 +1520,12 @@ def chat(request: ChatRequest, session: SessionDep):
         conversation.state = "confirming_usual"
         session.add(conversation)
         session.commit()
-        fav_list = fav_pizzas_session[:3]
+        _declared_qty = extract_intended_quantity(request.message)
+        _usual_limit = _declared_qty if _declared_qty else 2
+        fav_list = fav_pizzas_session[:_usual_limit]
         pizza_list_str = _format_pizza_list(fav_list)
         _resp_usual = f"Ti faccio le solite? {pizza_list_str}"
+        print(f"[Usual] declared_qty={_declared_qty} → propongo {len(fav_list)} pizze")
         _merged_now = {
             "customer_name": conversation.customer_name,
             "pickup_time": conversation.pickup_time,
@@ -1539,7 +1542,7 @@ def chat(request: ChatRequest, session: SessionDep):
             state="confirming_usual",
         ))
         session.commit()
-        print(f"[Usual] Trigger: {len(fav_list)} pizze abituali → confirming_usual")
+        print(f"[Usual] Trigger: limit={_usual_limit} → {len(fav_list)} pizze in lista → confirming_usual")
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
