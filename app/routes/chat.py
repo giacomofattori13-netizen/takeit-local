@@ -535,6 +535,8 @@ def build_assistant_response(
     new_valid_items: list[dict],
     customer_phone: str | None = None,
     pickup_time_error: str | None = None,
+    removed_names: list[str] | None = None,
+    not_found_names: list[str] | None = None,
 ) -> str:
     customer_name = merged_order.get("customer_name")
     pickup_time = merged_order.get("pickup_time")
@@ -550,9 +552,21 @@ def build_assistant_response(
     if missing_messages:
         return " ".join(missing_messages)
 
-    # Cancellation
+    # Cancellation / cart reset
     if intent == "cancel_order":
         return "Va bene, ordine annullato. Dimmi pure se vuoi ricominciare."
+
+    if intent == "clear_cart":
+        return "Ho cancellato tutto, dimmi pure cosa vuole!"
+
+    if intent == "remove_items":
+        parts = []
+        if not_found_names:
+            for name in not_found_names:
+                parts.append(f"Non ho trovato {name} nel suo ordine.")
+        if removed_names:
+            parts.append("Rimosso!")
+        return " ".join(parts) if parts else "Non ho trovato quella pizza nel suo ordine."
 
     # Order completed
     if state == "completed" and order_saved:
@@ -581,11 +595,6 @@ def build_assistant_response(
             # Il cliente ha dichiarato una quantità senza specificare le pizze
             return "Certo, dimmi pure!"
         return random.choice(["Ok!", "Aggiunto!", "Perfetto!", "Certo!"])
-
-    if intent == "remove_items":
-        if not merged_order["items"]:
-            return "Rimosso."
-        return "Rimosso!"
 
     # Segnale "ho finito" senza items: chiedi nome e ora
     if not merged_order["items"]:
@@ -1591,16 +1600,44 @@ def chat(request: ChatRequest, session: SessionDep):
         conversation.customer_name = extracted["customer_name"]
 
     # 4. Merge semplice: sessione = fonte di verità
+    removed_names: list[str] = []
+    not_found_names: list[str] = []
+
     if intent == "cancel_order":
         merged_items = []
         conversation.customer_name = None
         conversation.pickup_time = None
         conversation.intended_quantity = None
+    elif intent == "clear_cart":
+        merged_items = []
+        conversation.intended_quantity = None
+        print("[Cart] Carrello svuotato")
     elif intent == "replace_items" and new_items:
         merged_items = new_items
     elif intent == "remove_items" and new_items:
-        remove_names = {ni["pizza_name"].lower() for ni in new_items}
-        merged_items = [ei for ei in existing_items if ei["pizza_name"].lower() not in remove_names]
+        merged_items = list(existing_items)
+        for ni in new_items:
+            target_name = ni["pizza_name"]
+            # Risolvi "__last__" → ultima pizza nel carrello
+            if target_name == "__last__":
+                if merged_items:
+                    target_name = merged_items[-1]["pizza_name"]
+                else:
+                    not_found_names.append("l'ultima pizza")
+                    continue
+            # Cerca e rimuovi (case-insensitive, prima occorrenza)
+            before_len = len(merged_items)
+            merged_items = [ei for ei in merged_items if ei["pizza_name"].lower() != target_name.lower()]
+            if len(merged_items) < before_len:
+                print(f"[Cart] Rimosso: {target_name}")
+                removed_names.append(target_name)
+            else:
+                print(f"[Cart] Non trovato nel carrello: {target_name}")
+                not_found_names.append(target_name)
+        # Aggiorna intended_quantity in base agli item rimasti
+        if conversation.intended_quantity is not None:
+            new_qty = sum(int(ei.get("quantity") or 1) for ei in merged_items)
+            conversation.intended_quantity = new_qty if new_qty > 0 else None
     elif new_items:
         # Stessa pizza + stesso impasto → somma quantità e aggiorna ingredienti; altrimenti aggiungi
         merged_items = list(existing_items)
@@ -1782,6 +1819,8 @@ def chat(request: ChatRequest, session: SessionDep):
         new_valid_items=valid_items,
         customer_phone=conversation.customer_phone,
         pickup_time_error=pickup_time_error,
+        removed_names=removed_names,
+        not_found_names=not_found_names,
     )
 
     session.add(conversation)

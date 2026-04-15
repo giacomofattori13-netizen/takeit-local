@@ -916,6 +916,7 @@ Allowed intent values:
 - "remove_items"
 - "replace_items"
 - "cancel_order"
+- "clear_cart"
 - "unknown"
 
 Rules:
@@ -970,17 +971,28 @@ Intent rules:
 - Use "set_customer_name" when the user is mainly providing the customer name.
 - Use "set_pickup_time" when the user is mainly providing the pickup time.
 - Use "modify_items" when the user is clearly correcting previously mentioned pizzas but the action is ambiguous.
-- Use "remove_items" when the user wants to remove one or more pizzas already present in the order.
+- Use "remove_items" when the user wants to remove one or more specific pizzas already present in the order (togliete, rimuovi, non voglio più, cancella la ...).
 - Use "replace_items" when the user wants to replace previous pizzas with new ones.
-- Use "cancel_order" when the user wants to cancel the whole order.
+- Use "cancel_order" when the user wants to cancel the whole order including name and time (annulla l'ordine, voglio annullare).
+- Use "clear_cart" when the user wants to reset only the pizzas and start over, keeping name and pickup time (cancella tutto e ricominciamo, ricominciamo da capo, azzera le pizze, voglio ricominciare).
 - Use "unknown" if the message is unclear.
 
+Remove_items rules:
+- Put the pizza to remove in items[] with pizza_name set to the exact name mentioned.
+- If the user says "l'ultima pizza", "l'ultima", "quella appena aggiunta" → set pizza_name to "__last__" so the backend resolves it.
+- If multiple pizzas to remove, list each as a separate item.
+
 Examples:
-- "togli la margherita" -> remove_items
-- "leva una pizza" -> remove_items
+- "togli la margherita" -> remove_items, items=[{{pizza_name:"Margherita",...}}]
+- "togliete la capricciosa" -> remove_items, items=[{{pizza_name:"Capricciosa",...}}]
+- "non voglio più la margherita" -> remove_items, items=[{{pizza_name:"Margherita",...}}]
+- "rimuovi l'ultima pizza" -> remove_items, items=[{{pizza_name:"__last__",...}}]
+- "leva una pizza" -> remove_items, items=[{{pizza_name:"__last__",...}}]
 - "fai due capricciose invece" -> replace_items
 - "al posto della margherita metti una diavola" -> replace_items
-- "annulla tutto" -> cancel_order
+- "annulla l'ordine" -> cancel_order
+- "cancella tutto e ricominciamo" -> clear_cart
+- "voglio ricominciare da capo" -> clear_cart
 - "voglio una margherita" -> add_items
 - "voglio una cascina" -> add_items
 - "voglio 2 margherite" -> add_items
