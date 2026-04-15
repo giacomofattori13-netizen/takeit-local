@@ -1517,10 +1517,12 @@ def chat(request: ChatRequest, session: SessionDep):
             or any(w in message_lower for w in ["solite", "stesse", "stessa cosa", "al solito"])
         )
     ):
+        _declared_qty = extract_intended_quantity(request.message)
         conversation.state = "confirming_usual"
+        if _declared_qty:
+            conversation.intended_quantity = _declared_qty
         session.add(conversation)
         session.commit()
-        _declared_qty = extract_intended_quantity(request.message)
         _usual_limit = _declared_qty if _declared_qty else 2
         fav_list = fav_pizzas_session[:_usual_limit]
         pizza_list_str = _format_pizza_list(fav_list)
