@@ -304,10 +304,40 @@ async def voice_gather(
     speech = SpeechResult.strip()
     print(f"[Voice] Gather session={session_id!r} speech={speech!r}")
 
+    from sqlmodel import select as _select
+    _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
+    _phone = _conv.customer_phone if _conv else "NOT FOUND"
+    _state = _conv.state if _conv else "N/A"
+    print(f"[Voice] Sessione {session_id}: customer_phone={_phone!r} stato={_state!r}")
+
     if not speech:
-        # Genera in parallelo "non ho capito" + fallback no-input (spesso cached)
+        count = (_conv.no_input_count or 0) + 1 if _conv else 1
+        print(f"[Voice] No-input #{count} per session={session_id!r}")
+
+        if count >= 2:
+            # Seconda volta consecutiva senza input: saluta e chiudi
+            _FAREWELL = "Mi dispiace, non riesco a sentirla. La richiamo appena possibile. Arrivederci!"
+            farewell_audio = await _audio_element_async(_FAREWELL)
+            twiml = (
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<Response>\n"
+                f"  {farewell_audio}\n"
+                "  <Hangup/>\n"
+                "</Response>"
+            )
+            if _conv:
+                _conv.no_input_count = 0
+                session.add(_conv)
+                session.commit()
+            return Response(content=twiml, media_type="application/xml")
+
+        # Prima volta: chiedi di ripetere e aggiorna il contatore
+        if _conv:
+            _conv.no_input_count = count
+            session.add(_conv)
+            session.commit()
         audio, no_input = await asyncio.gather(
-            _audio_element_async("Non ho capito. Può ripetere?"),
+            _audio_element_async("Non ho sentito nulla, può ripetere?"),
             _audio_element_async(_NO_INPUT_MSG),
         )
         twiml = (
@@ -322,11 +352,11 @@ async def voice_gather(
         )
         return Response(content=twiml, media_type="application/xml")
 
-    from sqlmodel import select as _select
-    _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
-    _phone = _conv.customer_phone if _conv else "NOT FOUND"
-    _state = _conv.state if _conv else "N/A"
-    print(f"[Voice] Sessione {session_id}: customer_phone={_phone!r} stato={_state!r}")
+    # Input valido: resetta il contatore no-input
+    if _conv and _conv.no_input_count:
+        _conv.no_input_count = 0
+        session.add(_conv)
+        session.commit()
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
 
