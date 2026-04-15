@@ -38,11 +38,15 @@ _AUDIO_CACHE: dict[str, str] = {}
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
     "Certo, dimmi pure!",
+    "Ok!",
     "Che nome metto?",
     "Per che ora?",
     "Perfetto, confermo?",
     _NO_INPUT_MSG,
 ]
+
+# Stati in cui la risposta può essere semplice/cached → vale la pena speculare
+_SPECULATIVE_STATES = {"collecting_items", "confirming_usual", "upselling"}
 
 
 def _public_base_url() -> str:
@@ -375,11 +379,21 @@ async def voice_gather(
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
 
-    # Esegui chat() (OpenAI + DB) in un thread separato per non bloccare l'event loop
-    result = await asyncio.to_thread(chat, chat_request, session)
+    if _state in _SPECULATIVE_STATES:
+        # Parallelismo speculativo: OpenAI + pre-generazione "Ok!" in parallelo.
+        # Se la risposta reale è già in cache, _audio_element_async è istantaneo
+        # e si risparmia tutta la latenza ElevenLabs (≈ 500ms).
+        print(f"[Voice] Parallel speculative: OpenAI + ElevenLabs('Ok!') per stato={_state!r}")
+        result, _ = await asyncio.gather(
+            asyncio.to_thread(chat, chat_request, session),
+            _synthesize_async("Ok!"),
+        )
+    else:
+        result = await asyncio.to_thread(chat, chat_request, session)
 
     reply = result.response_message
-    print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r}")
+    cache_hit = reply in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[reply]).exists()
+    print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
 
     if result.state == "completed":
         # Genera audio e invia WhatsApp in parallelo
