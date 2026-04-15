@@ -35,6 +35,8 @@ from app.services.conversation_service import (
     is_dough_available,
     is_agent_active,
     INGREDIENT_EXTRA_PRICE,
+    SIZE_MINI_DISCOUNT,
+    SIZE_DOPPIO_SURCHARGE,
     _PIZZA_TYPE_TO_DOUGH,
     get_agent_greeting,
     validate_pickup_time,
@@ -129,6 +131,7 @@ def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]
             same_extras = (
                 existing_item.get("add_ingredients", []) == new_item.get("add_ingredients", [])
                 and existing_item.get("remove_ingredients", []) == new_item.get("remove_ingredients", [])
+                and existing_item.get("size", "normale") == new_item.get("size", "normale")
             )
             if same_name and same_extras:
                 if existing_item["pizza_type"] == new_item["pizza_type"]:
@@ -245,6 +248,7 @@ def format_single_item_for_customer(item: dict) -> str:
     pizza_type = item["pizza_type"]
     add_ingredients = item.get("add_ingredients", [])
     remove_ingredients = item.get("remove_ingredients", [])
+    size = item.get("size", "normale")
 
     is_plain_margherita = (
         pizza_name == "Margherita"
@@ -319,6 +323,11 @@ def format_single_item_for_customer(item: dict) -> str:
         if remove_ingredients:
             line += " senza " + ", ".join(remove_ingredients)
 
+    if size == "mini":
+        line += " (mini)"
+    elif size == "doppio":
+        line += " (doppio impasto)"
+
     if pizza_type == "Senza glutine":
         line += " senza glutine"
 
@@ -353,6 +362,7 @@ def format_single_item(item: dict) -> str:
     pizza_type = item["pizza_type"]
     add_ingredients = item.get("add_ingredients", [])
     remove_ingredients = item.get("remove_ingredients", [])
+    size = item.get("size", "normale")
 
     if quantity == 1:
         if pizza_name == "Pizza personalizzata":
@@ -364,6 +374,11 @@ def format_single_item(item: dict) -> str:
             line = f"{quantity} pizze personalizzate"
         else:
             line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
+
+    if size == "mini":
+        line += " (mini)"
+    elif size == "doppio":
+        line += " (doppio impasto)"
 
     if pizza_type == "Senza glutine":
         line += " senza glutine"
@@ -1340,6 +1355,11 @@ def chat(request: ChatRequest, session: SessionDep):
                 _is_sg = "(SG)" in _item.get("pizza_name", "")
                 _dough_code = _item.get("dough_type", "classica")
                 _surcharge = 0.0 if _is_sg else get_dough_surcharge(_dough_code)
+                _size = _item.get("size", "normale")
+                if _size == "mini":
+                    _base = round(max(0.0, _base - SIZE_MINI_DISCOUNT), 2)
+                elif _size == "doppio":
+                    _surcharge = round(_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
                 _extras = round(_surcharge + len(_item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
                 _total = round((_base + _extras) * _item["quantity"], 2)
                 enriched_items.append({**_item, "base_price": _base, "extras_price": _extras, "total_price": _total})
@@ -1900,6 +1920,11 @@ def chat(request: ChatRequest, session: SessionDep):
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
             dough_code = item.get("dough_type", "classica")
             dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
+            size = item.get("size", "normale")
+            if size == "mini":
+                base_price = round(max(0.0, base_price - SIZE_MINI_DISCOUNT), 2)
+            elif size == "doppio":
+                dough_surcharge = round(dough_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
             extras_price = round(dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
             total_price = round((base_price + extras_price) * item["quantity"], 2)
             enriched_items.append({**item, "base_price": base_price, "extras_price": extras_price, "total_price": total_price})

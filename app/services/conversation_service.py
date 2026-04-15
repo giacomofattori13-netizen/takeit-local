@@ -28,6 +28,8 @@ RESTAURANT_CACHE_TTL = 600  # 10 minuti
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
 INGREDIENT_EXTRA_PRICE = 2.0
+SIZE_MINI_DISCOUNT = 1.50
+SIZE_DOPPIO_SURCHARGE = 2.00
 
 
 def reset_menu_cache() -> None:
@@ -1003,6 +1005,7 @@ Return ONLY valid JSON with this exact structure:
       "pizza_name": string,
       "dough_type": string,
       "quantity": number,
+      "size": string,
       "add_ingredients": [string],
       "remove_ingredients": [string]
     }}
@@ -1077,6 +1080,18 @@ Rules:
 - If using "Pizza personalizzata", still fill add_ingredients and remove_ingredients correctly.
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"].
 - If the user says "rossa", do not add anything automatically unless specific ingredients are mentioned.
+- SIZE MODIFIERS — il campo size indica la dimensione della pizza:
+  * "normale" → default, nessun modificatore di prezzo.
+  * "mini" → pizza più piccola (-€1.50 sul prezzo base). Parole chiave: "mini", "piccola", "mezza".
+  * "doppio" → pizza con doppio impasto (+€2.00 extra). Parole chiave: "doppio impasto", "doppia pasta", "doppia", "doppio".
+  Se il cliente non specifica, usa size="normale".
+  NON mettere "mini" o "doppio" nel pizza_name o in add_ingredients — vanno SOLO nel campo size.
+  Esempi:
+  * "una margherita mini" → pizza_name="Margherita", size="mini"
+  * "una capricciosa doppio impasto" → pizza_name="Capricciosa", size="doppio"
+  * "una diavola doppia" → pizza_name="Diavola", size="doppio"
+  * "una margherita doppia pasta integrale" → pizza_name="Margherita", size="doppio", dough_type="integrale"
+  * "una margherita" → pizza_name="Margherita", size="normale"
 
 Intent rules:
 - Use "add_items" when the user is adding pizzas.
@@ -1159,7 +1174,11 @@ def extract_order_from_text(
         add_ing = item.get("add_ingredients", [])
         rem_ing = item.get("remove_ingredients", [])
         dough_log = item.get("dough_type", "classica")
-        print(f"[LLM] estratto: pizza={item.get('pizza_name')!r} dough={dough_log!r} add={add_ing} remove={rem_ing}")
+        size = item.get("size", "normale").lower().strip()
+        if size not in ("normale", "mini", "doppio"):
+            size = "normale"
+        item["size"] = size
+        print(f"[LLM] estratto: pizza={item.get('pizza_name')!r} dough={dough_log!r} size={size!r} add={add_ing} remove={rem_ing}")
         dough = item.get("dough_type", "classica")
         item["dough_type"] = dough
         item["pizza_type"] = _DOUGH_TO_PIZZA_TYPE.get(dough, "Normale")

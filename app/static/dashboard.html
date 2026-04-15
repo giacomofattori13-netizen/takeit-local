@@ -424,6 +424,12 @@
     function formatItem(item) {
         let text = `${item.quantity} ${item.pizza_name}`;
 
+        if (item.size === "mini") {
+            text += " (Mini)";
+        } else if (item.size === "doppio") {
+            text += " (Doppio Impasto)";
+        }
+
         if (item.pizza_type === "Senza glutine") {
             text += " senza glutine";
         }
@@ -699,6 +705,12 @@
       const itemsHtml = (order.items || [])
         .map(item => {
           let line = `${item.quantity} ${item.pizza_name}`;
+
+          if (item.size === "mini") {
+            line += " (Mini)";
+          } else if (item.size === "doppio") {
+            line += " (Doppio Impasto)";
+          }
 
           if (item.pizza_type === "Senza glutine") {
             line += " senza glutine";
