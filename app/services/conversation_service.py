@@ -1057,6 +1057,17 @@ Rules:
 - customer_name should be extracted when clearly present.
 - Each item must always include "add_ingredients" and "remove_ingredients".
 - If there are no ingredient changes, use empty arrays.
+- REGOLA CRITICA SUL NOME PIZZA: pizza_name deve contenere ESCLUSIVAMENTE il nome base della pizza
+  così come appare nel MENU (es. "Margherita", "Capricciosa", "4 Formaggi").
+  Tutto ciò che segue "con" o "senza" sono MODIFICATORI e vanno in add_ingredients o remove_ingredients,
+  mai nel pizza_name. NON scrivere mai pizza_name come "Margherita con patatine" o "Capricciosa senza olive".
+  Esempi corretti:
+  * "una margherita con patatine fritte" → pizza_name="Margherita", add_ingredients=["patatine fritte"]
+  * "una capricciosa senza olive con würstel" → pizza_name="Capricciosa", remove_ingredients=["olive"], add_ingredients=["würstel"]
+  * "una margherita integrale con uovo" → pizza_name="Margherita", dough_type="integrale", add_ingredients=["uovo"]
+  * "una diavola con würstel e patatine" → pizza_name="Diavola", add_ingredients=["würstel", "patatine"]
+  * "una margherita con le patatine fritte impasto integrale" → pizza_name="Margherita", dough_type="integrale", add_ingredients=["patatine fritte"]
+  * "capricciosa senza funghi integrale" → pizza_name="Capricciosa", remove_ingredients=["funghi"], dough_type="integrale"
 - If the user says "senza pomodoro", put "pomodoro" in remove_ingredients.
 - If the user says "con patatine", put "patatine" in add_ingredients.
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"] unless a better pizza base is clearly specified.

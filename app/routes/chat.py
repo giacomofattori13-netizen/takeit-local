@@ -397,6 +397,15 @@ def split_valid_and_invalid_items(
         )
         menu_item = session.exec(statement).first()
 
+        # Fallback: il tipo di impasto (integrale, napoletana…) è una preferenza,
+        # non una voce separata nel DB. Se non trovato con pizza_type specifico,
+        # cerca per solo nome (qualsiasi pizza_type disponibile).
+        if not menu_item:
+            fallback = select(MenuItem).where(MenuItem.name == item["pizza_name"])
+            menu_item = session.exec(fallback).first()
+            if menu_item:
+                item["pizza_type"] = menu_item.pizza_type
+
         if not menu_item or not menu_item.available:
             invalid_items.append(item)
             missing_messages.append(build_missing_item_message(session, item))
@@ -625,6 +634,11 @@ def has_invalid_items(session: Session, items: list[dict]) -> bool:
         )
         menu_item = session.exec(statement).first()
 
+        # Fallback per impasto non-standard: cerca per solo nome
+        if not menu_item:
+            fallback = select(MenuItem).where(MenuItem.name == item["pizza_name"])
+            menu_item = session.exec(fallback).first()
+
         if not menu_item or not menu_item.available:
             return True
 
@@ -681,6 +695,11 @@ def keep_only_valid_existing_items(session: Session, items: list[dict]) -> list[
             MenuItem.pizza_type == item["pizza_type"],
         )
         menu_item = session.exec(statement).first()
+
+        # Fallback per impasto non-standard: cerca per solo nome
+        if not menu_item:
+            fallback = select(MenuItem).where(MenuItem.name == item["pizza_name"])
+            menu_item = session.exec(fallback).first()
 
         if menu_item and menu_item.available:
             valid_items.append(item)
