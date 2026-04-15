@@ -415,10 +415,11 @@ def send_whatsapp_confirmation(
     from_number = os.getenv("TWILIO_WHATSAPP_FROM")
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
+    from_display = repr(from_number) if from_number else '✗'
     print(f"[WhatsApp] === INIZIO INVIO CONFERMA ===")
     print(f"[WhatsApp] customer_name={customer_name!r} customer_phone={customer_phone!r}")
     print(f"[WhatsApp] pickup_time={pickup_time!r} total_amount={total_amount} items={len(items)}")
-    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={from_number!r if from_number else '✗'}")
+    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={from_display}")
 
     if not all([account_sid, auth_token, from_number]):
         missing = [k for k, v in {"TWILIO_ACCOUNT_SID": account_sid, "TWILIO_AUTH_TOKEN": auth_token, "TWILIO_WHATSAPP_FROM": from_number}.items() if not v]
