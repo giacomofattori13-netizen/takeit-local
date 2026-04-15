@@ -439,6 +439,19 @@ def load_restaurant() -> dict:
     return {}
 
 
+def is_agent_active() -> bool:
+    """Restituisce True se l'agente è attivo (agent_active != False).
+    In caso di dati mancanti o errori, assume attivo per sicurezza."""
+    restaurant = load_restaurant()
+    active = restaurant.get("agent_active", True)
+    # Base44 può restituire bool o stringa
+    if isinstance(active, str):
+        active = active.lower() not in ("false", "0", "no")
+    result = bool(active)
+    print(f"[Agent] agent_active={result!r} (raw={restaurant.get('agent_active')!r})")
+    return result
+
+
 def fetch_and_save_restaurant() -> dict:
     """Alias usato all'avvio in main.py: forza un refresh da Base44 ignorando il TTL."""
     global _restaurant_cache_ts

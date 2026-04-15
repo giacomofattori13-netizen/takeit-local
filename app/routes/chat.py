@@ -32,6 +32,7 @@ from app.services.conversation_service import (
     get_next_order_number,
     get_dough_surcharge,
     is_dough_available,
+    is_agent_active,
     INGREDIENT_EXTRA_PRICE,
     _PIZZA_TYPE_TO_DOUGH,
     get_agent_greeting,
@@ -1115,6 +1116,14 @@ def _format_pizza_list(pizzas: list[str]) -> str:
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
     print(f"[ChatStart] Body ricevuto: {body}")
+    if not is_agent_active():
+        print("[Chat] agent_active=False → rifiuto start_chat")
+        return ChatStartResponse(
+            session_id="",
+            state="closed",
+            completed=False,
+            response_message="Siamo temporaneamente chiusi. Riprovi più tardi, grazie!",
+        )
     new_session_id = str(uuid.uuid4())
     phone = body.test_phone or None
 
@@ -1173,6 +1182,20 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 
 @router.post("/", response_model=ChatResponse)
 def chat(request: ChatRequest, session: SessionDep):
+    if not is_agent_active():
+        print("[Chat] agent_active=False → rifiuto messaggio")
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={},
+            merged_order={},
+            valid=False,
+            missing_items=[],
+            response_message="Siamo temporaneamente chiusi. Riprovi più tardi, grazie!",
+            order_id=None,
+            state="closed",
+        )
+
     # Carica il menu da Base44 (con cache 10 min); fallback al DB locale se vuoto
     menu_items_for_llm = load_menu_from_base44()
     first_names = [item["name"] for item in menu_items_for_llm[:3]]

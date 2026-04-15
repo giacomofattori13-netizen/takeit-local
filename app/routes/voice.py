@@ -16,6 +16,7 @@ from app.models import ConversationSession
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
     get_agent_greeting,
+    is_agent_active,
     lookup_customer,
     send_whatsapp_confirmation,
 )
@@ -225,6 +226,21 @@ async def voice_incoming(
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {caller_phone!r}")
+
+    # Controlla agent_active prima di qualsiasi altra operazione
+    if not is_agent_active():
+        print("[Voice] agent_active=False → chiusura chiamata")
+        closed_audio = await _audio_element_async(
+            "Siamo temporaneamente chiusi. Richiameremo appena possibile. Grazie!"
+        )
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {closed_audio}\n"
+            "  <Hangup/>\n"
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
 
     # Avvia il lookup cliente subito in background: il phone è già disponibile
     # prima ancora della sessione DB, così i ~500ms di Base44 si sovrappongono.
