@@ -1034,7 +1034,8 @@ def extract_order_from_text(
     for item in parsed["items"]:
         add_ing = item.get("add_ingredients", [])
         rem_ing = item.get("remove_ingredients", [])
-        print(f"[LLM] {item.get('pizza_name')!r} add_ingredients={add_ing} remove_ingredients={rem_ing}")
+        dough_log = item.get("dough_type", "classica")
+        print(f"[LLM] estratto: pizza={item.get('pizza_name')!r} dough={dough_log!r} add={add_ing} remove={rem_ing}")
         dough = item.get("dough_type", "classica")
         item["dough_type"] = dough
         item["pizza_type"] = _DOUGH_TO_PIZZA_TYPE.get(dough, "Normale")
