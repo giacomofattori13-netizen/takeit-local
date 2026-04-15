@@ -47,6 +47,36 @@ def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
 
 
+def format_time_for_speech(text: str) -> str:
+    """Converte orari HH:MM in forma parlata per ElevenLabs.
+    'le 19:00' → 'alle 19', 'alle 20:30' → 'alle 20 e 30'
+    Applicata a TUTTI i messaggi prima della chiamata ElevenLabs.
+    """
+    def _spoken(h: int, mm: int) -> str:
+        return f"alle {h}" if mm == 0 else f"alle {h} e {mm}"
+
+    # "le HH:MM" → "alle HH" (o "alle HH e MM")
+    text = re.sub(
+        r'\ble\s+(\d{1,2}):(\d{2})\b',
+        lambda m: _spoken(int(m.group(1)), int(m.group(2))),
+        text,
+    )
+    # "alle HH:MM" → "alle HH" (o "alle HH e MM")
+    text = re.sub(
+        r'\balle\s+(\d{1,2}):(\d{2})\b',
+        lambda m: _spoken(int(m.group(1)), int(m.group(2))),
+        text,
+    )
+    # Orari rimasti bare "HH:MM" → "HH" (o "HH e MM")
+    text = re.sub(
+        r'\b(\d{1,2}):(\d{2})\b',
+        lambda m: str(int(m.group(1))) if int(m.group(2)) == 0
+                  else f"{int(m.group(1))} e {int(m.group(2))}",
+        text,
+    )
+    return text
+
+
 def _italian_title(full_name: str) -> str:
     """'il signor' o 'la signora' in base al nome (euristica sul finale)."""
     first = full_name.strip().split()[0] if full_name.strip() else full_name
@@ -146,6 +176,8 @@ async def _synthesize_async(text: str) -> str | None:
 
 async def _audio_element_async(text: str) -> str:
     """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>."""
+    text = format_time_for_speech(text)
+    print(f"[TTS] Testo finale: {text!r}")
     filename = await _synthesize_async(text)
     if filename:
         url = f"{_public_base_url()}/voice/audio/{filename}"

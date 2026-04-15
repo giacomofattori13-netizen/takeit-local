@@ -565,7 +565,7 @@ def build_assistant_response(
     # Awaiting confirmation — nessun riepilogo, solo chiedi conferma
     if state == "awaiting_confirmation":
         name_part = f" {customer_name}" if customer_name else ""
-        return f"Perfetto{name_part}, confermo per le {pickup_time}?"
+        return f"Perfetto{name_part}, confermo alle {pickup_time}?"
 
     # Collecting pickup time (ha già il nome, manca solo l’ora)
     if state == "collecting_pickup_time":
