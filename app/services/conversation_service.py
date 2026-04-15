@@ -308,42 +308,22 @@ def save_order_to_base44(
 
 
 
-def send_whatsapp_confirmation(
-    customer_name: str,
-    customer_phone: str | None,
-    pickup_time: str,
-    items: list[dict],
-    total_amount: float,
-) -> str:
-    """Invia la conferma WhatsApp. Restituisce una stringa di stato:
-    'inviato:<status_code>', 'skip:<motivo>', 'errore:<msg>'."""
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    from_number = os.getenv("TWILIO_WHATSAPP_FROM")
-    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
-
-    print(f"[WhatsApp] Invio a customer_phone={customer_phone!r} customer_name={customer_name!r}")
-    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={'✓ ' + from_number if from_number else '✗'}")
-
-    if not all([account_sid, auth_token, from_number]):
-        print("[WhatsApp] Variabili Twilio mancanti, skip")
-        return "skip:credenziali_mancanti"
-
-    # Normalizza il numero: rimuovi spazi/trattini/parentesi
-    phone = re.sub(r"[\s\-\(\)]", "", customer_phone or "")
-    print(f"[WhatsApp] Numero normalizzato: {phone!r}")
+def _normalize_phone(raw: str | None) -> str | None:
+    """Normalizza un numero di telefono in formato E.164 (+39...).
+    Ritorna None se il numero è assente, fisso, o non normalizzabile."""
+    phone = re.sub(r"[\s\-\(\)]", "", raw or "")
     if not phone:
-        print("[WhatsApp] Numero non disponibile, skip")
-        return "skip:numero_mancante"
-    # Numeri fissi: formato locale (0...) o internazionale italiano (+390...)
+        return None
     if phone.startswith("0") or phone.startswith("+390"):
-        print(f"[WhatsApp] Numero fisso ({phone}), skip")
-        return "skip:numero_fisso"
+        return None  # numero fisso
     if not phone.startswith("+"):
         phone = f"+39{phone}"
-    print(f"[WhatsApp] Numero destinatario finale: {phone!r}")
+    return phone
 
-    pizza_lines = []
+
+def _build_pizza_lines(items: list[dict]) -> list[str]:
+    """Costruisce le righe descrittive delle pizze per i messaggi di conferma."""
+    lines = []
     for item in items:
         qty = item.get("quantity", 1)
         name = item.get("pizza_name", "")
@@ -358,8 +338,89 @@ def send_whatsapp_confirmation(
         line = f"{qty}x {name}"
         if extras:
             line += f" ({', '.join(extras)})"
-        pizza_lines.append(line)
+        lines.append(line)
+    return lines
 
+
+def _send_sms_fallback(
+    phone: str,
+    items: list[dict],
+    pickup_time: str,
+    total_amount: float,
+    account_sid: str,
+    auth_token: str,
+) -> str:
+    """Invia SMS di conferma ordine come fallback al WhatsApp.
+    Restituisce 'sms_inviato:<status>', 'sms_skip:<motivo>', 'sms_errore:<msg>'."""
+    sms_from = os.getenv("TWILIO_NUMBER") or os.getenv("TWILIO_WHATSAPP_FROM")
+    if not sms_from:
+        print("[SMS] TWILIO_NUMBER non configurato, skip")
+        return "sms_skip:numero_mittente_mancante"
+
+    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+    pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
+    pizza_lines = _build_pizza_lines(items)
+    pizza_text = ", ".join(pizza_lines)
+    total_str = f"€{total_amount:.2f}"
+    time_str = pickup_time or "da definire"
+    contact_str = f" Per modifiche richiama il {pizzeria_phone}." if pizzeria_phone else ""
+
+    body = (
+        f"{pizzeria_name} - Ordine confermato! "
+        f"{pizza_text} "
+        f"Totale: {total_str} - Ritiro alle {time_str}.{contact_str}"
+    )
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    try:
+        resp = httpx.post(
+            url,
+            auth=(account_sid, auth_token),
+            data={"From": sms_from, "To": phone, "Body": body},
+            timeout=10,
+        )
+        print(f"[SMS] Risposta Twilio: status={resp.status_code} body={resp.text[:200]}")
+        resp.raise_for_status()
+        print(f"[SMS] Inviato a {phone}")
+        return f"sms_inviato:{resp.status_code}"
+    except httpx.HTTPStatusError as e:
+        print(f"[SMS] Errore HTTP {e.response.status_code}: {e.response.text[:200]}")
+        return f"sms_errore:HTTP_{e.response.status_code}"
+    except Exception as e:
+        print(f"[SMS] Errore: {e}")
+        return f"sms_errore:{type(e).__name__}"
+
+
+def send_whatsapp_confirmation(
+    customer_name: str,
+    customer_phone: str | None,
+    pickup_time: str,
+    items: list[dict],
+    total_amount: float,
+) -> str:
+    """Invia la conferma WhatsApp. Se fallisce, prova SMS come fallback.
+    Restituisce una stringa di stato: 'inviato:<status_code>', 'skip:<motivo>',
+    'errore:<msg>' (con eventuale 'sms_inviato/errore' in coda)."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    from_number = os.getenv("TWILIO_WHATSAPP_FROM")
+    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+
+    print(f"[WhatsApp] Invio a customer_phone={customer_phone!r} customer_name={customer_name!r}")
+    print(f"[WhatsApp] Variabili Twilio — ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} FROM={'✓ ' + from_number if from_number else '✗'}")
+
+    if not all([account_sid, auth_token, from_number]):
+        print("[WhatsApp] Variabili Twilio mancanti, skip")
+        return "skip:credenziali_mancanti"
+
+    phone = _normalize_phone(customer_phone)
+    print(f"[WhatsApp] Numero normalizzato: {phone!r}")
+    if not phone:
+        print("[WhatsApp] Numero non disponibile o fisso, skip")
+        return "skip:numero_non_valido"
+    print(f"[WhatsApp] Numero destinatario finale: {phone!r}")
+
+    pizza_lines = _build_pizza_lines(items)
     content_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
     content_variables = json.dumps({"1": pizzeria_name, "2": pickup_time})
 
@@ -380,11 +441,15 @@ def send_whatsapp_confirmation(
         response.raise_for_status()
         return f"inviato:{response.status_code}"
     except httpx.HTTPStatusError as e:
-        print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text}")
-        return f"errore:HTTP_{e.response.status_code}"
+        wa_status = f"errore:HTTP_{e.response.status_code}"
+        print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text} → fallback SMS")
+        sms_status = _send_sms_fallback(phone, items, pickup_time, total_amount, account_sid, auth_token)
+        return f"{wa_status}|{sms_status}"
     except Exception as e:
-        print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e}")
-        return f"errore:{type(e).__name__}"
+        wa_status = f"errore:{type(e).__name__}"
+        print(f"[WhatsApp] Errore invio: {type(e).__name__}: {e} → fallback SMS")
+        sms_status = _send_sms_fallback(phone, items, pickup_time, total_amount, account_sid, auth_token)
+        return f"{wa_status}|{sms_status}"
 
 
 def _fetch_restaurant_from_base44() -> dict | None:
