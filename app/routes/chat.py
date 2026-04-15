@@ -142,6 +142,7 @@ def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]
                     # Es. capricciosa/classica + capricciosa/integrale → capricciosa/integrale.
                     existing_item["pizza_type"] = new_item["pizza_type"]
                     existing_item["dough_type"] = new_item.get("dough_type", "classica")
+                    existing_item["size"] = new_item.get("size", "normale")
                     existing_item["quantity"] = new_item["quantity"]
                 found = True
                 break
@@ -202,22 +203,6 @@ def apply_intent_to_items(
         return cancel_order_items()
 
     return existing_items
-
-def pluralize_pizza_name(name: str, quantity: int) -> str:
-    if quantity == 1:
-        return name.lower()
-
-    irregulars = {
-        "Margherita": "margherite",
-        "Diavola": "diavole",
-        "Capricciosa": "capricciose",
-        "Quattro Formaggi": "quattro formaggi",
-    }
-
-    if name in irregulars:
-        return irregulars[name]
-
-    return name.lower()
 
 def format_single_item(item: dict) -> str:
     quantity = item["quantity"]
@@ -756,387 +741,6 @@ def get_typo_correction_suggestions(
 
     return [name for name, _ in scored_matches[:limit]]
 
-def singularize_pizza_name(name: str) -> str:
-    name = name.strip()
-    if not name:
-        return name
-
-    lower = name.lower()
-
-    irregulars = {
-        "diavole": "diavola",
-        "margherite": "margherita",
-        "capricciose": "capricciosa",
-    }
-
-    if lower in irregulars:
-        return irregulars[lower].capitalize()
-
-    # fallback leggero (solo se sembra davvero una pizza)
-    if lower.endswith("e") and len(lower) > 4:
-        return (lower[:-1] + "a").capitalize()
-
-    return lower.capitalize()
-
-def infer_quantity_from_message(message: str) -> int:
-    message_lower = message.lower()
-
-    # rimuovi orari tipo 20:00
-    message_clean = re.sub(r"\b\d{1,2}:\d{2}\b", "", message_lower)
-
-    # numeri scritti
-    number_words = {
-        "una": 1,
-        "un": 1,
-        "uno": 1,
-        "due": 2,
-        "tre": 3,
-        "quattro": 4,
-        "cinque": 5,
-    }
-
-    for word, value in number_words.items():
-        if re.search(rf"\b{word}\b", message_clean):
-            return value
-
-    # numeri numerici
-    numbers = re.findall(r"\b\d+\b", message_clean)
-
-    if numbers:
-        return int(numbers[0])
-
-    return 1
-
-def extract_ingredient_changes(message: str) -> tuple[list[str], list[str]]:
-    message_lower = message.lower()
-
-    known_ingredients = [
-        "mozzarella senza lattosio",
-        "pomodoro",
-        "mozzarella",
-        "würstel",
-        "wurstel",
-        "patatine",
-        "prosciutto",
-        "funghi",
-        "salame",
-        "olive",
-        "cipolla",
-        "salsiccia",
-        "bresaola",
-        "rucola",
-        "grana",
-    ]
-
-    add_ingredients = []
-    remove_ingredients = []
-
-    def normalize(ingredient: str) -> str:
-        return "würstel" if ingredient == "wurstel" else ingredient
-
-    # ordina per lunghezza decrescente per matchare prima le stringhe più specifiche
-    known_ingredients = sorted(known_ingredients, key=len, reverse=True)
-
-    add_match = re.search(r"\bcon\b\s+(.+?)(?=\bsenza\b|$)", message_lower)
-    remove_match = re.search(r"\bsenza\b\s+(.+?)(?=\bcon\b|$)", message_lower)
-
-    if add_match:
-        add_text = add_match.group(1)
-        for ingredient in known_ingredients:
-            if ingredient in add_text:
-                normalized = normalize(ingredient)
-                if normalized not in add_ingredients:
-                    add_ingredients.append(normalized)
-
-    if remove_match:
-        remove_text = remove_match.group(1)
-        for ingredient in known_ingredients:
-            if ingredient in remove_text:
-                normalized = normalize(ingredient)
-                if normalized not in remove_ingredients:
-                    remove_ingredients.append(normalized)
-
-    return add_ingredients, remove_ingredients
-
-def find_menu_pizza_in_message(message: str, menu_items_for_llm: list[dict]) -> dict | None:
-    message_lower = message.lower()
-
-    # ordiniamo per nome più lungo, così "quattro formaggi" viene trovata
-    # prima di parole più corte
-    sorted_menu_items = sorted(
-        menu_items_for_llm,
-        key=lambda item: len(item["name"]),
-        reverse=True,
-    )
-
-    for item in sorted_menu_items:
-        menu_name_lower = item["name"].lower()
-        if menu_name_lower in message_lower:
-            _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-            return {
-                "pizza_name": item["name"],
-                "pizza_type": "Senza glutine" if _is_gf else item["pizza_type"],
-                "dough_type": "senza_glutine" if _is_gf else item.get("dough_type", "classica"),
-                "quantity": infer_quantity_from_message(message_lower),
-            }
-
-    return None
-
-def segment_explicitly_requests_custom_pizza(segment: str) -> bool:
-    segment_lower = segment.lower().strip()
-
-    custom_markers = [
-        "pizza con",
-        "una pizza con",
-        "bianca con",
-        "rossa con",
-        "una bianca",
-        "una rossa",
-    ]
-
-    return any(marker in segment_lower for marker in custom_markers)
-
-def build_custom_pizza_from_message(message: str, menu_items_for_llm: list[dict]) -> dict | None:
-    message_lower = message.lower().strip()
-
-    quantity = infer_quantity_from_message(message_lower)
-    add_ingredients, remove_ingredients = extract_ingredient_changes(message_lower)
-
-    if "bianca" in message_lower:
-        normalized_remove = ["pomodoro"]
-        for ingredient in remove_ingredients:
-            if ingredient != "pomodoro" and ingredient not in normalized_remove:
-                normalized_remove.append(ingredient)
-
-        _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-        return {
-            "pizza_name": "Margherita",
-            "pizza_type": "Senza glutine" if _is_gf else "Normale",
-            "dough_type": "senza_glutine" if _is_gf else "classica",
-            "quantity": quantity,
-            "add_ingredients": add_ingredients,
-            "remove_ingredients": normalized_remove,
-        }
-
-    # custom solo se ci sono davvero ingredienti/modifiche
-    if not add_ingredients and not remove_ingredients:
-        return None
-
-    _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-    return {
-        "pizza_name": "Margherita",
-        "pizza_type": "Senza glutine" if _is_gf else "Normale",
-        "dough_type": "senza_glutine" if _is_gf else "classica",
-        "quantity": quantity,
-        "add_ingredients": add_ingredients,
-        "remove_ingredients": remove_ingredients,
-    }
-
-def split_order_segments(message: str) -> list[str]:
-    text = message.lower().strip()
-
-    starters = [
-        "ciao,",
-        "ciao",
-        "mi fai",
-        "vorrei",
-        "voglio",
-        "fammi",
-        "prendo",
-        "aggiungi anche",
-        "aggiungi",
-    ]
-
-    for starter in starters:
-        if text.startswith(starter):
-            text = text[len(starter):].strip()
-            break
-
-    # rimuovi nome e orario dalla parte che serve per splittare gli item
-    text = re.sub(r"\ba nome\s+[a-zàèéìòù]+\b", "", text)
-    text = re.sub(r"\bper le\s+\d{1,2}:\d{2}\b", "", text)
-    text = re.sub(r"\balle\s+\d{1,2}:\d{2}\b", "", text)
-
-    # prima prova split su pattern numerici
-    matches = list(re.finditer(r"\b(?:\d+|una|un|uno|due|tre|quattro|cinque)\s+", text))
-    if len(matches) > 1:
-        parts = []
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            part = text[start:end].strip(" ,.")
-            if part:
-                parts.append(part)
-        return parts
-
-    # fallback: split su " e " solo se sembra separare due pizze
-    parts = re.split(
-        r"\s+e\s+(?=(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+(?:bianca|rossa|pizza|margherita|diavola|capricciosa|quattro formaggi|würstel|wurstel))",
-        text,
-    )
-
-    cleaned_parts = [part.strip(" ,.") for part in parts if part.strip(" ,.")]
-    return cleaned_parts if cleaned_parts else [text.strip(" ,.")]
-
-def extract_items_from_segments(segments: list[str], menu_items_for_llm: list[dict]) -> list[dict]:
-    collected_items = []
-
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-
-        # 1. parser normale se non sembra custom esplicita
-        if not segment_explicitly_requests_custom_pizza(segment):
-            segment_extracted = extract_order_from_text(segment, menu_items_for_llm)
-
-            if segment_extracted.get("items"):
-                normalized_items = []
-
-                for item in segment_extracted["items"]:
-                    # Se l'LLM inventa "Pizza personalizzata", la trasformiamo in:
-                    # - pizza custom vera, se il segmento descrive ingredienti
-                    # - pizza sconosciuta, se invece è un nome pizza non nel menu
-                    if item.get("pizza_name") == "Pizza personalizzata":
-                        custom_item = build_custom_pizza_from_message(segment, menu_items_for_llm)
-
-                        if custom_item:
-                            normalized_items.append(custom_item)
-                            continue
-
-                        fallback_unknown_items = fallback_extract_unknown_items(
-                            segment,
-                            menu_items_for_llm,
-                        )
-                        if fallback_unknown_items:
-                            for fallback_item in fallback_unknown_items:
-                                fallback_item.setdefault("add_ingredients", [])
-                                fallback_item.setdefault("remove_ingredients", [])
-                            normalized_items.extend(fallback_unknown_items)
-                            continue
-
-                    item.setdefault("add_ingredients", [])
-                    item.setdefault("remove_ingredients", [])
-                    normalized_items.append(item)
-
-                if normalized_items:
-                    collected_items.extend(normalized_items)
-                    continue
-
-        # 2. custom builder
-        custom_item = build_custom_pizza_from_message(segment, menu_items_for_llm)
-        if custom_item:
-            collected_items.append(custom_item)
-            continue
-
-        # 3. unknown pizza item (es. "3 diavole")
-        fallback_unknown_items = fallback_extract_unknown_items(
-            segment,
-            menu_items_for_llm,
-        )
-
-        if fallback_unknown_items:
-            for item in fallback_unknown_items:
-                item.setdefault("add_ingredients", [])
-                item.setdefault("remove_ingredients", [])
-            collected_items.extend(fallback_unknown_items)
-            continue
-
-        # 4. fallback menu semplice
-        fallback_items = fallback_extract_menu_items_from_message(
-            segment,
-            menu_items_for_llm,
-        )
-
-        if fallback_items:
-            for item in fallback_items:
-                item.setdefault("add_ingredients", [])
-                item.setdefault("remove_ingredients", [])
-            collected_items.extend(fallback_items)
-
-    return collected_items
-
-def fallback_extract_unknown_items(message: str, menu_items_for_llm: list[dict]) -> list[dict]:
-    message_lower = message.lower().strip()
-
-    patterns = [
-        r"(?:vorrei|prendo|aggiungi|fai|allora fai|fammi)\s+(?:anche\s+)?(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+([a-zàèéìòù]+)",
-        r"(?:una|un|uno|due|tre|quattro|cinque|\d+)\s+([a-zàèéìòù]+)",
-    ]
-
-    excluded_words = {
-        "pizza",
-        "pizze",
-        "nome",
-        "ritiro",
-        "orario",
-        "bianca",
-        "rossa",
-    }
-
-    for pattern in patterns:
-        match = re.search(pattern, message_lower)
-        if match:
-            candidate = singularize_pizza_name(match.group(1))
-
-            if candidate.lower() not in excluded_words:
-                quantity = infer_quantity_from_message(message_lower)
-
-                _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-                return [
-                    {
-                        "pizza_name": candidate,
-                        "pizza_type": "Senza glutine" if _is_gf else "Normale",
-                        "dough_type": "senza_glutine" if _is_gf else "classica",
-                        "quantity": quantity,
-                        "add_ingredients": [],
-                        "remove_ingredients": [],
-                    }
-                ]
-
-    return []
-
-def fallback_extract_menu_items_from_message(message: str, menu_items_for_llm: list[dict]) -> list[dict]:
-    message_lower = message.lower()
-    quantity = infer_quantity_from_message(message_lower)
-    found_items = []
-
-    sorted_menu_items = sorted(
-        menu_items_for_llm,
-        key=lambda item: len(item["name"]),
-        reverse=True,
-    )
-
-    for menu_item in sorted_menu_items:
-        if menu_item["name"].lower() in message_lower:
-            _is_gf = "senza glutine" in message_lower or "gluten free" in message_lower
-            found_items.append(
-                {
-                    "pizza_name": menu_item["name"],
-                    "pizza_type": "Senza glutine" if _is_gf else menu_item["pizza_type"],
-                    "dough_type": "senza_glutine" if _is_gf else menu_item.get("dough_type", "classica"),
-                    "quantity": quantity,
-                    "add_ingredients": [],
-                    "remove_ingredients": [],
-                }
-            )
-            break
-
-    return found_items
-
-def should_force_segment_parsing(message: str) -> bool:
-    message_lower = message.lower()
-
-    numeric_chunks = re.findall(r"\d+\s+", message_lower)
-
-    return (
-        len(numeric_chunks) >= 2
-        or (
-            " e " in message_lower
-            and any(char.isdigit() for char in message_lower)
-        )
-    )
-
 class ChatStartRequest(BaseModel):
     test_phone: str | None = None
 
@@ -1334,6 +938,8 @@ def chat(request: ChatRequest, session: SessionDep):
                     quantity=_item["quantity"],
                     add_ingredients_json=json.dumps(_item.get("add_ingredients", []), ensure_ascii=False),
                     remove_ingredients_json=json.dumps(_item.get("remove_ingredients", []), ensure_ascii=False),
+                    dough_type=_item.get("dough_type", "classica"),
+                    size=_item.get("size", "normale"),
                 ))
             session.commit()
 
@@ -1776,7 +1382,9 @@ def chat(request: ChatRequest, session: SessionDep):
             ni_add = ni.get("add_ingredients") or []
             ni_rem = ni.get("remove_ingredients") or []
             for ei in merged_items:
-                if ei["pizza_name"] == ni["pizza_name"] and ei["pizza_type"] == ni["pizza_type"]:
+                if (ei["pizza_name"] == ni["pizza_name"]
+                        and ei["pizza_type"] == ni["pizza_type"]
+                        and ei.get("size", "normale") == ni.get("size", "normale")):
                     ei["quantity"] += ni["quantity"]
                     # Aggiorna ingredienti solo se il nuovo item ne dichiara
                     if ni_add:
@@ -1910,6 +1518,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 quantity=item["quantity"],
                 add_ingredients_json=json.dumps(item.get("add_ingredients", []), ensure_ascii=False),
                 remove_ingredients_json=json.dumps(item.get("remove_ingredients", []), ensure_ascii=False),
+                dough_type=item.get("dough_type", "classica"),
+                size=item.get("size", "normale"),
             ))
         session.commit()
 

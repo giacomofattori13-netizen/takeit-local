@@ -26,6 +26,8 @@ class OrderItem(SQLModel, table=True):
     quantity: int
     add_ingredients_json: str = "[]"
     remove_ingredients_json: str = "[]"
+    dough_type: str = "classica"
+    size: str = "normale"
 
 
 class ConversationSession(SQLModel, table=True):
