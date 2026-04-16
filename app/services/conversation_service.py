@@ -437,7 +437,9 @@ def send_whatsapp_confirmation(
 
     content_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
     content_variables = json.dumps({"1": pizzeria_name, "2": pickup_time})
-    wa_from = f"whatsapp:{from_number}"
+    # Rimuovi eventuale prefisso "whatsapp:" già presente nel valore env
+    clean_from = from_number.removeprefix("whatsapp:")
+    wa_from = f"whatsapp:{clean_from}"
     wa_to = f"whatsapp:{phone}"
 
     print(f"[WhatsApp] POST Messages.json → From={wa_from!r} To={wa_to!r}")
@@ -1264,11 +1266,21 @@ def extract_order_from_text(
     ]
     print(f"[LLM] Estrazione da messaggio corrente: {message!r}")
 
-    response = client.responses.create(
-        model=MODEL_NAME,
-        max_output_tokens=512,
-        input=input_messages,
-    )
+    import time as _time
+    _t0 = _time.monotonic()
+    try:
+        response = client.responses.create(
+            model=MODEL_NAME,
+            max_output_tokens=512,
+            input=input_messages,
+            timeout=8,
+        )
+    except Exception as e:
+        _elapsed = round(_time.monotonic() - _t0, 2)
+        print(f"[LLM] Timeout/errore dopo {_elapsed}s: {type(e).__name__}: {e} → fallback Ok!")
+        return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
+    _elapsed = round(_time.monotonic() - _t0, 2)
+    print(f"[LLM] Risposta in {_elapsed}s")
 
     raw_text = response.output_text.strip()
     parsed = json.loads(raw_text)

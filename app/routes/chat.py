@@ -1242,6 +1242,37 @@ def chat(request: ChatRequest, session: SessionDep):
     # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
     extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
 
+    # LLM timeout fallback: rispondi "Ok!" e lascia il turno successivo riprocessare
+    if extracted.get("_llm_fallback"):
+        print("[Chat] LLM fallback attivo → risposta Ok! senza modifiche al carrello")
+        _current_merged = {
+            "customer_name": conversation.customer_name,
+            "pickup_time": conversation.pickup_time,
+            "items": json.loads(conversation.items_json),
+        }
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps({"intent": "llm_timeout", "items": []}, ensure_ascii=False),
+            merged_order_json=json.dumps(_current_merged, ensure_ascii=False),
+            response_message="Ok!",
+            valid=False,
+            missing_items_json="[]",
+            state=conversation.state,
+        ))
+        session.commit()
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={"intent": "llm_timeout", "items": []},
+            merged_order=_current_merged,
+            valid=False,
+            missing_items=[],
+            response_message="Ok!",
+            order_id=None,
+            state=conversation.state,
+        )
+
     existing_items = json.loads(conversation.items_json)
     new_items = extracted.get("items", [])
     for item in new_items:
