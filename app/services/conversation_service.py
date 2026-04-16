@@ -1239,6 +1239,18 @@ def _get_system_prompt(menu_items: list[dict], dough_items: list[dict] | None) -
     return _system_prompt_cache
 
 
+def prewarm_system_prompt() -> None:
+    """Costruisce e cachea il system prompt all'avvio del server.
+    Deve essere chiamata dopo fetch_and_save_doughs() e sync_menu_to_db()
+    così _menu_cache e _dough_cache sono già popolati."""
+    menu_items = load_menu_from_base44()
+    dough_items = load_doughs()
+    if not menu_items:
+        print("[LLM] Prewarm system prompt: menu vuoto, skip")
+        return
+    _get_system_prompt(menu_items, dough_items)
+
+
 def extract_order_from_text(
     message: str,
     menu_items: list[dict],
