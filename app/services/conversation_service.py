@@ -487,10 +487,6 @@ def send_whatsapp_confirmation(
         return f"{sms_status}|{wa_status}"
 
     return sms_status
-        print(f"[WhatsApp] → fallback SMS")
-        sms_status = _send_sms_fallback(phone, items, pickup_time, total_amount, account_sid, auth_token)
-        print(f"[WhatsApp] SMS fallback risultato: {sms_status}")
-        return f"{wa_status}|{sms_status}"
 
 
 def _fetch_restaurant_from_base44() -> dict | None:
