@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import Session
 
-from app.db import get_session
+from app.db import get_session, engine as _db_engine
 from app.models import ConversationSession
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
@@ -40,6 +40,11 @@ _AUDIO_CACHE: dict[str, str] = {}
 # attendere ElevenLabs prima di rispondere — registriamo subito e streaminamo dopo.
 _pending_streams: dict[str, tuple[str, float]] = {}  # stream_id → (text, created_at)
 
+# Filler audio: riprodotto durante l'elaborazione OpenAI per collecting_items.
+# chat() parte in background; Twilio riproduce il filler poi chiama /voice/process.
+_FILLER_PHRASE = "Un momento..."
+_pending_responses: dict[str, asyncio.Task] = {}  # session_id → Task[ChatResponse]
+
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
     "Certo, dimmi pure!",
@@ -48,10 +53,12 @@ _CACHED_PHRASES = [
     "Per che ora?",
     "Perfetto, confermo?",
     _NO_INPUT_MSG,
+    _FILLER_PHRASE,
 ]
 
-# Stati in cui la risposta può essere semplice/cached → vale la pena speculare
-_SPECULATIVE_STATES = {"collecting_items", "confirming_usual"}
+# Stati in cui la risposta può essere semplice/cached → vale la pena speculare.
+# collecting_items usa il filler+redirect invece, quindi non è più qui.
+_SPECULATIVE_STATES = {"confirming_usual"}
 
 
 def _public_base_url() -> str:
@@ -299,6 +306,91 @@ async def stream_audio(stream_id: str):
     return StreamingResponse(generate(), media_type="audio/mpeg")
 
 
+def _filler_audio_element() -> str:
+    """<Play> del filler dalla cache, o <Say> come fallback. Sempre sync (cache-only)."""
+    if _FILLER_PHRASE in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[_FILLER_PHRASE]).exists():
+        url = f"{_public_base_url()}/voice/audio/{_AUDIO_CACHE[_FILLER_PHRASE]}"
+        return f"<Play>{escape(url)}</Play>"
+    return f'<Say voice="{_POLLY_FALLBACK}">{escape(_FILLER_PHRASE)}</Say>'
+
+
+async def _build_response_twiml(result, session_id: str) -> str:
+    """Costruisce il TwiML finale dal risultato di chat()."""
+    reply = result.response_message
+    cache_hit = reply in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[reply]).exists()
+    print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
+    if result.state == "completed":
+        audio = await _audio_element_async(reply)
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {audio}\n"
+            "  <Hangup/>\n"
+            "</Response>"
+        )
+    audio, no_input = await asyncio.gather(
+        _audio_element_async(reply),
+        _audio_element_async(_NO_INPUT_MSG),
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f"  <Gather {_GATHER_ATTRS} "
+        f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+        f"    {audio}\n"
+        "  </Gather>\n"
+        f"  {no_input}\n"
+        "</Response>"
+    )
+
+
+@router.post("/process")
+async def voice_process(session_id: str = Query(...)):
+    """Chiamato da Twilio dopo il filler audio per collecting_items.
+    Attende il risultato del chat() in background e ritorna il TwiML finale."""
+    task = _pending_responses.pop(session_id, None)
+    if task is None:
+        print(f"[Voice] /process: nessun task per session={session_id!r} (già consumato o scaduto)")
+        audio, no_input = await asyncio.gather(
+            _audio_element_async("Scusi, può ripetere?"),
+            _audio_element_async(_NO_INPUT_MSG),
+        )
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  <Gather {_GATHER_ATTRS} "
+            f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+            f"    {audio}\n"
+            "  </Gather>\n"
+            f"  {no_input}\n"
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+    try:
+        result = await asyncio.wait_for(task, timeout=10.0)
+    except Exception as e:
+        print(f"[Voice] /process: errore task session={session_id!r}: {type(e).__name__}: {e}")
+        audio, no_input = await asyncio.gather(
+            _audio_element_async("Scusi, non ho capito. Può ripetere?"),
+            _audio_element_async(_NO_INPUT_MSG),
+        )
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  <Gather {_GATHER_ATTRS} "
+            f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+            f"    {audio}\n"
+            "  </Gather>\n"
+            f"  {no_input}\n"
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+    twiml = await _build_response_twiml(result, session_id)
+    return Response(content=twiml, media_type="application/xml")
+
+
 @router.post("/incoming")
 async def voice_incoming(
     From: str = Form(default=""),
@@ -455,10 +547,27 @@ async def voice_gather(
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
 
+    if _state == "collecting_items":
+        # Filler path: lancia chat() in background con sessione DB propria,
+        # rispondi subito con il filler audio + Redirect a /voice/process.
+        def _chat_bg():
+            with Session(_db_engine) as _db:
+                return chat(chat_request, _db)
+
+        task = asyncio.create_task(asyncio.to_thread(_chat_bg))
+        _pending_responses[session_id] = task
+        print(f"[Voice] Filler path: task avviato per session={session_id!r}")
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {_filler_audio_element()}\n"
+            f'  <Redirect method="POST">/voice/process?session_id={session_id}</Redirect>\n'
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
     if _state in _SPECULATIVE_STATES:
         # Parallelismo speculativo: OpenAI + pre-generazione "Ok!" in parallelo.
-        # Se la risposta reale è già in cache, _audio_element_async è istantaneo
-        # e si risparmia tutta la latenza ElevenLabs (≈ 500ms).
         print(f"[Voice] Parallel speculative: OpenAI + ElevenLabs('Ok!') per stato={_state!r}")
         result, _ = await asyncio.gather(
             asyncio.to_thread(chat, chat_request, session),
@@ -467,36 +576,5 @@ async def voice_gather(
     else:
         result = await asyncio.to_thread(chat, chat_request, session)
 
-    reply = result.response_message
-    cache_hit = reply in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[reply]).exists()
-    print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
-
-    if result.state == "completed":
-        # La conferma WhatsApp/SMS è già inviata dentro chat() con gli item arricchiti;
-        # qui generiamo solo l'audio di chiusura.
-        audio = await _audio_element_async(reply)
-        twiml = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            "<Response>\n"
-            f"  {audio}\n"
-            "  <Hangup/>\n"
-            "</Response>"
-        )
-    else:
-        # Genera in parallelo: audio risposta + audio no-input (quasi sempre cached)
-        audio, no_input = await asyncio.gather(
-            _audio_element_async(reply),
-            _audio_element_async(_NO_INPUT_MSG),
-        )
-        twiml = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            "<Response>\n"
-            f"  <Gather {_GATHER_ATTRS} "
-            f'action="/voice/gather?session_id={session_id}" method="POST">\n'
-            f"    {audio}\n"
-            "  </Gather>\n"
-            f"  {no_input}\n"
-            "</Response>"
-        )
-
+    twiml = await _build_response_twiml(result, session_id)
     return Response(content=twiml, media_type="application/xml")
