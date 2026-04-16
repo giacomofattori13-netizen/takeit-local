@@ -112,7 +112,7 @@ def _synthesize(text: str) -> str | None:
         return None
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    payload = {"text": text, "model_id": model_id}
+    payload = {"text": text, "model_id": model_id, "language_code": "it"}
     print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
     try:
         resp = httpx.post(
@@ -156,7 +156,7 @@ async def _synthesize_async(text: str) -> str | None:
         return None
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    payload = {"text": text, "model_id": model_id}
+    payload = {"text": text, "model_id": model_id, "language_code": "it"}
     print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -284,7 +284,7 @@ async def stream_audio(stream_id: str):
                     "POST",
                     el_url,
                     headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-                    json={"text": text, "model_id": model_id},
+                    json={"text": text, "model_id": model_id, "language_code": "it"},
                 ) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()

@@ -849,8 +849,9 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None, str | None
         h, m = divmod(open_min, 60)
         return False, f"{h:02d}:{m:02d}", None
 
-    # Dopo la chiusura → suggerisci l'ultimo slot (chiusura - 15 min)
-    if pickup_minutes > close_min:
+    # Dopo la chiusura → suggerisci l'ultimo slot (chiusura - 15 min).
+    # L'orario limite stesso (chiusura - 15 min) è valido: condizione > non >=.
+    if pickup_minutes > close_min - 15:
         last_slot = max(close_min - 15, open_min)
         close_h, close_m = divmod(close_min, 60)
         last_h, last_m = divmod(last_slot, 60)
