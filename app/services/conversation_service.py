@@ -1290,6 +1290,7 @@ PIZZA_ALIASES: dict[str, str] = {
     "wurster": "würstel",
     "formaggio verde": "gorgonzola",
     "verde": "gorgonzola",
+    "bondola": "mortadella",
 }
 
 def _apply_aliases(text: str) -> str:
