@@ -341,7 +341,8 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
         add_ings = item.get("add_ingredients", [])
         rem_ings = item.get("remove_ingredients", [])
 
-        lines.append(f"- {qty}x {name}")
+        display_name = "Margherita" if name == "Personalizzata" else name
+        lines.append(f"- {qty}x {display_name}")
         if dough and dough != "classica":
             lines.append(f"    # {dough}")
         for ing in add_ings:

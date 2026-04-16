@@ -422,7 +422,8 @@
     let editingMenuItemId = null;
 
     function formatItem(item) {
-        let text = `${item.quantity} ${item.pizza_name}`;
+        const displayName = item.pizza_name === "Personalizzata" ? "Margherita" : item.pizza_name;
+        let text = `${item.quantity} ${displayName}`;
 
         if (item.size === "mini") {
             text += " (Mini)";
@@ -708,7 +709,8 @@
     function printOrder(order) {
       const itemsHtml = (order.items || [])
         .map(item => {
-          let line = `${item.quantity} ${item.pizza_name}`;
+          const displayName = item.pizza_name === "Personalizzata" ? "Margherita" : item.pizza_name;
+          let line = `${item.quantity} ${displayName}`;
 
           if (item.size === "mini") {
             line += " (Mini)";
