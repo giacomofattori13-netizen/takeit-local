@@ -22,6 +22,7 @@ _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
 _restaurant_cache: dict | None = None
 _restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
+_system_prompt_cache: str | None = None
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
 
@@ -33,13 +34,15 @@ SIZE_DOPPIO_SURCHARGE = 2.00
 
 
 def reset_menu_cache() -> None:
-    global _menu_cache
+    global _menu_cache, _system_prompt_cache
     _menu_cache = []
+    _system_prompt_cache = None
 
 
 def reset_dough_cache() -> None:
-    global _dough_cache
+    global _dough_cache, _system_prompt_cache
     _dough_cache = []
+    _system_prompt_cache = None
 
 
 def reset_restaurant_cache() -> None:
@@ -1212,18 +1215,16 @@ Examples:
 """
 
 
-def extract_order_from_text(
-    message: str,
-    menu_items: list[dict],
-    dough_items: list[dict] | None = None,
-) -> dict:
+def _get_system_prompt(menu_items: list[dict], dough_items: list[dict] | None) -> str:
+    global _system_prompt_cache
+    if _system_prompt_cache is not None:
+        return _system_prompt_cache
+
     menu_lines = []
     for item in menu_items:
         ingredients = item.get("ingredients") or []
         ings_str = f' [{", ".join(ingredients)}]' if ingredients else ""
-        line = f'- {item["name"]}{ings_str}'
-        menu_lines.append(line)
-
+        menu_lines.append(f'- {item["name"]}{ings_str}')
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
 
     dough_lines = []
@@ -1233,8 +1234,20 @@ def extract_order_from_text(
         dough_lines.append(f'- {d["name"]} (code: {d["code"]}) | supplemento: {surcharge_text}')
     dough_text = "\n".join(dough_lines)
 
+    _system_prompt_cache = build_system_prompt(menu_text, dough_text)
+    print(f"[LLM] System prompt costruito e messo in cache ({len(_system_prompt_cache)} chars)")
+    return _system_prompt_cache
+
+
+def extract_order_from_text(
+    message: str,
+    menu_items: list[dict],
+    dough_items: list[dict] | None = None,
+) -> dict:
+    system_prompt = _get_system_prompt(menu_items, dough_items)
+
     input_messages = [
-        {"role": "system", "content": build_system_prompt(menu_text, dough_text)},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
     print(f"[LLM] Estrazione da messaggio corrente: {message!r}")
