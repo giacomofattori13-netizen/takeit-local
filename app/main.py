@@ -56,11 +56,15 @@ def on_startup():
 
     prewarm_audio_cache()
 
-    _twilio_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM"]
+    _twilio_vars = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_WHATSAPP_FROM", "TWILIO_NUMBER"]
     _present = [v for v in _twilio_vars if os.getenv(v)]
     _missing = [v for v in _twilio_vars if not os.getenv(v)]
     print(f"[Startup] Twilio — presenti: {_present}, mancanti: {_missing}")
-    print(f"[Startup] Twilio environ check — TWILIO_ACCOUNT_SID is not None: {os.environ.get('TWILIO_ACCOUNT_SID') is not None}, TWILIO_AUTH_TOKEN is not None: {os.environ.get('TWILIO_AUTH_TOKEN') is not None}, TWILIO_WHATSAPP_FROM is not None: {os.environ.get('TWILIO_WHATSAPP_FROM') is not None}")
+    _wa_from_raw = os.environ.get("TWILIO_WHATSAPP_FROM")
+    _wa_from_clean = _wa_from_raw.removeprefix("whatsapp:") if _wa_from_raw else None
+    _twilio_number = os.environ.get("TWILIO_NUMBER")
+    print(f"[Startup] TWILIO_WHATSAPP_FROM raw={_wa_from_raw!r} → clean={_wa_from_clean!r}")
+    print(f"[Startup] TWILIO_NUMBER={_twilio_number!r}")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
