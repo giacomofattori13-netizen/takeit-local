@@ -2,13 +2,14 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
 
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import Session
 
 from app.db import get_session
@@ -33,6 +34,11 @@ _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
 # Cache in memoria: testo → filename MP3. Evita chiamate ripetute a ElevenLabs.
 _AUDIO_CACHE: dict[str, str] = {}
+
+# Streaming: testo registrato per essere servito via /voice/stream/{id}
+# Twilio richiede l'audio DOPO aver ricevuto il TwiML, quindi non dobbiamo
+# attendere ElevenLabs prima di rispondere — registriamo subito e streaminamo dopo.
+_pending_streams: dict[str, tuple[str, float]] = {}  # stream_id → (text, created_at)
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
@@ -180,14 +186,34 @@ async def _synthesize_async(text: str) -> str | None:
 
 
 async def _audio_element_async(text: str) -> str:
-    """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>."""
+    """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>.
+
+    Per le frasi in cache (pre-riscaldate all'avvio) serve il file MP3 già pronto.
+    Per tutto il resto registra uno stream_id e restituisce subito l'URL di streaming:
+    Twilio riceverà il TwiML senza attendere ElevenLabs, poi richiederà l'audio e
+    lo riceverà in streaming non appena ElevenLabs inizia a generarlo (~200-400ms).
+    """
     text = format_time_for_speech(text)
     print(f"[TTS] Testo finale: {text!r}")
-    filename = await _synthesize_async(text)
-    if filename:
-        url = f"{_public_base_url()}/voice/audio/{filename}"
-        return f"<Play>{escape(url)}</Play>"
-    return f'<Say voice="{_POLLY_FALLBACK}">{escape(text)}</Say>'
+
+    # Cache hit: file già pronto su disco → nessuna latenza ElevenLabs
+    if text in _AUDIO_CACHE:
+        cached = _AUDIO_CACHE[text]
+        if (AUDIO_DIR / cached).exists():
+            print(f"[ElevenLabs] Cache hit: {text!r}")
+            url = f"{_public_base_url()}/voice/audio/{cached}"
+            return f"<Play>{escape(url)}</Play>"
+
+    # ElevenLabs non configurato → fallback Polly (nessuna latenza di rete)
+    if not os.getenv("ELEVENLABS_API_KEY") or not os.getenv("ELEVENLABS_VOICE_ID"):
+        return f'<Say voice="{_POLLY_FALLBACK}">{escape(text)}</Say>'
+
+    # Registra lo stream e ritorna subito: Twilio recupererà l'audio in streaming
+    stream_id = str(uuid.uuid4())
+    _pending_streams[stream_id] = (text, time.time())
+    url = f"{_public_base_url()}/voice/stream/{stream_id}"
+    print(f"[ElevenLabs] Stream registrato {stream_id}: {text!r}")
+    return f"<Play>{escape(url)}</Play>"
 
 
 def prewarm_audio_cache() -> None:
@@ -220,6 +246,57 @@ def serve_audio(filename: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Audio not found")
     return FileResponse(path, media_type="audio/mpeg")
+
+
+@router.get("/stream/{stream_id}")
+async def stream_audio(stream_id: str):
+    """Proxy ElevenLabs streaming TTS → Twilio.
+
+    Twilio richiede questo URL dopo aver ricevuto il TwiML con <Play>.
+    Avviamo la richiesta a ElevenLabs solo ora e facciamo il proxy dei byte
+    non appena arrivano: Twilio inizia a riprodurre l'audio senza attendere
+    che sia completamente generato (~200-400ms al primo byte con eleven_flash_v2_5).
+    """
+    # Pulizia lazy: rimuovi stream_id scaduti (> 60s, mai recuperati da Twilio)
+    now = time.time()
+    stale = [k for k, (_, ts) in list(_pending_streams.items()) if now - ts > 60]
+    for k in stale:
+        _pending_streams.pop(k, None)
+        print(f"[ElevenLabs] Stream scaduto rimosso: {k}")
+
+    entry = _pending_streams.pop(stream_id, None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Stream non trovato o scaduto")
+
+    text, _ = entry
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+    model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
+    el_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
+    print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} text={text!r}")
+
+    async def generate():
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+            ) as http:
+                async with http.stream(
+                    "POST",
+                    el_url,
+                    headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                    json={"text": text, "model_id": model_id},
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        print(f"[ElevenLabs] Stream error {resp.status_code}: {body[:200]}")
+                        return
+                    print(f"[ElevenLabs] Stream {stream_id}: primo chunk in arrivo")
+                    async for chunk in resp.aiter_bytes(chunk_size=4096):
+                        yield chunk
+        except Exception as e:
+            print(f"[ElevenLabs] Stream {stream_id} eccezione: {type(e).__name__}: {e}")
+
+    return StreamingResponse(generate(), media_type="audio/mpeg")
 
 
 @router.post("/incoming")
