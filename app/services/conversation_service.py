@@ -325,23 +325,29 @@ def _normalize_phone(raw: str | None) -> str | None:
 
 
 def _build_pizza_lines(items: list[dict]) -> list[str]:
-    """Costruisce le righe descrittive delle pizze per i messaggi di conferma."""
+    """Costruisce le righe descrittive delle pizze per i messaggi di conferma.
+
+    Formato:
+        - 1x Margherita
+            # integrale          (solo se impasto != classica)
+            + patatine fritte    (solo se presenti)
+            - mozzarella         (solo se presenti)
+    """
     lines = []
     for item in items:
         qty = item.get("quantity", 1)
         name = item.get("pizza_name", "")
         dough = item.get("dough_type", "classica")
-        extras = []
-        if dough != "classica":
-            extras.append(dough)
-        for ing in item.get("add_ingredients", []):
-            extras.append(f"+{ing}")
-        for ing in item.get("remove_ingredients", []):
-            extras.append(f"-{ing}")
-        line = f"{qty}x {name}"
-        if extras:
-            line += f" ({', '.join(extras)})"
-        lines.append(line)
+        add_ings = item.get("add_ingredients", [])
+        rem_ings = item.get("remove_ingredients", [])
+
+        lines.append(f"- {qty}x {name}")
+        if dough and dough != "classica":
+            lines.append(f"    # {dough}")
+        for ing in add_ings:
+            lines.append(f"    + {ing}")
+        for ing in rem_ings:
+            lines.append(f"    - {ing}")
     return lines
 
 
@@ -367,16 +373,22 @@ def _send_sms(
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
     pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
     pizza_lines = _build_pizza_lines(items)
-    pizza_text = ", ".join(pizza_lines)
-    total_str = f"€{total_amount:.2f}"
+    pizza_block = "\n".join(pizza_lines)
+    total_str = f"\u20ac{total_amount:.2f}"
     time_str = pickup_time or "da definire"
-    contact_str = f" Per modifiche chiama il {pizzeria_phone}." if pizzeria_phone else ""
+    contact_line = f"Per modifiche chiama il {pizzeria_phone}" if pizzeria_phone else ""
 
-    body = (
-        f"{pizzeria_name} \u2705 Ordine confermato! "
-        f"{pizza_text} "
-        f"Totale: {total_str} - Ritiro alle {time_str}.{contact_str}"
-    )
+    parts = [
+        f"{pizzeria_name} \u2705",
+        "Ordine confermato!",
+        "",
+        pizza_block,
+        "",
+        f"Totale: {total_str} \u2014 Ritiro alle {time_str}",
+    ]
+    if contact_line:
+        parts.append(contact_line)
+    body = "\n".join(parts)
 
     print(f"[SMS] Body ({len(body)} chars): {body!r}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
