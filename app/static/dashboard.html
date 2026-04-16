@@ -435,7 +435,11 @@
         }
 
         if (item.add_ingredients && item.add_ingredients.length > 0) {
-            text += ` con ${item.add_ingredients.join(", ")}`;
+            if (item.pizza_name === "Personalizzata") {
+                text += " " + item.add_ingredients.map(i => `+${i}`).join(", ");
+            } else {
+                text += ` con ${item.add_ingredients.join(", ")}`;
+            }
         }
 
         if (item.remove_ingredients && item.remove_ingredients.length > 0) {
@@ -717,7 +721,11 @@
           }
 
           if (item.add_ingredients && item.add_ingredients.length > 0) {
-            line += ` con ${item.add_ingredients.join(", ")}`;
+            if (item.pizza_name === "Personalizzata") {
+              line += " " + item.add_ingredients.map(i => `+${i}`).join(", ");
+            } else {
+              line += ` con ${item.add_ingredients.join(", ")}`;
+            }
           }
 
           if (item.remove_ingredients && item.remove_ingredients.length > 0) {

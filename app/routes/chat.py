@@ -333,6 +333,7 @@ def pluralize_pizza_name(name: str, quantity: int) -> str:
         "Diavola": "diavole",
         "Capricciosa": "capricciose",
         "Quattro Formaggi": "quattro formaggi",
+        "Personalizzata": "pizze personalizzate",
         "Pizza personalizzata": "pizze personalizzate",
     }
 
@@ -350,12 +351,12 @@ def format_single_item(item: dict) -> str:
     size = item.get("size", "normale")
 
     if quantity == 1:
-        if pizza_name == "Pizza personalizzata":
+        if pizza_name in ("Personalizzata", "Pizza personalizzata"):
             line = "una pizza personalizzata"
         else:
             line = f"una {pizza_name.lower()}"
     else:
-        if pizza_name == "Pizza personalizzata":
+        if pizza_name in ("Personalizzata", "Pizza personalizzata"):
             line = f"{quantity} pizze personalizzate"
         else:
             line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
@@ -391,6 +392,11 @@ def split_valid_and_invalid_items(
     missing_messages = []
 
     for item in items:
+        # Pizza libera: sempre valida, usa prezzo Margherita come base
+        if item["pizza_name"] == "Personalizzata":
+            valid_items.append(item)
+            continue
+
         statement = select(MenuItem).where(
             MenuItem.name == item["pizza_name"],
             MenuItem.pizza_type == item["pizza_type"],
@@ -926,19 +932,27 @@ def chat(request: ChatRequest, session: SessionDep):
             session.commit()
 
             # Pricing e salvataggio Base44
+            _margherita_item = session.exec(
+                select(MenuItem).where(MenuItem.name == "Margherita")
+            ).first()
+            _base_personalizzata = round(_margherita_item.price, 2) if _margherita_item else 0.0
+
             enriched_items = []
             for _item in merged_order["items"]:
-                _menu_item = session.exec(
-                    select(MenuItem).where(
-                        MenuItem.name == _item["pizza_name"],
-                        MenuItem.pizza_type == _item["pizza_type"],
-                    )
-                ).first()
-                if not _menu_item:
+                if _item["pizza_name"] == "Personalizzata":
+                    _base = _base_personalizzata
+                else:
                     _menu_item = session.exec(
-                        select(MenuItem).where(MenuItem.name == _item["pizza_name"])
+                        select(MenuItem).where(
+                            MenuItem.name == _item["pizza_name"],
+                            MenuItem.pizza_type == _item["pizza_type"],
+                        )
                     ).first()
-                _base = round(_menu_item.price, 2) if _menu_item else 0.0
+                    if not _menu_item:
+                        _menu_item = session.exec(
+                            select(MenuItem).where(MenuItem.name == _item["pizza_name"])
+                        ).first()
+                    _base = round(_menu_item.price, 2) if _menu_item else 0.0
                 _is_sg = "(SG)" in _item.get("pizza_name", "")
                 _dough_code = _item.get("dough_type", "classica")
                 _surcharge = 0.0 if _is_sg else get_dough_surcharge(_dough_code)
@@ -1379,6 +1393,11 @@ def chat(request: ChatRequest, session: SessionDep):
         missing_messages.append(pickup_time_error)
 
     for item in merged_items:
+        # Pizza libera: sempre valida, usa prezzo Margherita come base
+        if item["pizza_name"] == "Personalizzata":
+            valid_items.append(item)
+            continue
+
         menu_item = session.exec(
             select(MenuItem).where(
                 MenuItem.name == item["pizza_name"],
@@ -1486,19 +1505,29 @@ def chat(request: ChatRequest, session: SessionDep):
         order_id = order.id
         order_saved = True
 
+        # Prezzo base per pizze libere ("Personalizzata") = prezzo Margherita
+        _margherita = session.exec(
+            select(MenuItem).where(MenuItem.name == "Margherita")
+        ).first()
+        _base_personalizzata = round(_margherita.price, 2) if _margherita else 0.0
+
         enriched_items = []
         for item in merged_order["items"]:
-            menu_item = session.exec(
-                select(MenuItem).where(
-                    MenuItem.name == item["pizza_name"],
-                    MenuItem.pizza_type == item["pizza_type"],
-                )
-            ).first()
-            if not menu_item:
+            if item["pizza_name"] == "Personalizzata":
+                menu_item = None
+                base_price = _base_personalizzata
+            else:
                 menu_item = session.exec(
-                    select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                    select(MenuItem).where(
+                        MenuItem.name == item["pizza_name"],
+                        MenuItem.pizza_type == item["pizza_type"],
+                    )
                 ).first()
-            base_price = round(menu_item.price, 2) if menu_item else 0.0
+                if not menu_item:
+                    menu_item = session.exec(
+                        select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                    ).first()
+                base_price = round(menu_item.price, 2) if menu_item else 0.0
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
             dough_code = item.get("dough_type", "classica")
             dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)

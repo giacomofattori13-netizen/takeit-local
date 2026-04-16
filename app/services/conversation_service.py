@@ -1189,9 +1189,13 @@ Rules:
 - If the user says "con patatine", put "patatine" in add_ingredients.
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"] unless a better pizza base is clearly specified.
 - Never invent ingredients not mentioned by the user.
-- If the user describes a pizza by ingredients but does not clearly name a pizza from the MENU, you may use "Pizza personalizzata" as pizza_name.
-- Use "Pizza personalizzata" especially for phrases like "una pizza con würstel e patatine", "una bianca con prosciutto", "una rossa con olive".
-- If using "Pizza personalizzata", still fill add_ingredients and remove_ingredients correctly.
+- If the customer names a pizza that does NOT appear in the MENU (e.g. "una würstel", "una melanzane e gorgonzola", "una pizza al salmone"), use pizza_name="Personalizzata" and put the unknown pizza name as the FIRST element of add_ingredients, followed by any other ingredients mentioned.
+  * "una würstel" → pizza_name="Personalizzata", add_ingredients=["würstel"]
+  * "una melanzane e gorgonzola" → pizza_name="Personalizzata", add_ingredients=["melanzane", "gorgonzola"]
+  * "una pizza con würstel e patatine" → pizza_name="Personalizzata", add_ingredients=["würstel", "patatine"]
+  * "una bianca con prosciutto" → pizza_name="Personalizzata", add_ingredients=["prosciutto"], remove_ingredients=["pomodoro"]
+- If the user describes a pizza by ingredients without naming it, use pizza_name="Personalizzata" with the ingredients in add_ingredients.
+- If using "Personalizzata", still fill add_ingredients and remove_ingredients correctly. Never use "Pizza personalizzata" — always just "Personalizzata".
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"].
 - If the user says "rossa", do not add anything automatically unless specific ingredients are mentioned.
 - SIZE MODIFIERS — il campo size indica la dimensione della pizza:
