@@ -559,10 +559,9 @@ def build_assistant_response(
     pickup_time = merged_order.get("pickup_time")
     items_text = format_items_for_customer(merged_order["items"])
 
-    # Pickup time closed-hours error
+    # Pickup time closed-hours error — ritorna solo il messaggio di errore,
+    # senza accodare missing_messages (che già contiene pickup_time_error).
     if pickup_time_error:
-        if missing_messages:
-            return pickup_time_error + " " + " ".join(missing_messages)
         return pickup_time_error
 
     # Missing/invalid items

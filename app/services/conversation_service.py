@@ -765,20 +765,12 @@ def resolve_pickup_time(raw: str) -> str:
     hour = int(m_match.group(1))
     minute = int(m_match.group(2)) if m_match.group(2) else 0
 
-    # Regola 1: orario ambiguo (1-12) → AM vs PM, scegli il più vicino nel futuro
-    if 1 <= hour <= 12:
-        am_total = hour * 60 + minute
-        pm_total = (hour + 12) * 60 + minute
-
-        def _minutes_until(target: int) -> int:
-            diff = target % (24 * 60) - now_total
-            if diff < 0:
-                diff += 24 * 60
-            return diff
-
-        if _minutes_until(pm_total) < _minutes_until(am_total):
-            hour = (hour + 12) % 24
-            print(f"[Hours] Orario ambiguo '{raw}' risolto come {hour:02d}:{minute:02d} (ora: {now.hour:02d}:{now.minute:02d})")
+    # Regola 1: orario ambiguo (1-11) → se siamo nel pomeriggio/sera (ora >= 12),
+    # interpretiamo sempre come PM (7 → 19, 8 → 20). Un cliente che chiama la sera
+    # non vuole ritirare alle 7 di mattina.
+    if 1 <= hour <= 11 and now.hour >= 12:
+        hour += 12
+        print(f"[Hours] Orario ambiguo '{raw}' → {hour:02d}:{minute:02d} (ora attuale: {now.hour:02d}:{now.minute:02d}, PM forzato)")
 
     # Regola 3: arrotonda ai 15 minuti più vicini
     total = _round_to_nearest_15(hour * 60 + minute)
