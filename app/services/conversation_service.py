@@ -1281,6 +1281,22 @@ def prewarm_system_prompt() -> None:
     _get_system_prompt(menu_items, dough_items)
 
 
+# Alias fonetici: parole comuni trascritte male dal riconoscimento vocale → termine corretto.
+# Applicati al testo del cliente PRIMA della chiamata OpenAI.
+PIZZA_ALIASES: dict[str, str] = {
+    "booster": "würstel",
+    "vurstel": "würstel",
+    "wurstel": "würstel",
+    "wurster": "würstel",
+}
+
+def _apply_aliases(text: str) -> str:
+    """Sostituisce gli alias fonetici nel testo (case-insensitive, parola intera)."""
+    for alias, canonical in PIZZA_ALIASES.items():
+        text = re.sub(rf"\b{re.escape(alias)}\b", canonical, text, flags=re.IGNORECASE)
+    return text
+
+
 def extract_order_from_text(
     message: str,
     menu_items: list[dict],
@@ -1288,11 +1304,15 @@ def extract_order_from_text(
 ) -> dict:
     system_prompt = _get_system_prompt(menu_items, dough_items)
 
+    normalized = _apply_aliases(message)
+    if normalized != message:
+        print(f"[LLM] Alias applicati: {message!r} → {normalized!r}")
+
     input_messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": message},
+        {"role": "user", "content": normalized},
     ]
-    print(f"[LLM] Estrazione da messaggio corrente: {message!r}")
+    print(f"[LLM] Estrazione da messaggio corrente: {normalized!r}")
 
     import time as _time
     _t0 = _time.monotonic()
