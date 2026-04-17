@@ -972,6 +972,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 ai_confidence=0.95,
                 items=enriched_items,
             )
+            print(f"[SMS] Tentativo invio (awaiting_confirmation): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
             send_whatsapp_confirmation(
                 customer_name=merged_order["customer_name"],
                 customer_phone=conversation.customer_phone,
@@ -1547,6 +1548,7 @@ def chat(request: ChatRequest, session: SessionDep):
             ai_confidence=0.9,
             items=enriched_items,
         )
+        print(f"[SMS] Tentativo invio (confirm_order): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
         send_whatsapp_confirmation(
             customer_name=merged_order["customer_name"],
             customer_phone=conversation.customer_phone,

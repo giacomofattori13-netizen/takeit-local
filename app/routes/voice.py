@@ -551,12 +551,23 @@ async def voice_gather(
         # Filler path: lancia chat() in background con sessione DB propria,
         # rispondi subito con il filler audio + Redirect a /voice/process.
         def _chat_bg():
-            with Session(_db_engine) as _db:
-                return chat(chat_request, _db)
+            try:
+                with Session(_db_engine) as _db:
+                    result = chat(chat_request, _db)
+                print(
+                    f"[Voice] _chat_bg completato: session={session_id!r} stato={result.state!r} "
+                    f"order_id={result.order_id!r} phone={_phone!r}"
+                )
+                if result.state == "completed":
+                    print(f"[SMS] Tentativo invio dopo filler: session={session_id!r} phone={_phone!r}")
+                return result
+            except Exception as exc:
+                print(f"[Voice] _chat_bg ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
+                raise
 
         task = asyncio.create_task(asyncio.to_thread(_chat_bg))
         _pending_responses[session_id] = task
-        print(f"[Voice] Filler path: task avviato per session={session_id!r}")
+        print(f"[Voice] Filler path: task avviato per session={session_id!r} phone={_phone!r}")
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"
