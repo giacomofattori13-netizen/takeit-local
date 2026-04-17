@@ -768,9 +768,15 @@ def resolve_pickup_time(raw: str) -> str:
     # Regola 1: orario ambiguo (1-11) → se siamo nel pomeriggio/sera (ora >= 12),
     # interpretiamo sempre come PM (7 → 19, 8 → 20). Un cliente che chiama la sera
     # non vuole ritirare alle 7 di mattina.
-    if 1 <= hour <= 11 and now.hour >= 12:
+    # Usa now_total (minuti dall'inizio della giornata in Europe/Rome) come fonte di verità.
+    is_afternoon = now_total >= 12 * 60
+    original_hour = hour
+    if 1 <= hour <= 11 and is_afternoon:
         hour += 12
-        print(f"[Hours] Orario ambiguo '{raw}' → {hour:02d}:{minute:02d} (ora attuale: {now.hour:02d}:{now.minute:02d}, PM forzato)")
+    print(
+        f"[Hours] ora cliente={original_hour} ora attuale={now.hour:02d}:{now.minute:02d} "
+        f"(Rome) is_afternoon={is_afternoon} → convertita={hour:02d}:{minute:02d}"
+    )
 
     # Regola 3: arrotonda ai 15 minuti più vicini
     total = _round_to_nearest_15(hour * 60 + minute)
