@@ -65,10 +65,22 @@ _SPECULATIVE_STATES = {"confirming_usual"}
 # Tutto ciò che matcha → niente filler (il turno si risolve velocemente).
 _TRIVIAL_COLLECTING_RE = re.compile(
     r"^(?:"
+    # Affermazioni / negazioni semplici
     r"s[iì]|no|ok|okay|va bene|certo|esatto|giusto|perfetto|confermo|no grazie|"
-    r"(?:no[,\s]+)?(?:voglio|vorrei)\s+(?:ordinare|qualcosa\s+di\s+diverso|(?:qualcosa\s+)?altro(?:\s+\w+)*)|"
-    r"(?:voglio|vorrei)\s+(?:una\s+)?pizza\s*$|"
-    r"(?:voglio|vorrei)\s+(?:due|tre|quattro|cinque|\d+)\s+pizze?\s*$|"
+    # voglio/vorrei [ordinare] + intenzione generica senza nome pizza specifico
+    r"(?:no[,\s]+)?(?:voglio|vorrei)(?:\s+ordinare)?\s+(?:qualcosa\s+di\s+diverso|(?:qualcosa\s+)?altro(?:\s+\w+)*)|"
+    # voglio/vorrei [ordinare] + "una pizza" / "pizza" generico
+    r"(?:no[,\s]+)?(?:voglio|vorrei)(?:\s+ordinare)?\s+(?:una?\s+)?pizza|"
+    # voglio/vorrei [ordinare] + articolo/partitivo + "pizze" generico
+    # copre: "delle pizze", "le pizze", "un po' di pizze", solo "pizze"
+    # Nota: \s+ è DENTRO il gruppo opzionale per non consumare lo spazio prima dell'articolo
+    r"(?:no[,\s]+)?(?:voglio|vorrei)(?:\s+ordinare)?\s+(?:(?:delle?|del|dei|le|un\s+po['\s]+di)\s+)?pizze|"
+    # voglio/vorrei [ordinare] + numero (cifre o parole) + "pizza/pizze"
+    # copre: "7 pizze", "due pizze", "ordinare 3 pizze", ecc.
+    r"(?:no[,\s]+)?(?:voglio|vorrei)(?:\s+ordinare)?\s+(?:\d+|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)\s+pizze?|"
+    # "voglio ordinare" / "vorrei ordinare" da soli (senza nulla dopo)
+    r"(?:voglio|vorrei)\s+ordinare|"
+    # Altri segnali di cambio/annullamento/intenzione nuda
     r"diversi?a?|altri?e?|cambio|"
     r"ordine|ordinare"
     r")\s*[!.,?]*$",
