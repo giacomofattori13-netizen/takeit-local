@@ -60,6 +60,42 @@ _CACHED_PHRASES = [
 # collecting_items usa il filler+redirect invece, quindi non è più qui.
 _SPECULATIVE_STATES = {"confirming_usual"}
 
+# Risposte banali in collecting_items che NON meritano il filler:
+# affermazioni/negazioni, intenzioni generiche senza pizza specifica.
+# Tutto ciò che matcha → niente filler (il turno si risolve velocemente).
+_TRIVIAL_COLLECTING_RE = re.compile(
+    r"^(?:"
+    r"s[iì]|no|ok|okay|va bene|certo|esatto|giusto|perfetto|confermo|no grazie|"
+    r"(?:no[,\s]+)?(?:voglio|vorrei)\s+(?:ordinare|qualcosa\s+di\s+diverso|(?:qualcosa\s+)?altro(?:\s+\w+)*)|"
+    r"(?:voglio|vorrei)\s+(?:una\s+)?pizza\s*$|"
+    r"(?:voglio|vorrei)\s+(?:due|tre|quattro|cinque|\d+)\s+pizze?\s*$|"
+    r"diversi?a?|altri?e?|cambio|"
+    r"ordine|ordinare"
+    r")\s*[!.,?]*$",
+    re.IGNORECASE,
+)
+
+
+def _needs_filler(speech: str, state: str) -> bool:
+    """True se riprodurre 'Un momento...' è appropriato per questo messaggio.
+
+    collecting_name / collecting_pickup_time → sempre True: il cliente sta
+    fornendo dati attesi e OpenAI deve estrarre nome o orario (~400-800ms).
+
+    collecting_items → True solo se il testo sembra contenere dati di ordine
+    reali (nome pizza, ingrediente, frase complessa). False per risposte
+    semplici tipo 'sì/no' o intenzioni generiche tipo 'voglio ordinare' dove
+    il filler suonerebbe strano prima di 'Certo, dimmi pure!'.
+
+    Tutti gli altri stati → False (fast path Python, niente LLM pesante).
+    """
+    if state in ("collecting_name", "collecting_pickup_time"):
+        return True
+    if state != "collecting_items":
+        return False
+    normalized = speech.strip().rstrip(".,!?")
+    return not _TRIVIAL_COLLECTING_RE.match(normalized)
+
 
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
@@ -547,11 +583,9 @@ async def voice_gather(
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
 
-    if _state in {"collecting_items", "collecting_name", "collecting_pickup_time"}:
+    if _needs_filler(speech, _state):
         # Filler path: lancia chat() in background con sessione DB propria,
         # rispondi subito con il filler audio + Redirect a /voice/process.
-        # Esteso a collecting_name e collecting_pickup_time perché anche questi
-        # stati chiamano OpenAI in modo sincrono (~400-800ms).
         def _chat_bg():
             try:
                 with Session(_db_engine) as _db:
