@@ -547,9 +547,11 @@ async def voice_gather(
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
 
-    if _state == "collecting_items":
+    if _state in {"collecting_items", "collecting_name", "collecting_pickup_time"}:
         # Filler path: lancia chat() in background con sessione DB propria,
         # rispondi subito con il filler audio + Redirect a /voice/process.
+        # Esteso a collecting_name e collecting_pickup_time perché anche questi
+        # stati chiamano OpenAI in modo sincrono (~400-800ms).
         def _chat_bg():
             try:
                 with Session(_db_engine) as _db:

@@ -23,6 +23,7 @@ _dough_cache: list[dict] = []
 _restaurant_cache: dict | None = None
 _restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
 _system_prompt_cache: str | None = None
+_system_prompt_slim_cache: dict[str, str] = {}  # state → slim prompt
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
 
@@ -34,15 +35,17 @@ SIZE_DOPPIO_SURCHARGE = 2.00
 
 
 def reset_menu_cache() -> None:
-    global _menu_cache, _system_prompt_cache
+    global _menu_cache, _system_prompt_cache, _system_prompt_slim_cache
     _menu_cache = []
     _system_prompt_cache = None
+    _system_prompt_slim_cache = {}
 
 
 def reset_dough_cache() -> None:
-    global _dough_cache, _system_prompt_cache
+    global _dough_cache, _system_prompt_cache, _system_prompt_slim_cache
     _dough_cache = []
     _system_prompt_cache = None
+    _system_prompt_slim_cache = {}
 
 
 def reset_restaurant_cache() -> None:
@@ -1094,7 +1097,22 @@ def upsert_customer(
 
 print("DEBUG conversation_service loaded")
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Singleton OpenAI client con httpx esplicito per keep-alive e connection pool.
+# httpx di default apre una nuova connessione TCP+TLS per ogni chiamata se non
+# configurato — con keep-alive le connessioni già aperte vengono riutilizzate,
+# eliminando ~100-300ms di overhead TLS handshake sulle chiamate successive.
+_http_client = httpx.Client(
+    limits=httpx.Limits(
+        max_connections=10,
+        max_keepalive_connections=5,
+        keepalive_expiry=60.0,
+    ),
+    timeout=httpx.Timeout(connect=3.0, read=12.0, write=5.0, pool=2.0),
+)
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    http_client=_http_client,
+)
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
@@ -1244,8 +1262,77 @@ Examples:
 """
 
 
-def _get_system_prompt(menu_items: list[dict], dough_items: list[dict] | None) -> str:
-    global _system_prompt_cache
+def _build_slim_system_prompt(
+    menu_items: list[dict],
+    dough_items: list[dict] | None,
+    state: str,
+) -> str:
+    """Prompt compatto per stati dove l'estrazione pizza è secondaria.
+    Omette ingredienti e le ~140 righe di regole impasto/size — ~10x più corto
+    del prompt completo, risparmiando 100-200ms di latenza OpenAI su input tokens.
+    """
+    menu_lines = [f'- {item["name"]}' for item in menu_items]
+    menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
+
+    dough_codes = [d["code"] for d in (dough_items or [])]
+    dough_section = f'\nDOUGH TYPES (codes): {", ".join(dough_codes)}\n' if dough_codes else ""
+
+    if state == "collecting_name":
+        primary_goal = (
+            "PRIMARY GOAL: extract customer_name. "
+            "The customer is providing their name. They may also add/modify pizzas."
+        )
+        intent_hint = (
+            'Use "set_customer_name" if mainly providing a name, '
+            '"add_items" if adding pizzas, "unknown" if unclear.'
+        )
+    else:  # collecting_pickup_time
+        primary_goal = (
+            'PRIMARY GOAL: extract pickup_time (format "HH:MM" or "prima_possibile"). '
+            "The customer is providing a pickup time. They may also add/modify pizzas."
+        )
+        intent_hint = (
+            'Use "set_pickup_time" if mainly providing a time, '
+            '"add_items" if adding pizzas, "unknown" if unclear. '
+            '"prima_possibile" for "subito"/"prima possibile"/'
+            '"appena posso". Interpret hours 1-11 as PM if currently afternoon/evening.'
+        )
+
+    return f"""You extract takeaway pizza orders from Italian customer messages.
+{primary_goal}
+
+MENU:
+{menu_text}
+{dough_section}
+Return ONLY valid JSON — no markdown:
+{{"intent": string, "customer_name": string|null, "pickup_time": string|null, "items": [{{"pizza_name": string, "dough_type": string, "quantity": number, "size": string, "add_ingredients": [string], "remove_ingredients": [string]}}]}}
+
+Rules:
+- CURRENT MESSAGE ONLY: extract only from the current message, never from history.
+- dough_type: one of the codes above, default "classica".
+- pizza_name: exact MENU name, or "Personalizzata" for unknown pizzas.
+- If the user provides only a name or time with no pizzas, return items=[].
+- {intent_hint}
+"""
+
+
+def _get_system_prompt(
+    menu_items: list[dict],
+    dough_items: list[dict] | None,
+    state: str = "collecting_items",
+) -> str:
+    global _system_prompt_cache, _system_prompt_slim_cache
+
+    # Stati leggeri: prompt compatto (~700 chars) invece del monolite (~10 000 chars)
+    if state in ("collecting_name", "collecting_pickup_time"):
+        if state in _system_prompt_slim_cache:
+            return _system_prompt_slim_cache[state]
+        prompt = _build_slim_system_prompt(menu_items, dough_items, state)
+        _system_prompt_slim_cache[state] = prompt
+        print(f"[LLM] Slim prompt per stato={state!r} ({len(prompt)} chars)")
+        return prompt
+
+    # collecting_items (e qualsiasi altro stato): prompt completo in cache globale
     if _system_prompt_cache is not None:
         return _system_prompt_cache
 
@@ -1264,7 +1351,7 @@ def _get_system_prompt(menu_items: list[dict], dough_items: list[dict] | None) -
     dough_text = "\n".join(dough_lines)
 
     _system_prompt_cache = build_system_prompt(menu_text, dough_text)
-    print(f"[LLM] System prompt costruito e messo in cache ({len(_system_prompt_cache)} chars)")
+    print(f"[LLM] System prompt completo costruito e messo in cache ({len(_system_prompt_cache)} chars)")
     return _system_prompt_cache
 
 
@@ -1277,7 +1364,9 @@ def prewarm_system_prompt() -> None:
     if not menu_items:
         print("[LLM] Prewarm system prompt: menu vuoto, skip")
         return
-    _get_system_prompt(menu_items, dough_items)
+    _get_system_prompt(menu_items, dough_items, state="collecting_items")
+    _get_system_prompt(menu_items, dough_items, state="collecting_name")
+    _get_system_prompt(menu_items, dough_items, state="collecting_pickup_time")
 
 
 # Alias fonetici: parole comuni trascritte male dal riconoscimento vocale → termine corretto.
@@ -1303,13 +1392,17 @@ def extract_order_from_text(
     message: str,
     menu_items: list[dict],
     dough_items: list[dict] | None = None,
+    state: str = "collecting_items",
 ) -> dict:
-    system_prompt = _get_system_prompt(menu_items, dough_items)
+    system_prompt = _get_system_prompt(menu_items, dough_items, state)
 
     normalized = _apply_aliases(message)
     if normalized != message:
         print(f"[LLM] Alias applicati: {message!r} → {normalized!r}")
 
+    # Nessuna history: solo system + messaggio corrente.
+    # La history è nella sessione DB — passarla all'LLM aumenterebbe i token
+    # di input e la latenza senza beneficio (l'LLM estrae solo dal turno corrente).
     input_messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": normalized},
@@ -1321,7 +1414,7 @@ def extract_order_from_text(
     try:
         response = client.responses.create(
             model=MODEL_NAME,
-            max_output_tokens=512,
+            max_output_tokens=200,
             input=input_messages,
             timeout=8,
         )

@@ -1254,7 +1254,7 @@ def chat(request: ChatRequest, session: SessionDep):
         )
 
     # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
-    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items)
+    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items, state=conversation.state)
 
     # LLM timeout fallback: rispondi "Ok!" e lascia il turno successivo riprocessare
     if extracted.get("_llm_fallback"):
