@@ -1414,12 +1414,17 @@ def extract_order_from_text(
     ]
     print(f"[LLM] Estrazione da messaggio corrente: {normalized!r}")
 
+    # Chat Completions (non Responses API) per attivare il prefix-caching automatico:
+    # OpenAI cachea il system message prefix dopo la prima chiamata (~5 min TTL),
+    # riducendo la latenza da ~4s a ~300-500ms sulle chiamate successive.
+    # La Responses API usa invece previous_response_id per il caching, che non
+    # si applica al pattern stateless che usiamo qui.
     _t0 = time.time()
     try:
-        response = client.responses.create(
+        response = client.chat.completions.create(
             model=MODEL_NAME,
-            max_output_tokens=200,
-            input=input_messages,
+            max_tokens=200,
+            messages=input_messages,
             timeout=8,
         )
     except Exception as e:
@@ -1427,10 +1432,12 @@ def extract_order_from_text(
         print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} ERROR={type(e).__name__}: {e} → fallback Ok!")
         return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
     _elapsed_ms = int((time.time() - _t0) * 1000)
-    _tokens_in = getattr(getattr(response, "usage", None), "input_tokens", -1)
-    print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in}")
+    _usage = response.usage
+    _tokens_in = getattr(_usage, "prompt_tokens", -1)
+    _cached = getattr(getattr(_usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
+    print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in} cached={_cached}")
 
-    raw_text = response.output_text.strip()
+    raw_text = response.choices[0].message.content.strip()
     parsed = json.loads(raw_text)
 
     if "intent" not in parsed:
