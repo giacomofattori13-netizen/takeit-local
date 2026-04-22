@@ -1293,9 +1293,14 @@ def _build_slim_system_prompt(
         )
         intent_hint = (
             'Use "set_pickup_time" if mainly providing a time, '
-            '"add_items" if adding pizzas, "unknown" if unclear. '
-            '"prima_possibile" for "subito"/"prima possibile"/'
-            '"appena posso". Interpret hours 1-11 as PM if currently afternoon/evening.'
+            '"add_items" if adding pizzas, "unknown" if unclear.\n'
+            '"prima_possibile" for "subito"/"prima possibile"/"appena posso".\n'
+            "CRITICAL TIME RULES (pizzeria is open 18:30-22:30, evenings only):\n"
+            "- Hours 6-11 with no explicit AM/PM marker → ALWAYS convert to evening: "
+            'add 12. "alle 7"→19:00, "alle 8"→20:00, "alle 8:30"→20:30, "alle 9"→21:00.\n'
+            "- Hours 12-22 → use as-is.\n"
+            "- Never output a time before 18:00 unless the customer explicitly says 'di mattina'.\n"
+            "- Output format: HH:MM (24h, zero-padded)."
         )
 
     return f"""You extract takeaway pizza orders from Italian customer messages.
@@ -1409,8 +1414,7 @@ def extract_order_from_text(
     ]
     print(f"[LLM] Estrazione da messaggio corrente: {normalized!r}")
 
-    import time as _time
-    _t0 = _time.monotonic()
+    _t0 = time.time()
     try:
         response = client.responses.create(
             model=MODEL_NAME,
@@ -1419,11 +1423,12 @@ def extract_order_from_text(
             timeout=8,
         )
     except Exception as e:
-        _elapsed = round(_time.monotonic() - _t0, 2)
-        print(f"[LLM] Timeout/errore dopo {_elapsed}s: {type(e).__name__}: {e} → fallback Ok!")
+        _elapsed_ms = int((time.time() - _t0) * 1000)
+        print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} ERROR={type(e).__name__}: {e} → fallback Ok!")
         return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
-    _elapsed = round(_time.monotonic() - _t0, 2)
-    print(f"[LLM] Risposta in {_elapsed}s")
+    _elapsed_ms = int((time.time() - _t0) * 1000)
+    _tokens_in = getattr(getattr(response, "usage", None), "input_tokens", -1)
+    print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in}")
 
     raw_text = response.output_text.strip()
     parsed = json.loads(raw_text)
