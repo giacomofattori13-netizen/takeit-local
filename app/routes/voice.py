@@ -44,6 +44,8 @@ _pending_streams: dict[str, tuple[str, float]] = {}  # stream_id → (text, crea
 # chat() parte in background; Twilio riproduce il filler poi chiama /voice/process.
 _FILLER_PHRASE = "Un momento..."
 _pending_responses: dict[str, asyncio.Task] = {}  # session_id → Task[ChatResponse]
+_filler_last_played: dict[str, float] = {}        # session_id → epoch dell'ultimo filler
+_FILLER_COOLDOWN = 20.0                            # secondi minimi tra un filler e il successivo
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
@@ -615,11 +617,26 @@ async def voice_gather(
 
         task = asyncio.create_task(asyncio.to_thread(_chat_bg))
         _pending_responses[session_id] = task
-        print(f"[Voice] Filler path: task avviato per session={session_id!r} phone={_phone!r}")
+
+        # Cooldown: riproduci il filler solo se sono passati almeno _FILLER_COOLDOWN
+        # secondi dall'ultimo filler nella stessa sessione, per evitare che il cliente
+        # senta "Un momento..." ad ogni pizza aggiunta consecutiva.
+        _now = time.time()
+        _last = _filler_last_played.get(session_id, 0.0)
+        _cooldown_ok = (_now - _last) > _FILLER_COOLDOWN
+        if _cooldown_ok:
+            _filler_last_played[session_id] = _now
+            _filler_el = _filler_audio_element()
+        else:
+            _filler_el = ""
+        print(
+            f"[Voice] Filler path: task avviato per session={session_id!r} phone={_phone!r} "
+            f"filler={'ON' if _cooldown_ok else f'SKIP (cooldown {int(_FILLER_COOLDOWN - (_now - _last))}s)'}"
+        )
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"
-            f"  {_filler_audio_element()}\n"
+            f"  {_filler_el}\n"
             f'  <Redirect method="POST">/voice/process?session_id={session_id}</Redirect>\n'
             "</Response>"
         )
