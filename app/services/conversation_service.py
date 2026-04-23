@@ -1398,6 +1398,8 @@ def extract_order_from_text(
     menu_items: list[dict],
     dough_items: list[dict] | None = None,
     state: str = "collecting_items",
+    existing_items: list[dict] | None = None,
+    customer_name: str | None = None,
 ) -> dict:
     system_prompt = _get_system_prompt(menu_items, dough_items, state)
 
@@ -1405,12 +1407,24 @@ def extract_order_from_text(
     if normalized != message:
         print(f"[LLM] Alias applicati: {message!r} → {normalized!r}")
 
-    # Nessuna history: solo system + messaggio corrente.
-    # La history è nella sessione DB — passarla all'LLM aumenterebbe i token
-    # di input e la latenza senza beneficio (l'LLM estrae solo dal turno corrente).
+    # Per collecting_items inietta il contesto di sessione nel messaggio utente
+    # (non nel system prompt, che rimane statico per attivare il prefix caching OpenAI).
+    if state == "collecting_items":
+        items_str = json.dumps(existing_items or [], ensure_ascii=False)
+        nome_str = customer_name or "non ancora raccolto"
+        user_content = (
+            f"[Stato sessione]\n"
+            f"Items già ordinati: {items_str}\n"
+            f"Nome cliente: {nome_str}\n\n"
+            f"[Trascrizione cliente]\n"
+            f"{normalized}"
+        )
+    else:
+        user_content = normalized
+
     input_messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": normalized},
+        {"role": "user", "content": user_content},
     ]
     print(f"[LLM] Estrazione da messaggio corrente: {normalized!r}")
 

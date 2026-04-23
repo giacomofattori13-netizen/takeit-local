@@ -1253,8 +1253,18 @@ def chat(request: ChatRequest, session: SessionDep):
             state="confirming_usual",
         )
 
-    # 1. Estrai item SOLO dal messaggio corrente (nessuna storia all'LLM)
-    extracted = extract_order_from_text(request.message, menu_items_for_llm, dough_items, state=conversation.state)
+    # 1. Estrai item SOLO dal messaggio corrente.
+    # Il contesto di sessione (items, nome) va nel messaggio utente — non nel system prompt —
+    # così il system prompt rimane statico e il prefix caching OpenAI rimane attivo.
+    existing_items_ctx = json.loads(conversation.items_json)
+    extracted = extract_order_from_text(
+        request.message,
+        menu_items_for_llm,
+        dough_items,
+        state=conversation.state,
+        existing_items=existing_items_ctx,
+        customer_name=conversation.customer_name,
+    )
 
     # LLM timeout fallback: rispondi "Ok!" e lascia il turno successivo riprocessare
     if extracted.get("_llm_fallback"):
