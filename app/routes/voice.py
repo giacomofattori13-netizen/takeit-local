@@ -356,6 +356,28 @@ async def stream_audio(stream_id: str):
     return StreamingResponse(generate(), media_type="audio/mpeg")
 
 
+async def _prefetch_openai_connection() -> None:
+    """Dummy call OpenAI per mantenere calda la connessione TCP keepalive.
+    Fire-and-forget — avviato dopo che la risposta è già stata inviata all'utente."""
+    from app.services.conversation_service import client as _openai_client, MODEL_NAME as _model
+
+    def _dummy() -> None:
+        t0 = time.time()
+        try:
+            _openai_client.chat.completions.create(
+                model=_model,
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+            )
+            elapsed = int((time.time() - t0) * 1000)
+            print(f"[Prefetch] connessione calda in {elapsed}ms")
+        except Exception as exc:
+            elapsed = int((time.time() - t0) * 1000)
+            print(f"[Prefetch] errore in {elapsed}ms: {type(exc).__name__}: {exc}")
+
+    await asyncio.to_thread(_dummy)
+
+
 def _filler_audio_element() -> str:
     """<Play> del filler dalla cache, o <Say> come fallback. Sempre sync (cache-only)."""
     if _FILLER_PHRASE in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[_FILLER_PHRASE]).exists():
@@ -438,6 +460,8 @@ async def voice_process(session_id: str = Query(...)):
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
+    if result.state != "completed":
+        asyncio.create_task(_prefetch_openai_connection())
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -653,4 +677,6 @@ async def voice_gather(
         result = await asyncio.to_thread(chat, chat_request, session)
 
     twiml = await _build_response_twiml(result, session_id)
+    if result.state != "completed":
+        asyncio.create_task(_prefetch_openai_connection())
     return Response(content=twiml, media_type="application/xml")
