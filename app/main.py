@@ -29,6 +29,7 @@ def on_startup():
         "ALTER TABLE conversationsession ADD COLUMN pending_customer_name VARCHAR",
         "ALTER TABLE conversationsession ADD COLUMN favorite_pizzas_json VARCHAR DEFAULT '[]'",
         "ALTER TABLE conversationsession ADD COLUMN no_input_count INTEGER DEFAULT 0",
+        'ALTER TABLE "order" ADD COLUMN conversation_session_id VARCHAR',
         "ALTER TABLE orderitem ADD COLUMN dough_type VARCHAR DEFAULT 'classica'",
         "ALTER TABLE orderitem ADD COLUMN size VARCHAR DEFAULT 'normale'",
     ]:
@@ -40,6 +41,18 @@ def on_startup():
             pass  # colonna già esistente
 
     create_db_and_tables()
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS '
+                'ix_order_conversation_session_id_unique '
+                'ON "order" (conversation_session_id) '
+                'WHERE conversation_session_id IS NOT NULL'
+            ))
+            conn.commit()
+    except Exception as e:
+        print(f"[Startup] Errore creazione indice idempotenza ordini: {type(e).__name__}: {e}")
+
     synced = sync_menu_to_db()
     if synced:
         print(f"[Startup] DB sincronizzato: {synced} voci da menu_data.json")

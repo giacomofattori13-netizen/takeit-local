@@ -13,6 +13,7 @@ class MenuItem(SQLModel, table=True):
 
 class Order(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    conversation_session_id: Optional[str] = Field(default=None, index=True)
     customer_name: str
     pickup_time: str
     status: str = "new"
