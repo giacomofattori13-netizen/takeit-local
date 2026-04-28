@@ -1,14 +1,18 @@
 import json
 import os
 
-import anthropic
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.services.conversation_service import MENU_JSON_PATH
 from app.services.menu_sync import sync_menu_to_db
+from app.security import require_admin_api_key
 
-router = APIRouter(prefix="/owner-command", tags=["owner"])
+router = APIRouter(
+    prefix="/owner-command",
+    tags=["owner"],
+    dependencies=[Depends(require_admin_api_key)],
+)
 
 
 class OwnerCommandRequest(BaseModel):
@@ -45,6 +49,14 @@ def owner_command(request: OwnerCommandRequest):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY non configurata")
+
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Pacchetto anthropic non installato",
+        ) from exc
 
     client = anthropic.Anthropic(api_key=api_key)
     model = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")

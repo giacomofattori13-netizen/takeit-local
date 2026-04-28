@@ -6,7 +6,10 @@ import time
 from zoneinfo import ZoneInfo
 
 import httpx
+from dotenv import load_dotenv
 from openai import OpenAI
+
+load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
@@ -16,6 +19,9 @@ MENU_JSON_PATH = os.path.normpath(
 )
 DOUGH_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dough_data.json")
+)
+RESTAURANT_JSON_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "restaurant_data.json")
 )
 
 _menu_cache: list[dict] = []
@@ -527,6 +533,22 @@ def _fetch_restaurant_from_base44() -> dict | None:
         return None
 
 
+def _load_restaurant_from_file() -> dict:
+    """Carica app/restaurant_data.json come fallback offline per orari e saluto."""
+    try:
+        with open(RESTAURANT_JSON_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            print(f"[Restaurant] Fallback file caricato: {RESTAURANT_JSON_PATH}")
+            return data
+        print(f"[Restaurant] Fallback file non valido: {type(data).__name__}")
+    except FileNotFoundError:
+        print(f"[Restaurant] Fallback file non trovato: {RESTAURANT_JSON_PATH}")
+    except Exception as e:
+        print(f"[Restaurant] Errore fallback file: {type(e).__name__}: {e}")
+    return {}
+
+
 def load_restaurant() -> dict:
     """Restituisce i dati del ristorante con cache in memoria e TTL di 10 minuti.
 
@@ -555,7 +577,13 @@ def load_restaurant() -> dict:
         print(f"[Restaurant] Base44 non disponibile, uso cache precedente (età {age}s)")
         return _restaurant_cache
 
-    print("[Restaurant] Nessun dato disponibile: né Base44 né cache")
+    local = _load_restaurant_from_file()
+    if local:
+        _restaurant_cache = local
+        _restaurant_cache_ts = now
+        return _restaurant_cache
+
+    print("[Restaurant] Nessun dato disponibile: né Base44, né cache, né file")
     return {}
 
 
@@ -1097,23 +1125,38 @@ def upsert_customer(
 
 print("DEBUG conversation_service loaded")
 
-# Singleton OpenAI client con httpx esplicito per keep-alive e connection pool.
-# httpx di default apre una nuova connessione TCP+TLS per ogni chiamata se non
-# configurato — con keep-alive le connessioni già aperte vengono riutilizzate,
-# eliminando ~100-300ms di overhead TLS handshake sulle chiamate successive.
-_http_client = httpx.Client(
-    limits=httpx.Limits(
-        max_connections=10,
-        max_keepalive_connections=5,
-        keepalive_expiry=60.0,
-    ),
-    timeout=httpx.Timeout(connect=3.0, read=12.0, write=5.0, pool=2.0),
-)
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    http_client=_http_client,
-)
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+_http_client: httpx.Client | None = None
+_openai_client: OpenAI | None = None
+
+
+def get_openai_client() -> OpenAI:
+    """Restituisce un client OpenAI lazy con keep-alive.
+
+    Il client viene creato solo al primo uso, così l'app può importare e avviarsi
+    anche quando la variabile d'ambiente manca in un contesto locale/test.
+    """
+    global _http_client, _openai_client
+    if _openai_client is not None:
+        return _openai_client
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY non configurata")
+
+    _http_client = httpx.Client(
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=60.0,
+        ),
+        timeout=httpx.Timeout(connect=3.0, read=12.0, write=5.0, pool=2.0),
+    )
+    _openai_client = OpenAI(
+        api_key=api_key,
+        http_client=_http_client,
+    )
+    return _openai_client
 
 
 def build_system_prompt(menu_text: str, dough_text: str = "") -> str:
@@ -1435,7 +1478,7 @@ def extract_order_from_text(
     # si applica al pattern stateless che usiamo qui.
     _t0 = time.time()
     try:
-        response = client.chat.completions.create(
+        response = get_openai_client().chat.completions.create(
             model=MODEL_NAME,
             max_tokens=200,
             messages=input_messages,
@@ -1451,8 +1494,12 @@ def extract_order_from_text(
     _cached = getattr(getattr(_usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
     print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in} cached={_cached}")
 
-    raw_text = response.choices[0].message.content.strip()
-    parsed = json.loads(raw_text)
+    raw_text = (response.choices[0].message.content or "").strip()
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        print(f"[OpenAI] JSON non valido: {type(e).__name__}: {e}; raw={raw_text[:500]!r}")
+        return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
 
     if "intent" not in parsed:
         parsed["intent"] = "unknown"

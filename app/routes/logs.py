@@ -6,8 +6,13 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.models import ConversationLog
+from app.security import require_admin_api_key
 
-router = APIRouter(prefix="/logs", tags=["logs"])
+router = APIRouter(
+    prefix="/logs",
+    tags=["logs"],
+    dependencies=[Depends(require_admin_api_key)],
+)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
