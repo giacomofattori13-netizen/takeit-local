@@ -414,6 +414,31 @@
 
     let allLogs = [];
 
+    function getAdminHeaders(extraHeaders = {}) {
+      let apiKey = localStorage.getItem("takeit_admin_api_key");
+      if (!apiKey) {
+        apiKey = window.prompt("API key amministrativa");
+        if (apiKey) {
+          localStorage.setItem("takeit_admin_api_key", apiKey);
+        }
+      }
+      return {
+        ...extraHeaders,
+        "X-Admin-Api-Key": apiKey || "",
+      };
+    }
+
+    async function adminFetch(url, options = {}) {
+      const res = await fetch(url, {
+        ...options,
+        headers: getAdminHeaders(options.headers || {}),
+      });
+      if (res.status === 401 || res.status === 503) {
+        localStorage.removeItem("takeit_admin_api_key");
+      }
+      return res;
+    }
+
     function countCustomPizzas(logs) {
       let count = 0;
 
@@ -707,7 +732,7 @@
 
     async function loadLogs() {
       try {
-        const res = await fetch("/logs/");
+        const res = await adminFetch("/logs/");
         const data = await res.json();
         allLogs = data;
 

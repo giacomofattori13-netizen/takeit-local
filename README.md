@@ -12,6 +12,14 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 ## Entry point
 - `app/main.py` avvia l'app FastAPI, monta statici, registra i router e svolge operazioni di startup (migrazioni SQL "best effort", sync menu, preload prompt/audio, check variabili Twilio).
 
+## Variabili ambiente operative
+- `OPENAI_API_KEY`: richiesta quando l'agente deve chiamare OpenAI.
+- `ADMIN_API_KEY`: richiesta per `/menu`, `/orders`, `/logs` e `/owner-command`. Le dashboard la chiedono una volta e la salvano in `localStorage`.
+- `TWILIO_AUTH_TOKEN`: richiesta per verificare le firme dei webhook `/voice/incoming`, `/voice/gather` e `/voice/process`.
+- `SKIP_TWILIO_SIGNATURE_VALIDATION=true`: solo sviluppo locale, disattiva la verifica firma Twilio.
+- `PUBLIC_BASE_URL`: URL pubblico usato per ricostruire la firma Twilio e generare gli URL audio.
+- `SQL_ECHO=true`: abilita il log SQL dettagliato solo quando serve debugging.
+
 ## Modello dati
 - `MenuItem`: anagrafica del menu.
 - `Order` + `OrderItem`: ordini e righe d'ordine.

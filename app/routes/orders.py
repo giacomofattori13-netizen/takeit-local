@@ -7,8 +7,13 @@ from sqlmodel import Session, select
 from app.db import get_session
 from app.models import Order, OrderItem
 from app.schemas import OrderRead, OrderItemRead, OrderStatusUpdate
+from app.security import require_admin_api_key
 
-router = APIRouter(prefix="/orders", tags=["orders"])
+router = APIRouter(
+    prefix="/orders",
+    tags=["orders"],
+    dependencies=[Depends(require_admin_api_key)],
+)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 

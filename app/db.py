@@ -1,8 +1,11 @@
+import os
+
 from sqlmodel import SQLModel, Session, create_engine
 
 DATABASE_URL = "sqlite:///./takeit.db"
 
-engine = create_engine(DATABASE_URL, echo=True)
+SQL_ECHO = os.getenv("SQL_ECHO", "").strip().lower() in {"1", "true", "yes", "on"}
+engine = create_engine(DATABASE_URL, echo=SQL_ECHO)
 
 
 def create_db_and_tables():

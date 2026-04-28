@@ -30,7 +30,6 @@ from app.services.conversation_service import (
     load_doughs,
     save_order_to_base44,
     send_whatsapp_confirmation,
-    get_next_order_number,
     get_dough_surcharge,
     is_dough_available,
     is_agent_active,
@@ -48,6 +47,7 @@ from app.services.conversation_service import (
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
+_CUSTOMER_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
 def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
@@ -777,8 +777,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     lookup_future = None
     if phone:
         print(f"[Customer] Avvio lookup in parallelo per {phone!r}")
-        _executor = ThreadPoolExecutor(max_workers=1)
-        lookup_future = _executor.submit(lookup_customer, phone)
+        lookup_future = _CUSTOMER_LOOKUP_EXECUTOR.submit(lookup_customer, phone)
 
     conversation = ConversationSession(
         session_id=new_session_id,
@@ -968,7 +967,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 customer_name=merged_order["customer_name"],
                 customer_phone=conversation.customer_phone,
                 pickup_time=merged_order["pickup_time"],
-                order_number=get_next_order_number(),
+                order_number=order.id,
                 ai_confidence=0.95,
                 items=enriched_items,
             )
@@ -1554,7 +1553,7 @@ def chat(request: ChatRequest, session: SessionDep):
             customer_name=merged_order["customer_name"],
             customer_phone=conversation.customer_phone,
             pickup_time=merged_order["pickup_time"],
-            order_number=get_next_order_number(),
+            order_number=order.id,
             ai_confidence=0.9,
             items=enriched_items,
         )

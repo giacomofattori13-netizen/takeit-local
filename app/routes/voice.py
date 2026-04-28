@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -8,7 +11,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import Session
 
@@ -113,6 +116,41 @@ def _needs_filler(speech: str, state: str) -> bool:
 
 def _public_base_url() -> str:
     return os.getenv("PUBLIC_BASE_URL", "https://takeit-local-production.up.railway.app")
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def _verify_twilio_request(request: Request) -> None:
+    """Verifica X-Twilio-Signature sui webhook voce.
+
+    In locale si può impostare SKIP_TWILIO_SIGNATURE_VALIDATION=true.
+    """
+    if _truthy_env("SKIP_TWILIO_SIGNATURE_VALIDATION"):
+        return
+
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not auth_token:
+        raise HTTPException(status_code=503, detail="TWILIO_AUTH_TOKEN non configurato")
+
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not signature:
+        raise HTTPException(status_code=403, detail="Firma Twilio mancante")
+
+    public_url = _public_base_url().rstrip("/") + request.url.path
+    if request.url.query:
+        public_url += f"?{request.url.query}"
+
+    form = await request.form()
+    params = [(key, str(value)) for key, value in form.multi_items()]
+    payload = public_url + "".join(f"{key}{value}" for key, value in sorted(params))
+    expected = base64.b64encode(
+        hmac.new(auth_token.encode(), payload.encode(), hashlib.sha1).digest()
+    ).decode()
+
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=403, detail="Firma Twilio non valida")
 
 
 def format_time_for_speech(text: str) -> str:
@@ -359,12 +397,12 @@ async def stream_audio(stream_id: str):
 async def _prefetch_openai_connection() -> None:
     """Dummy call OpenAI per mantenere calda la connessione TCP keepalive.
     Fire-and-forget — avviato dopo che la risposta è già stata inviata all'utente."""
-    from app.services.conversation_service import client as _openai_client, MODEL_NAME as _model
+    from app.services.conversation_service import MODEL_NAME as _model, get_openai_client
 
     def _dummy() -> None:
         t0 = time.time()
         try:
-            _openai_client.chat.completions.create(
+            get_openai_client().chat.completions.create(
                 model=_model,
                 messages=[{"role": "user", "content": "ok"}],
                 max_tokens=1,
@@ -417,9 +455,10 @@ async def _build_response_twiml(result, session_id: str) -> str:
 
 
 @router.post("/process")
-async def voice_process(session_id: str = Query(...)):
+async def voice_process(request: Request, session_id: str = Query(...)):
     """Chiamato da Twilio dopo il filler audio per collecting_items.
     Attende il risultato del chat() in background e ritorna il TwiML finale."""
+    await _verify_twilio_request(request)
     task = _pending_responses.pop(session_id, None)
     if task is None:
         print(f"[Voice] /process: nessun task per session={session_id!r} (già consumato o scaduto)")
@@ -467,10 +506,12 @@ async def voice_process(session_id: str = Query(...)):
 
 @router.post("/incoming")
 async def voice_incoming(
+    request: Request,
     From: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
+    await _verify_twilio_request(request)
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {caller_phone!r}")
 
@@ -553,12 +594,14 @@ async def voice_incoming(
 
 @router.post("/gather")
 async def voice_gather(
+    request: Request,
     session_id: str = Query(...),
     SpeechResult: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     """Riceve il testo trascritto da Twilio, lo passa al motore di chat
     e risponde con TwiML per far sentire la risposta al cliente."""
+    await _verify_twilio_request(request)
     # Import locale per evitare import circolare (chat importa da conversation_service)
     from app.routes.chat import chat  # noqa: PLC0415
 

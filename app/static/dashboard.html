@@ -421,6 +421,31 @@
 
     let editingMenuItemId = null;
 
+    function getAdminHeaders(extraHeaders = {}) {
+      let apiKey = localStorage.getItem("takeit_admin_api_key");
+      if (!apiKey) {
+        apiKey = window.prompt("API key amministrativa");
+        if (apiKey) {
+          localStorage.setItem("takeit_admin_api_key", apiKey);
+        }
+      }
+      return {
+        ...extraHeaders,
+        "X-Admin-Api-Key": apiKey || "",
+      };
+    }
+
+    async function adminFetch(url, options = {}) {
+      const res = await fetch(url, {
+        ...options,
+        headers: getAdminHeaders(options.headers || {}),
+      });
+      if (res.status === 401 || res.status === 503) {
+        localStorage.removeItem("takeit_admin_api_key");
+      }
+      return res;
+    }
+
     function formatItem(item) {
         const displayName = item.pizza_name === "Personalizzata" ? "Margherita" : item.pizza_name;
         let text = `${item.quantity} ${displayName}`;
@@ -650,7 +675,7 @@
         document.querySelectorAll("[data-edit-id]").forEach(btn => {
           btn.addEventListener("click", async () => {
             const itemId = Number(btn.getAttribute("data-edit-id"));
-            const res = await fetch("/menu/");
+            const res = await adminFetch("/menu/");
             const items = await res.json();
             const item = items.find(x => x.id === itemId);
             if (item) {
@@ -672,7 +697,7 @@
 
     async function loadOrders() {
         try {
-          const res = await fetch("/orders/");
+          const res = await adminFetch("/orders/");
           const data = await res.json();
 
           detectNewOrders(data);
@@ -687,7 +712,7 @@
 
     async function updateOrderStatus(orderId, status) {
       try {
-        const res = await fetch(`/orders/${orderId}/status`, {
+        const res = await adminFetch(`/orders/${orderId}/status`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
@@ -823,7 +848,7 @@
 
     async function loadMenu() {
         try {
-          const res = await fetch("/menu/");
+          const res = await adminFetch("/menu/");
           const data = await res.json();
           renderMenu(data);
           } catch (err) {
@@ -850,7 +875,7 @@
         const method = isEditing ? "PUT" : "POST";
 
         try {
-          const res = await fetch(url, {
+          const res = await adminFetch(url, {
             method,
             headers: {
             "Content-Type": "application/json",
@@ -875,7 +900,7 @@
 
     async function deleteMenuItem(itemId) {
         try {
-          const res = await fetch(`/menu/${itemId}`, {
+          const res = await adminFetch(`/menu/${itemId}`, {
             method: "DELETE",
          });
 

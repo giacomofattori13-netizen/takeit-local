@@ -7,8 +7,13 @@ from sqlmodel import Session, select
 from app.db import get_session
 from app.models import MenuItem
 from app.schemas import MenuItemCreate, MenuItemRead, MenuItemUpdate
+from app.security import require_admin_api_key
 
-router = APIRouter(prefix="/menu", tags=["menu"])
+router = APIRouter(
+    prefix="/menu",
+    tags=["menu"],
+    dependencies=[Depends(require_admin_api_key)],
+)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 

@@ -47,7 +47,11 @@ def main() -> None:
         print(f"Errore: {e}", file=sys.stderr)
         sys.exit(1)
 
-    raw = response.json()
+    body = response.json()
+    raw = body.get("entities", []) if isinstance(body, dict) else body
+    if not isinstance(raw, list):
+        print(f"Formato risposta inatteso: {type(raw).__name__}", file=sys.stderr)
+        sys.exit(1)
     print(f"Impasti ricevuti: {len(raw)}")
 
     # Deduplica per code, escludi senza_glutine
