@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.db import get_session
@@ -168,13 +169,7 @@ def remove_items_from_order(existing_items: list[dict], items_to_remove: list[di
                 remaining_quantity -= item_to_remove["quantity"]
 
         if remaining_quantity > 0:
-            updated_items.append(
-                {
-                    "pizza_name": existing_item["pizza_name"],
-                    "pizza_type": existing_item["pizza_type"],
-                    "quantity": remaining_quantity,
-                }
-            )
+            updated_items.append({**existing_item, "quantity": remaining_quantity})
 
     return updated_items
 
@@ -757,6 +752,72 @@ def _format_pizza_list(pizzas: list[str]) -> str:
     return ", ".join(pizzas[:-1]) + f" e {pizzas[-1]}"
 
 
+def _get_order_for_session(session: Session, session_id: str) -> Order | None:
+    return session.exec(
+        select(Order).where(Order.conversation_session_id == session_id)
+    ).first()
+
+
+def _mark_conversation_completed(
+    session: Session,
+    conversation: ConversationSession,
+) -> None:
+    conversation.completed = True
+    conversation.state = "completed"
+    session.add(conversation)
+    session.commit()
+
+
+def _persist_order_once(
+    session: Session,
+    conversation: ConversationSession,
+    merged_order: dict,
+) -> tuple[Order, bool]:
+    """Crea l'ordine una sola volta per sessione conversazionale.
+
+    Ritorna (order, created). Se l'ordine esiste già, non risalva item né
+    rilancia sync esterne: è la guardia contro retry webhook/doppi "sì".
+    """
+    existing_order = _get_order_for_session(session, conversation.session_id)
+    if existing_order:
+        _mark_conversation_completed(session, conversation)
+        return existing_order, False
+
+    order = Order(
+        conversation_session_id=conversation.session_id,
+        customer_name=merged_order["customer_name"],
+        pickup_time=merged_order["pickup_time"],
+        status="new",
+    )
+    session.add(order)
+    try:
+        session.commit()
+        session.refresh(order)
+    except IntegrityError:
+        session.rollback()
+        existing_order = _get_order_for_session(session, conversation.session_id)
+        if existing_order:
+            _mark_conversation_completed(session, conversation)
+            return existing_order, False
+        raise
+
+    for item in merged_order["items"]:
+        session.add(OrderItem(
+            order_id=order.id,
+            pizza_name=item["pizza_name"],
+            pizza_type=item["pizza_type"],
+            quantity=item["quantity"],
+            add_ingredients_json=json.dumps(item.get("add_ingredients", []), ensure_ascii=False),
+            remove_ingredients_json=json.dumps(item.get("remove_ingredients", []), ensure_ascii=False),
+            dough_type=item.get("dough_type", "classica"),
+            size=item.get("size", "normale"),
+        ))
+    session.commit()
+
+    _mark_conversation_completed(session, conversation)
+    return order, True
+
+
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
     print(f"[ChatStart] Body ricevuto: {body}")
@@ -883,6 +944,52 @@ def chat(request: ChatRequest, session: SessionDep):
         session.commit()
         session.refresh(conversation)
 
+    if conversation.completed:
+        existing_items = json.loads(conversation.items_json)
+        merged_order = {
+            "customer_name": conversation.customer_name,
+            "pickup_time": conversation.pickup_time,
+            "items": existing_items,
+        }
+        existing_order = _get_order_for_session(session, conversation.session_id)
+        response_message = build_assistant_response(
+            merged_order=merged_order,
+            state="completed",
+            missing_messages=[],
+            order_saved=True,
+            intent="already_completed",
+            new_valid_items=[],
+            customer_phone=conversation.customer_phone,
+        )
+        extracted_stub = {
+            "intent": "already_completed",
+            "items": [],
+            "customer_name": None,
+            "pickup_time": None,
+        }
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps(extracted_stub, ensure_ascii=False),
+            merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+            response_message=response_message,
+            valid=True,
+            missing_items_json="[]",
+            state="completed",
+        ))
+        session.commit()
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order=extracted_stub,
+            merged_order=merged_order,
+            valid=True,
+            missing_items=[],
+            response_message=response_message,
+            order_id=existing_order.id if existing_order else None,
+            state="completed",
+        )
+
     # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
     # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.
     # La risposta del cliente è gestita con puro Python: sì/no/chiedi di nuovo.
@@ -901,33 +1008,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
         order = None
         if _is_confirm and not conversation.completed:
-            # Salva ordine
-            order = Order(
-                customer_name=merged_order["customer_name"],
-                pickup_time=merged_order["pickup_time"],
-                status="new",
-            )
-            session.add(order)
-            session.commit()
-            session.refresh(order)
-
-            for _item in merged_order["items"]:
-                session.add(OrderItem(
-                    order_id=order.id,
-                    pizza_name=_item["pizza_name"],
-                    pizza_type=_item["pizza_type"],
-                    quantity=_item["quantity"],
-                    add_ingredients_json=json.dumps(_item.get("add_ingredients", []), ensure_ascii=False),
-                    remove_ingredients_json=json.dumps(_item.get("remove_ingredients", []), ensure_ascii=False),
-                    dough_type=_item.get("dough_type", "classica"),
-                    size=_item.get("size", "normale"),
-                ))
-            session.commit()
-
-            conversation.completed = True
-            conversation.state = "completed"
-            session.add(conversation)
-            session.commit()
+            order, order_created = _persist_order_once(session, conversation, merged_order)
 
             # Pricing e salvataggio Base44
             _margherita_item = session.exec(
@@ -963,30 +1044,31 @@ def chat(request: ChatRequest, session: SessionDep):
                 _total = round((_base + _extras) * _item["quantity"], 2)
                 enriched_items.append({**_item, "base_price": _base, "extras_price": _extras, "total_price": _total})
 
-            save_order_to_base44(
-                customer_name=merged_order["customer_name"],
-                customer_phone=conversation.customer_phone,
-                pickup_time=merged_order["pickup_time"],
-                order_number=order.id,
-                ai_confidence=0.95,
-                items=enriched_items,
-            )
-            print(f"[SMS] Tentativo invio (awaiting_confirmation): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
-            send_whatsapp_confirmation(
-                customer_name=merged_order["customer_name"],
-                customer_phone=conversation.customer_phone,
-                pickup_time=merged_order["pickup_time"],
-                items=enriched_items,
-                total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
-            )
-            pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
-            order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
-            upsert_customer(
-                full_name=merged_order["customer_name"],
-                phone=conversation.customer_phone,
-                pizzas=pizza_names,
-                total_amount=order_total,
-            )
+            if order_created:
+                save_order_to_base44(
+                    customer_name=merged_order["customer_name"],
+                    customer_phone=conversation.customer_phone,
+                    pickup_time=merged_order["pickup_time"],
+                    order_number=order.id,
+                    ai_confidence=0.95,
+                    items=enriched_items,
+                )
+                print(f"[SMS] Tentativo invio (awaiting_confirmation): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
+                send_whatsapp_confirmation(
+                    customer_name=merged_order["customer_name"],
+                    customer_phone=conversation.customer_phone,
+                    pickup_time=merged_order["pickup_time"],
+                    items=enriched_items,
+                    total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
+                )
+                pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
+                order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
+                upsert_customer(
+                    full_name=merged_order["customer_name"],
+                    phone=conversation.customer_phone,
+                    pizzas=pizza_names,
+                    total_amount=order_total,
+                )
 
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
             _resp = (
@@ -1484,32 +1566,7 @@ def chat(request: ChatRequest, session: SessionDep):
     conversation.state = state
 
     if valid and not conversation.completed and intent == "confirm_order":
-        order = Order(
-            customer_name=merged_order["customer_name"],
-            pickup_time=merged_order["pickup_time"],
-            status="new",
-        )
-        session.add(order)
-        session.commit()
-        session.refresh(order)
-
-        for item in merged_order["items"]:
-            session.add(OrderItem(
-                order_id=order.id,
-                pizza_name=item["pizza_name"],
-                pizza_type=item["pizza_type"],
-                quantity=item["quantity"],
-                add_ingredients_json=json.dumps(item.get("add_ingredients", []), ensure_ascii=False),
-                remove_ingredients_json=json.dumps(item.get("remove_ingredients", []), ensure_ascii=False),
-                dough_type=item.get("dough_type", "classica"),
-                size=item.get("size", "normale"),
-            ))
-        session.commit()
-
-        conversation.completed = True
-        conversation.state = "completed"
-        session.add(conversation)
-        session.commit()
+        order, order_created = _persist_order_once(session, conversation, merged_order)
 
         order_id = order.id
         order_saved = True
@@ -1549,31 +1606,32 @@ def chat(request: ChatRequest, session: SessionDep):
             total_price = round((base_price + extras_price) * item["quantity"], 2)
             enriched_items.append({**item, "base_price": base_price, "extras_price": extras_price, "total_price": total_price})
 
-        save_order_to_base44(
-            customer_name=merged_order["customer_name"],
-            customer_phone=conversation.customer_phone,
-            pickup_time=merged_order["pickup_time"],
-            order_number=order.id,
-            ai_confidence=0.9,
-            items=enriched_items,
-        )
-        print(f"[SMS] Tentativo invio (confirm_order): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
-        send_whatsapp_confirmation(
-            customer_name=merged_order["customer_name"],
-            customer_phone=conversation.customer_phone,
-            pickup_time=merged_order["pickup_time"],
-            items=enriched_items,
-            total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
-        )
+        if order_created:
+            save_order_to_base44(
+                customer_name=merged_order["customer_name"],
+                customer_phone=conversation.customer_phone,
+                pickup_time=merged_order["pickup_time"],
+                order_number=order.id,
+                ai_confidence=0.9,
+                items=enriched_items,
+            )
+            print(f"[SMS] Tentativo invio (confirm_order): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
+            send_whatsapp_confirmation(
+                customer_name=merged_order["customer_name"],
+                customer_phone=conversation.customer_phone,
+                pickup_time=merged_order["pickup_time"],
+                items=enriched_items,
+                total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
+            )
 
-        pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
-        order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
-        upsert_customer(
-            full_name=merged_order["customer_name"],
-            phone=conversation.customer_phone,
-            pizzas=pizza_names,
-            total_amount=order_total,
-        )
+            pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
+            order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
+            upsert_customer(
+                full_name=merged_order["customer_name"],
+                phone=conversation.customer_phone,
+                pizzas=pizza_names,
+                total_amount=order_total,
+            )
 
     response_message = build_assistant_response(
         merged_order=merged_order,

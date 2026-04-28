@@ -3,11 +3,13 @@ import json
 import os
 import re
 import time
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 load_dotenv()
 
@@ -1429,6 +1431,141 @@ PIZZA_ALIASES: dict[str, str] = {
     "bondola": "mortadella",
 }
 
+_ALLOWED_INTENTS = {
+    "add_items",
+    "set_customer_name",
+    "set_pickup_time",
+    "modify_items",
+    "remove_items",
+    "replace_items",
+    "cancel_order",
+    "clear_cart",
+    "unknown",
+}
+_ALLOWED_SIZES = {"normale", "mini", "doppio"}
+
+
+class _ExtractedItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    pizza_name: str = ""
+    dough_type: str = "classica"
+    quantity: int = Field(default=1, ge=1)
+    size: str = "normale"
+    add_ingredients: list[str] = Field(default_factory=list)
+    remove_ingredients: list[str] = Field(default_factory=list)
+
+    @field_validator("pizza_name", "dough_type", "size", mode="before")
+    @classmethod
+    def _coerce_string(cls, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def _coerce_quantity(cls, value: Any) -> int:
+        try:
+            quantity = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return max(quantity, 1)
+
+    @field_validator("add_ingredients", "remove_ingredients", mode="before")
+    @classmethod
+    def _coerce_ingredients(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, list):
+            return []
+        result = []
+        for item in values:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                result.append(text)
+        return result
+
+
+class _ExtractedOrderPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    intent: str = "unknown"
+    customer_name: str | None = None
+    pickup_time: str | None = None
+    items: list[_ExtractedItem] = Field(default_factory=list)
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _coerce_intent(cls, value: Any) -> str:
+        intent = "" if value is None else str(value).strip()
+        return intent if intent in _ALLOWED_INTENTS else "unknown"
+
+    @field_validator("customer_name", "pickup_time", mode="before")
+    @classmethod
+    def _coerce_optional_string(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def _coerce_items(cls, value: Any) -> list[Any]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+
+def _fallback_extracted_payload() -> dict:
+    return {
+        "intent": "add_items",
+        "items": [],
+        "customer_name": None,
+        "pickup_time": None,
+        "_llm_fallback": True,
+    }
+
+
+def _normalize_extracted_payload(payload: Any, dough_items: list[dict] | None = None) -> dict:
+    """Valida e normalizza l'output LLM prima che entri nello stato ordine."""
+    if not isinstance(payload, dict):
+        print(f"[OpenAI] Payload non oggetto: {type(payload).__name__}")
+        return _fallback_extracted_payload()
+
+    try:
+        parsed = _ExtractedOrderPayload.model_validate(payload)
+    except ValidationError as e:
+        print(f"[OpenAI] Payload non valido: {e}")
+        return _fallback_extracted_payload()
+
+    valid_dough_codes = {"classica"}
+    valid_dough_codes.update(
+        str(item.get("code", "")).strip()
+        for item in (dough_items or [])
+        if str(item.get("code", "")).strip()
+    )
+
+    items = []
+    for item in parsed.items:
+        data = item.model_dump()
+        if not data["pizza_name"]:
+            continue
+        if data["dough_type"] not in valid_dough_codes:
+            print(f"[OpenAI] dough_type non valido: {data['dough_type']!r} → classica")
+            data["dough_type"] = "classica"
+        if data["size"] not in _ALLOWED_SIZES:
+            data["size"] = "normale"
+        items.append(data)
+
+    return {
+        "intent": parsed.intent,
+        "customer_name": parsed.customer_name,
+        "pickup_time": parsed.pickup_time,
+        "items": items,
+    }
+
+
 def _apply_aliases(text: str) -> str:
     """Sostituisce gli alias fonetici nel testo (case-insensitive, parola intera)."""
     for alias, canonical in PIZZA_ALIASES.items():
@@ -1487,7 +1624,7 @@ def extract_order_from_text(
     except Exception as e:
         _elapsed_ms = int((time.time() - _t0) * 1000)
         print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} ERROR={type(e).__name__}: {e} → fallback Ok!")
-        return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
+        return _fallback_extracted_payload()
     _elapsed_ms = int((time.time() - _t0) * 1000)
     _usage = response.usage
     _tokens_in = getattr(_usage, "prompt_tokens", -1)
@@ -1499,16 +1636,11 @@ def extract_order_from_text(
         parsed = json.loads(raw_text)
     except json.JSONDecodeError as e:
         print(f"[OpenAI] JSON non valido: {type(e).__name__}: {e}; raw={raw_text[:500]!r}")
-        return {"intent": "add_items", "items": [], "customer_name": None, "pickup_time": None, "_llm_fallback": True}
+        return _fallback_extracted_payload()
 
-    if "intent" not in parsed:
-        parsed["intent"] = "unknown"
-    if "customer_name" not in parsed:
-        parsed["customer_name"] = None
-    if "pickup_time" not in parsed:
-        parsed["pickup_time"] = None
-    if "items" not in parsed:
-        parsed["items"] = []
+    parsed = _normalize_extracted_payload(parsed, dough_items)
+    if parsed.get("_llm_fallback"):
+        return parsed
 
     # Normalizza dough_type → pizza_type per compatibilità con il DB locale
     for item in parsed["items"]:
