@@ -1128,6 +1128,7 @@ def upsert_customer(
 print("DEBUG conversation_service loaded")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+LLM_RESPONSE_FORMAT = {"type": "json_object"}
 _http_client: httpx.Client | None = None
 _openai_client: OpenAI | None = None
 
@@ -1527,6 +1528,43 @@ def _fallback_extracted_payload() -> dict:
     }
 
 
+def _parse_llm_json_payload(raw_text: str) -> dict | None:
+    text = (raw_text or "").strip()
+    if not text:
+        print("[OpenAI] JSON vuoto dal modello")
+        return None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        decoder = json.JSONDecoder()
+        object_start = text.find("{")
+        if object_start >= 0:
+            try:
+                parsed, object_end = decoder.raw_decode(text[object_start:])
+            except json.JSONDecodeError:
+                print(
+                    f"[OpenAI] JSON non valido: {type(e).__name__}: {e}; "
+                    f"raw={text[:500]!r}"
+                )
+                return None
+            if isinstance(parsed, dict):
+                trailing = text[object_start + object_end:].strip()
+                if object_start > 0 or trailing:
+                    print("[OpenAI] JSON recuperato da risposta con testo extra")
+                return parsed
+        print(
+            f"[OpenAI] JSON non valido: {type(e).__name__}: {e}; "
+            f"raw={text[:500]!r}"
+        )
+        return None
+
+    if not isinstance(parsed, dict):
+        print(f"[OpenAI] JSON top-level non oggetto: {type(parsed).__name__}")
+        return None
+    return parsed
+
+
 def _normalize_extracted_payload(payload: Any, dough_items: list[dict] | None = None) -> dict:
     """Valida e normalizza l'output LLM prima che entri nello stato ordine."""
     if not isinstance(payload, dict):
@@ -1619,6 +1657,8 @@ def extract_order_from_text(
             model=MODEL_NAME,
             max_tokens=200,
             messages=input_messages,
+            response_format=LLM_RESPONSE_FORMAT,
+            temperature=0,
             timeout=8,
         )
     except Exception as e:
@@ -1632,10 +1672,8 @@ def extract_order_from_text(
     print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in} cached={_cached}")
 
     raw_text = (response.choices[0].message.content or "").strip()
-    try:
-        parsed = json.loads(raw_text)
-    except json.JSONDecodeError as e:
-        print(f"[OpenAI] JSON non valido: {type(e).__name__}: {e}; raw={raw_text[:500]!r}")
+    parsed = _parse_llm_json_payload(raw_text)
+    if parsed is None:
         return _fallback_extracted_payload()
 
     parsed = _normalize_extracted_payload(parsed, dough_items)

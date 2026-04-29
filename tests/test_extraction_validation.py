@@ -1,6 +1,11 @@
 import unittest
 
-from app.services.conversation_service import _normalize_extracted_payload
+import app.services.conversation_service as conversation_service
+from app.services.conversation_service import (
+    extract_order_from_text,
+    _normalize_extracted_payload,
+    _parse_llm_json_payload,
+)
 
 
 class ExtractionValidationTests(unittest.TestCase):
@@ -56,6 +61,83 @@ class ExtractionValidationTests(unittest.TestCase):
 
         self.assertTrue(parsed["_llm_fallback"])
         self.assertEqual(parsed["items"], [])
+
+    def test_parse_llm_json_payload_requires_object(self):
+        self.assertEqual(
+            _parse_llm_json_payload('{"intent": "unknown", "items": []}'),
+            {"intent": "unknown", "items": []},
+        )
+        self.assertIsNone(_parse_llm_json_payload(""))
+        self.assertIsNone(_parse_llm_json_payload("[]"))
+        self.assertIsNone(_parse_llm_json_payload("{broken"))
+
+    def test_parse_llm_json_payload_recovers_embedded_object(self):
+        parsed = _parse_llm_json_payload(
+            '```json\n{"intent": "add_items", "items": []}\n```'
+        )
+
+        self.assertEqual(parsed, {"intent": "add_items", "items": []})
+
+    def test_extract_order_requests_json_mode_and_deterministic_output(self):
+        calls = []
+        original_get_client = conversation_service.get_openai_client
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                calls.append(kwargs)
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "usage": None,
+                        "choices": [
+                            type(
+                                "FakeChoice",
+                                (),
+                                {
+                                    "message": type(
+                                        "FakeMessage",
+                                        (),
+                                        {
+                                            "content": (
+                                                '{"intent": "unknown", '
+                                                '"customer_name": null, '
+                                                '"pickup_time": null, '
+                                                '"items": []}'
+                                            )
+                                        },
+                                    )()
+                                },
+                            )()
+                        ],
+                    },
+                )()
+
+        fake_client = type(
+            "FakeClient",
+            (),
+            {
+                "chat": type(
+                    "FakeChat",
+                    (),
+                    {"completions": FakeCompletions()},
+                )()
+            },
+        )()
+
+        conversation_service.get_openai_client = lambda: fake_client
+        try:
+            parsed = extract_order_from_text(
+                "ciao",
+                [{"name": "Margherita", "ingredients": []}],
+                [{"name": "Classica", "code": "classica", "surcharge": 0.0}],
+            )
+        finally:
+            conversation_service.get_openai_client = original_get_client
+
+        self.assertEqual(parsed["intent"], "unknown")
+        self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
+        self.assertEqual(calls[0]["temperature"], 0)
 
 
 if __name__ == "__main__":
