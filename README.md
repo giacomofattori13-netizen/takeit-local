@@ -71,6 +71,26 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 3. Test API integrati (`TestClient`) per `/orders` e `/menu`.
 4. Hardening osservabilità startup (log strutturati).
 
+## Valutazione estrazione ordine
+
+L'harness `scripts/evaluate_order_extraction.py` valida i casi in `tests/fixtures/order_extraction_cases.json` senza chiamate esterne:
+
+```bash
+.venv/bin/python scripts/evaluate_order_extraction.py
+```
+
+Per controllare regressioni reali del modello si può usare la modalità live, che richiede `OPENAI_API_KEY`, misura la latenza per caso e può salvare un artifact JSONL confrontabile:
+
+```bash
+.venv/bin/python scripts/evaluate_order_extraction.py \
+  --live \
+  --case-id set_pickup_time_evening_ambiguous \
+  --jsonl-output tmp/order-eval.jsonl \
+  --max-latency-ms 2000
+```
+
+Usare `--fail-fast` durante il debug rapido e più `--case-id` quando si vuole isolare un comportamento specifico.
+
 
 ## Riduzione latenza (focus agente voce AI per pizzeria d'asporto)
 
