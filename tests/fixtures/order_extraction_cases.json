@@ -1,0 +1,169 @@
+[
+  {
+    "id": "scoped_dough_two_pizzas",
+    "state": "collecting_items",
+    "message": "una margherita e una capricciosa integrale",
+    "existing_items": [],
+    "customer_name": null,
+    "expected": {
+      "intent": "add_items",
+      "items": [
+        {
+          "pizza_name": "Margherita",
+          "dough_type": "classica",
+          "quantity": 1,
+          "size": "normale"
+        },
+        {
+          "pizza_name": "Capricciosa",
+          "dough_type": "integrale",
+          "quantity": 1,
+          "size": "normale"
+        }
+      ]
+    }
+  },
+  {
+    "id": "ingredient_add_remove",
+    "state": "collecting_items",
+    "message": "una margherita con patatine senza pomodoro",
+    "existing_items": [],
+    "customer_name": null,
+    "expected": {
+      "intent": "add_items",
+      "items": [
+        {
+          "pizza_name": "Margherita",
+          "dough_type": "classica",
+          "quantity": 1,
+          "add_ingredients": ["patatine"],
+          "remove_ingredients": ["pomodoro"]
+        }
+      ]
+    }
+  },
+  {
+    "id": "sizes_mini_and_double",
+    "state": "collecting_items",
+    "message": "una diavola mini e una margherita doppio impasto",
+    "existing_items": [],
+    "customer_name": null,
+    "expected": {
+      "intent": "add_items",
+      "items": [
+        {
+          "pizza_name": "Diavola",
+          "dough_type": "classica",
+          "quantity": 1,
+          "size": "mini"
+        },
+        {
+          "pizza_name": "Margherita",
+          "dough_type": "classica",
+          "quantity": 1,
+          "size": "doppio"
+        }
+      ]
+    }
+  },
+  {
+    "id": "set_customer_name",
+    "state": "collecting_name",
+    "message": "Mario Rossi",
+    "existing_items": [
+      {
+        "pizza_name": "Diavola",
+        "pizza_type": "Normale",
+        "dough_type": "classica",
+        "quantity": 1,
+        "size": "normale",
+        "add_ingredients": [],
+        "remove_ingredients": []
+      }
+    ],
+    "customer_name": null,
+    "expected": {
+      "intent": "set_customer_name",
+      "customer_name": "Mario Rossi",
+      "items": []
+    }
+  },
+  {
+    "id": "set_pickup_time_evening_ambiguous",
+    "state": "collecting_pickup_time",
+    "message": "alle otto e mezza",
+    "existing_items": [
+      {
+        "pizza_name": "Diavola",
+        "pizza_type": "Normale",
+        "dough_type": "classica",
+        "quantity": 1,
+        "size": "normale",
+        "add_ingredients": [],
+        "remove_ingredients": []
+      }
+    ],
+    "customer_name": "Mario Rossi",
+    "expected": {
+      "intent": "set_pickup_time",
+      "pickup_time": "20:30",
+      "items": []
+    }
+  },
+  {
+    "id": "remove_named_item",
+    "state": "collecting_items",
+    "message": "togli la margherita",
+    "existing_items": [
+      {
+        "pizza_name": "Margherita",
+        "pizza_type": "Normale",
+        "dough_type": "classica",
+        "quantity": 1,
+        "size": "normale",
+        "add_ingredients": [],
+        "remove_ingredients": []
+      },
+      {
+        "pizza_name": "Diavola",
+        "pizza_type": "Normale",
+        "dough_type": "classica",
+        "quantity": 1,
+        "size": "normale",
+        "add_ingredients": [],
+        "remove_ingredients": []
+      }
+    ],
+    "customer_name": "Mario Rossi",
+    "expected": {
+      "intent": "remove_items",
+      "items": [
+        {
+          "pizza_name": "Margherita",
+          "quantity": 1
+        }
+      ]
+    }
+  },
+  {
+    "id": "clear_cart",
+    "state": "collecting_items",
+    "message": "cancella tutto e ricominciamo",
+    "existing_items": [
+      {
+        "pizza_name": "Margherita",
+        "pizza_type": "Normale",
+        "dough_type": "classica",
+        "quantity": 1,
+        "size": "normale",
+        "add_ingredients": [],
+        "remove_ingredients": []
+      }
+    ],
+    "customer_name": "Mario Rossi",
+    "expected": {
+      "intent": "clear_cart",
+      "items": []
+    }
+  }
+]
