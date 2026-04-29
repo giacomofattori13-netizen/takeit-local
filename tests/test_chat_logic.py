@@ -2,10 +2,13 @@ import unittest
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from app.models import ConversationSession, Order, OrderItem
+from app.models import ConversationSession, MenuItem, Order, OrderItem
 from app.routes.chat import (
+    _extract_local_customer_name,
+    _extract_local_pickup_time,
     _persist_order_once,
     determine_state,
+    enrich_items_with_pricing,
     merge_items,
     remove_items_from_order,
 )
@@ -105,6 +108,55 @@ class ChatLogicTests(unittest.TestCase):
         )
 
         self.assertEqual(state, "collecting_items")
+
+    def test_local_customer_name_accepts_plain_name_only(self):
+        self.assertEqual(_extract_local_customer_name("Mi chiamo mario rossi"), "Mario Rossi")
+        self.assertEqual(_extract_local_customer_name("Giulia"), "Giulia")
+        self.assertIsNone(_extract_local_customer_name("aggiungi una pizza margherita"))
+        self.assertIsNone(_extract_local_customer_name("sono io"))
+
+    def test_local_pickup_time_parses_simple_times_only(self):
+        self.assertEqual(_extract_local_pickup_time("alle 8 e mezza"), "8:30")
+        self.assertEqual(_extract_local_pickup_time("prima possibile"), "prima_possibile")
+        self.assertIsNone(_extract_local_pickup_time("alle 8 e aggiungi una margherita"))
+
+    def test_enrich_items_with_pricing_uses_shared_rules(self):
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            session.add(MenuItem(name="Margherita", category="rosse", pizza_type="Normale", price=7.5))
+            session.add(MenuItem(name="Diavola", category="rosse", pizza_type="Normale", price=9.0))
+            session.commit()
+
+            enriched, total = enrich_items_with_pricing(session, [
+                {
+                    "pizza_name": "Diavola",
+                    "pizza_type": "Normale",
+                    "dough_type": "classica",
+                    "quantity": 2,
+                    "size": "mini",
+                    "add_ingredients": ["patatine"],
+                    "remove_ingredients": [],
+                },
+                {
+                    "pizza_name": "Personalizzata",
+                    "pizza_type": "Normale",
+                    "dough_type": "classica",
+                    "quantity": 1,
+                    "size": "doppio",
+                    "add_ingredients": ["wurstel", "funghi"],
+                    "remove_ingredients": [],
+                },
+            ])
+
+        self.assertEqual(enriched[0]["base_price"], 7.5)
+        self.assertEqual(enriched[0]["extras_price"], 2.0)
+        self.assertEqual(enriched[0]["total_price"], 19.0)
+        self.assertEqual(enriched[1]["base_price"], 7.5)
+        self.assertEqual(enriched[1]["extras_price"], 6.0)
+        self.assertEqual(enriched[1]["total_price"], 13.5)
+        self.assertEqual(total, 32.5)
 
     def test_persist_order_once_is_idempotent_per_conversation(self):
         engine = create_engine("sqlite://")

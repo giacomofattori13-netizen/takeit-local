@@ -6,7 +6,7 @@ import uuid
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from difflib import SequenceMatcher
 
@@ -471,6 +471,41 @@ _NUMBER_WORDS = {
     "due": 2, "tre": 3, "quattro": 4, "cinque": 5, "sei": 6, "sette": 7,
 }
 
+_LOCAL_NAME_BLOCKERS = {
+    "pizza", "pizze", "margherita", "diavola", "capricciosa", "ordine", "ordinare",
+    "aggiungi", "metti", "vorrei", "voglio", "ritiro", "alle", "ore", "prima",
+    "possibile", "subito", "senza", "con", "glutine", "impasto", "mini", "doppio",
+    "annulla", "cancella", "basta", "ok", "si", "sì", "io",
+}
+
+_LOCAL_PICKUP_BLOCKERS = {
+    "pizza", "pizze", "margherita", "diavola", "capricciosa", "aggiungi", "metti",
+    "toglimi", "rimuovi", "senza glutine", "impasto", "mini", "doppio", "nome",
+    "sono", "mi chiamo",
+}
+
+_ITALIAN_HOUR_WORDS = {
+    "una": 1,
+    "uno": 1,
+    "due": 2,
+    "tre": 3,
+    "quattro": 4,
+    "cinque": 5,
+    "sei": 6,
+    "sette": 7,
+    "otto": 8,
+    "nove": 9,
+    "dieci": 10,
+    "undici": 11,
+    "dodici": 12,
+    "diciotto": 18,
+    "diciannove": 19,
+    "venti": 20,
+    "ventuno": 21,
+    "ventidue": 22,
+    "ventitre": 23,
+}
+
 
 def extract_intended_quantity(message: str) -> int | None:
     """
@@ -493,6 +528,185 @@ def is_done_signal(message: str) -> bool:
     """True se il cliente segnala che ha finito di ordinare."""
     msg = message.lower().strip()
     return any(signal in msg for signal in _DONE_SIGNALS)
+
+
+def _normalize_for_match(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+def _contains_any_word(text: str, words: set[str]) -> bool:
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in words)
+
+
+def _format_customer_name(name: str) -> str:
+    return " ".join(part[:1].upper() + part[1:].lower() for part in name.split())
+
+
+def _extract_local_customer_name(message: str) -> str | None:
+    """Fast path prudente: accetta solo risposte che sembrano essere un nome puro."""
+    raw = re.sub(r"[.!?,;:]+$", "", message.strip())
+    if not raw:
+        return None
+
+    candidate = re.sub(
+        r"^(?:sono|mi chiamo|chiamami|il nome\s+(?:e|è)|nome|a nome di|per)\s+",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).strip()
+    candidate = re.sub(r"\b(?:grazie|per favore)\b", "", candidate, flags=re.IGNORECASE).strip()
+    candidate = re.sub(r"\s+", " ", candidate)
+    normalized = _normalize_for_match(candidate)
+
+    if (
+        not candidate
+        or any(char.isdigit() for char in candidate)
+        or _contains_any_word(normalized, _LOCAL_NAME_BLOCKERS)
+        or not re.fullmatch(r"[A-Za-zÀ-ÖØ-öø-ÿ' -]{2,60}", candidate)
+    ):
+        return None
+
+    words = candidate.split()
+    if len(words) > 4:
+        return None
+
+    return _format_customer_name(candidate)
+
+
+def _extract_local_pickup_time(message: str) -> str | None:
+    """Estrae orari semplici senza LLM quando il bot sta già chiedendo solo l'orario."""
+    normalized = _normalize_for_match(message).strip()
+    compact = re.sub(r"[.!?,;:]+$", "", normalized)
+    if not compact or _contains_any_word(compact, _LOCAL_PICKUP_BLOCKERS):
+        return None
+
+    if re.search(r"\b(?:prima\s+possibile|appena\s+possibile|subito|asap)\b", compact):
+        return "prima_possibile"
+
+    numeric = re.search(
+        r"(?:\b(?:alle|le|ore|verso|per(?:\s+le)?)\s+)?(\d{1,2})(?:[:.](\d{1,2}))?"
+        r"(?:\s+e\s+(mezza|mezzo|un quarto|quarto))?\b",
+        compact,
+    )
+    if numeric:
+        has_time_marker = re.search(r"\b(?:alle|le|ore|verso|per(?:\s+le)?)\b", compact)
+        is_only_time = re.fullmatch(
+            r"\d{1,2}(?:[:.]\d{1,2})?(?:\s+e\s+(?:mezza|mezzo|un quarto|quarto))?",
+            compact,
+        )
+        if numeric.group(2) or has_time_marker or is_only_time:
+            hour = int(numeric.group(1))
+            minute_word = numeric.group(3)
+            minute = int(numeric.group(2) or 0)
+            if minute_word in {"mezza", "mezzo"}:
+                minute = 30
+            elif minute_word:
+                minute = 15
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return f"{hour}:{minute:02d}"
+
+    word_pattern = "|".join(sorted(_ITALIAN_HOUR_WORDS, key=len, reverse=True))
+    word_match = re.search(
+        rf"(?:\b(?:alle|le|ore|verso|per(?:\s+le)?)\s+)?\b({word_pattern})\b"
+        r"(?:\s+e\s+(mezza|mezzo|un quarto|quarto))?",
+        compact,
+    )
+    if word_match:
+        has_time_marker = re.search(r"\b(?:alle|le|ore|verso|per(?:\s+le)?)\b", compact)
+        is_only_time = re.fullmatch(
+            rf"({word_pattern})(?:\s+e\s+(?:mezza|mezzo|un quarto|quarto))?",
+            compact,
+        )
+        if has_time_marker or is_only_time:
+            hour = _ITALIAN_HOUR_WORDS[word_match.group(1)]
+            minute_word = word_match.group(2)
+            minute = 30 if minute_word in {"mezza", "mezzo"} else 15 if minute_word else 0
+            return f"{hour}:{minute:02d}"
+
+    return None
+
+
+def _build_pickup_time_error(
+    pickup_time: str,
+    suggestion: str | None,
+    closing_time: str | None,
+) -> str:
+    if closing_time:
+        return (
+            f"Mi dispiace, chiudiamo alle {closing_time}. L'ultimo orario disponibile è le {suggestion}."
+            if suggestion else f"Mi dispiace, alle {pickup_time} siamo già chiusi."
+        )
+    return (
+        f"Mi dispiace, alle {pickup_time} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
+        if suggestion else f"Mi dispiace, alle {pickup_time} siamo chiusi."
+    )
+
+
+def _log_chat_timing(
+    session_id: str,
+    path: str,
+    started_at: float,
+    **fields: Any,
+) -> None:
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    print(f"[Latency] chat path={path} session={session_id} elapsed_ms={elapsed_ms}{suffix}")
+
+
+def enrich_items_with_pricing(
+    session: Session,
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], float]:
+    """Aggiunge base/extras/total price agli item usando una sola logica condivisa."""
+    margherita = session.exec(
+        select(MenuItem).where(MenuItem.name == "Margherita")
+    ).first()
+    base_personalizzata = round(margherita.price, 2) if margherita else 0.0
+
+    enriched_items: list[dict[str, Any]] = []
+    for item in items:
+        if item["pizza_name"] == "Personalizzata":
+            base_price = base_personalizzata
+        else:
+            menu_item = session.exec(
+                select(MenuItem).where(
+                    MenuItem.name == item["pizza_name"],
+                    MenuItem.pizza_type == item["pizza_type"],
+                )
+            ).first()
+            if not menu_item:
+                menu_item = session.exec(
+                    select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                ).first()
+            base_price = round(menu_item.price, 2) if menu_item else 0.0
+
+        is_sg_pizza = "(SG)" in item.get("pizza_name", "")
+        dough_code = item.get("dough_type", "classica")
+        dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
+        size = item.get("size", "normale")
+        if size == "mini":
+            base_price = round(max(0.0, base_price - SIZE_MINI_DISCOUNT), 2)
+        elif size == "doppio":
+            dough_surcharge = round(dough_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
+
+        extras_price = round(
+            dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE,
+            2,
+        )
+        quantity = int(item.get("quantity") or 1)
+        total_price = round((base_price + extras_price) * quantity, 2)
+        enriched_items.append({
+            **item,
+            "quantity": quantity,
+            "base_price": base_price,
+            "extras_price": extras_price,
+            "total_price": total_price,
+        })
+
+    total_amount = round(sum(item.get("total_price", 0.0) for item in enriched_items), 2)
+    return enriched_items, total_amount
 
 
 def determine_state(
@@ -886,8 +1100,11 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 
 @router.post("/", response_model=ChatResponse)
 def chat(request: ChatRequest, session: SessionDep):
+    request_started_at = time.perf_counter()
+
     if not is_agent_active():
         print("[Chat] agent_active=False → rifiuto messaggio")
+        _log_chat_timing(request.session_id, "agent_closed", request_started_at)
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
@@ -899,29 +1116,6 @@ def chat(request: ChatRequest, session: SessionDep):
             order_id=None,
             state="closed",
         )
-
-    # Carica il menu da Base44 (con cache 10 min); fallback al DB locale se vuoto
-    menu_items_for_llm = load_menu_from_base44()
-    first_names = [item["name"] for item in menu_items_for_llm[:3]]
-    print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci. Prime 3: {first_names}")
-
-    if not menu_items_for_llm:
-        print("[Chat] Fallback al DB locale")
-        db_menu_items = session.exec(select(MenuItem)).all()
-        menu_items_for_llm = [
-            {
-                "name": item.name,
-                "category": item.category,
-                "dough_type": _PIZZA_TYPE_TO_DOUGH.get(item.pizza_type, "classica"),
-                "pizza_type": item.pizza_type,
-                "price": item.price,
-                "available": item.available,
-                "ingredients": [],
-            }
-            for item in db_menu_items
-        ]
-
-    dough_items = load_doughs()
 
     message_lower = unicodedata.normalize("NFC", request.message.lower())
 
@@ -978,6 +1172,7 @@ def chat(request: ChatRequest, session: SessionDep):
             state="completed",
         ))
         session.commit()
+        _log_chat_timing(request.session_id, "completed_repeat", request_started_at)
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
@@ -1010,39 +1205,7 @@ def chat(request: ChatRequest, session: SessionDep):
         if _is_confirm and not conversation.completed:
             order, order_created = _persist_order_once(session, conversation, merged_order)
 
-            # Pricing e salvataggio Base44
-            _margherita_item = session.exec(
-                select(MenuItem).where(MenuItem.name == "Margherita")
-            ).first()
-            _base_personalizzata = round(_margherita_item.price, 2) if _margherita_item else 0.0
-
-            enriched_items = []
-            for _item in merged_order["items"]:
-                if _item["pizza_name"] == "Personalizzata":
-                    _base = _base_personalizzata
-                else:
-                    _menu_item = session.exec(
-                        select(MenuItem).where(
-                            MenuItem.name == _item["pizza_name"],
-                            MenuItem.pizza_type == _item["pizza_type"],
-                        )
-                    ).first()
-                    if not _menu_item:
-                        _menu_item = session.exec(
-                            select(MenuItem).where(MenuItem.name == _item["pizza_name"])
-                        ).first()
-                    _base = round(_menu_item.price, 2) if _menu_item else 0.0
-                _is_sg = "(SG)" in _item.get("pizza_name", "")
-                _dough_code = _item.get("dough_type", "classica")
-                _surcharge = 0.0 if _is_sg else get_dough_surcharge(_dough_code)
-                _size = _item.get("size", "normale")
-                if _size == "mini":
-                    _base = round(max(0.0, _base - SIZE_MINI_DISCOUNT), 2)
-                elif _size == "doppio":
-                    _surcharge = round(_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
-                _extras = round(_surcharge + len(_item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
-                _total = round((_base + _extras) * _item["quantity"], 2)
-                enriched_items.append({**_item, "base_price": _base, "extras_price": _extras, "total_price": _total})
+            enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
 
             if order_created:
                 save_order_to_base44(
@@ -1059,10 +1222,9 @@ def chat(request: ChatRequest, session: SessionDep):
                     customer_phone=conversation.customer_phone,
                     pickup_time=merged_order["pickup_time"],
                     items=enriched_items,
-                    total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
+                    total_amount=order_total,
                 )
                 pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
-                order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
                 upsert_customer(
                     full_name=merged_order["customer_name"],
                     phone=conversation.customer_phone,
@@ -1108,6 +1270,13 @@ def chat(request: ChatRequest, session: SessionDep):
         ))
         session.commit()
         print(f"[Confirm] fast-path: confirm={_is_confirm} cancel={_is_cancel} → {_resp!r}")
+        _log_chat_timing(
+            request.session_id,
+            "awaiting_confirmation",
+            request_started_at,
+            confirm=_is_confirm,
+            cancel=_is_cancel,
+        )
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
@@ -1133,6 +1302,147 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.pending_customer_name = None
         elif _negative:
             conversation.pending_customer_name = None
+
+    # ── FAST PATH: stati stretti senza LLM ───────────────────────────────────
+    if conversation.state == "collecting_name":
+        local_name = _extract_local_customer_name(request.message)
+        if local_name:
+            existing_items = json.loads(conversation.items_json)
+            conversation.customer_name = local_name
+            merged_order = {
+                "customer_name": conversation.customer_name,
+                "pickup_time": conversation.pickup_time,
+                "items": existing_items,
+            }
+            state = determine_state(
+                merged_order=merged_order,
+                missing_messages=[],
+                completed=conversation.completed,
+                intended_quantity=conversation.intended_quantity,
+            )
+            conversation.state = state
+            response_message = build_assistant_response(
+                merged_order=merged_order,
+                state=state,
+                missing_messages=[],
+                order_saved=False,
+                intent="set_customer_name",
+                new_valid_items=[],
+                customer_phone=conversation.customer_phone,
+            )
+            extracted_stub = {
+                "intent": "set_customer_name",
+                "items": [],
+                "customer_name": local_name,
+                "pickup_time": None,
+            }
+            valid = bool(existing_items and conversation.customer_name and conversation.pickup_time)
+            session.add(conversation)
+            session.add(ConversationLog(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order_json=json.dumps(extracted_stub, ensure_ascii=False),
+                merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+                response_message=response_message,
+                valid=valid,
+                missing_items_json="[]",
+                state=state,
+            ))
+            session.commit()
+            _log_chat_timing(request.session_id, "local_name", request_started_at, state=state)
+            return ChatResponse(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order=extracted_stub,
+                merged_order=merged_order,
+                valid=valid,
+                missing_items=[],
+                response_message=response_message,
+                order_id=None,
+                state=state,
+            )
+
+    if conversation.state == "collecting_pickup_time":
+        local_pickup_time = _extract_local_pickup_time(request.message)
+        if local_pickup_time:
+            pickup_time = resolve_pickup_time(local_pickup_time)
+            is_valid_pickup, suggestion, closing_time = validate_pickup_time(pickup_time)
+            pickup_time_error = None
+            if is_valid_pickup:
+                conversation.pickup_time = pickup_time
+            else:
+                pickup_time_error = _build_pickup_time_error(pickup_time, suggestion, closing_time)
+
+            existing_items = json.loads(conversation.items_json)
+            merged_order = {
+                "customer_name": conversation.customer_name,
+                "pickup_time": conversation.pickup_time,
+                "items": existing_items,
+            }
+            missing_messages = [pickup_time_error] if pickup_time_error else []
+            state = (
+                "collecting_pickup_time"
+                if pickup_time_error
+                else determine_state(
+                    merged_order=merged_order,
+                    missing_messages=[],
+                    completed=conversation.completed,
+                    intended_quantity=conversation.intended_quantity,
+                )
+            )
+            conversation.state = state
+            response_message = build_assistant_response(
+                merged_order=merged_order,
+                state=state,
+                missing_messages=missing_messages,
+                order_saved=False,
+                intent="set_pickup_time",
+                new_valid_items=[],
+                customer_phone=conversation.customer_phone,
+                pickup_time_error=pickup_time_error,
+            )
+            extracted_stub = {
+                "intent": "set_pickup_time",
+                "items": [],
+                "customer_name": None,
+                "pickup_time": pickup_time,
+            }
+            valid = bool(
+                not pickup_time_error
+                and existing_items
+                and conversation.customer_name
+                and conversation.pickup_time
+            )
+            session.add(conversation)
+            session.add(ConversationLog(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order_json=json.dumps(extracted_stub, ensure_ascii=False),
+                merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+                response_message=response_message,
+                valid=valid,
+                missing_items_json=json.dumps(missing_messages, ensure_ascii=False),
+                state=state,
+            ))
+            session.commit()
+            _log_chat_timing(
+                request.session_id,
+                "local_pickup_time",
+                request_started_at,
+                state=state,
+                valid=is_valid_pickup,
+            )
+            return ChatResponse(
+                session_id=request.session_id,
+                user_message=request.message,
+                extracted_order=extracted_stub,
+                merged_order=merged_order,
+                valid=valid,
+                missing_items=[],
+                response_message=response_message,
+                order_id=None,
+                state=state,
+            )
 
     # ── CONFIRMING_USUAL: skip LLM dove possibile ────────────────────────────
 
@@ -1206,6 +1516,7 @@ def chat(request: ChatRequest, session: SessionDep):
             ))
             session.commit()
             print(f"[Usual] Confermate {len(added)} pizze abituali → stato={state_usual!r}")
+            _log_chat_timing(request.session_id, "confirming_usual_yes", request_started_at, added=len(added))
             return ChatResponse(
                 session_id=request.session_id,
                 user_message=request.message,
@@ -1240,6 +1551,7 @@ def chat(request: ChatRequest, session: SessionDep):
             ))
             session.commit()
             print("[Usual] Rifiutate pizze abituali → collecting_items")
+            _log_chat_timing(request.session_id, "confirming_usual_no", request_started_at)
             return ChatResponse(
                 session_id=request.session_id,
                 user_message=request.message,
@@ -1272,6 +1584,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 state="confirming_usual",
             ))
             session.commit()
+            _log_chat_timing(request.session_id, "confirming_usual_ambiguous", request_started_at)
             return ChatResponse(
                 session_id=request.session_id,
                 user_message=request.message,
@@ -1322,6 +1635,7 @@ def chat(request: ChatRequest, session: SessionDep):
         ))
         session.commit()
         print(f"[Usual] Trigger: limit={_usual_limit} → {len(fav_list)} pizze in lista → confirming_usual")
+        _log_chat_timing(request.session_id, "confirming_usual_trigger", request_started_at, proposed=len(fav_list))
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
@@ -1333,6 +1647,30 @@ def chat(request: ChatRequest, session: SessionDep):
             order_id=None,
             state="confirming_usual",
         )
+
+    # Da qui in poi serve davvero l'LLM: carichiamo menu/dough solo dopo tutti
+    # i fast path locali, così i turni semplici non pagano latenza di rete/cache.
+    menu_items_for_llm = load_menu_from_base44()
+    first_names = [item["name"] for item in menu_items_for_llm[:3]]
+    print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci. Prime 3: {first_names}")
+
+    if not menu_items_for_llm:
+        print("[Chat] Fallback al DB locale")
+        db_menu_items = session.exec(select(MenuItem)).all()
+        menu_items_for_llm = [
+            {
+                "name": item.name,
+                "category": item.category,
+                "dough_type": _PIZZA_TYPE_TO_DOUGH.get(item.pizza_type, "classica"),
+                "pizza_type": item.pizza_type,
+                "price": item.price,
+                "available": item.available,
+                "ingredients": [],
+            }
+            for item in db_menu_items
+        ]
+
+    dough_items = load_doughs()
 
     # 1. Estrai item SOLO dal messaggio corrente.
     # Il contesto di sessione (items, nome) va nel messaggio utente — non nel system prompt —
@@ -1366,6 +1704,7 @@ def chat(request: ChatRequest, session: SessionDep):
             state=conversation.state,
         ))
         session.commit()
+        _log_chat_timing(request.session_id, "llm_fallback", request_started_at, state=conversation.state)
         return ChatResponse(
             session_id=request.session_id,
             user_message=request.message,
@@ -1391,16 +1730,7 @@ def chat(request: ChatRequest, session: SessionDep):
         pt = resolve_pickup_time(extracted["pickup_time"])
         is_valid, suggestion, closing_time = validate_pickup_time(pt)
         if not is_valid:
-            if closing_time:
-                pickup_time_error = (
-                    f"Mi dispiace, chiudiamo alle {closing_time}. L'ultimo orario disponibile è le {suggestion}."
-                    if suggestion else f"Mi dispiace, alle {pt} siamo già chiusi."
-                )
-            else:
-                pickup_time_error = (
-                    f"Mi dispiace, alle {pt} siamo chiusi. Il prossimo orario disponibile è le {suggestion}."
-                    if suggestion else f"Mi dispiace, alle {pt} siamo chiusi."
-                )
+            pickup_time_error = _build_pickup_time_error(pt, suggestion, closing_time)
         else:
             conversation.pickup_time = pt
 
@@ -1571,40 +1901,7 @@ def chat(request: ChatRequest, session: SessionDep):
         order_id = order.id
         order_saved = True
 
-        # Prezzo base per pizze libere ("Personalizzata") = prezzo Margherita
-        _margherita = session.exec(
-            select(MenuItem).where(MenuItem.name == "Margherita")
-        ).first()
-        _base_personalizzata = round(_margherita.price, 2) if _margherita else 0.0
-
-        enriched_items = []
-        for item in merged_order["items"]:
-            if item["pizza_name"] == "Personalizzata":
-                menu_item = None
-                base_price = _base_personalizzata
-            else:
-                menu_item = session.exec(
-                    select(MenuItem).where(
-                        MenuItem.name == item["pizza_name"],
-                        MenuItem.pizza_type == item["pizza_type"],
-                    )
-                ).first()
-                if not menu_item:
-                    menu_item = session.exec(
-                        select(MenuItem).where(MenuItem.name == item["pizza_name"])
-                    ).first()
-                base_price = round(menu_item.price, 2) if menu_item else 0.0
-            is_sg_pizza = "(SG)" in item.get("pizza_name", "")
-            dough_code = item.get("dough_type", "classica")
-            dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
-            size = item.get("size", "normale")
-            if size == "mini":
-                base_price = round(max(0.0, base_price - SIZE_MINI_DISCOUNT), 2)
-            elif size == "doppio":
-                dough_surcharge = round(dough_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
-            extras_price = round(dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE, 2)
-            total_price = round((base_price + extras_price) * item["quantity"], 2)
-            enriched_items.append({**item, "base_price": base_price, "extras_price": extras_price, "total_price": total_price})
+        enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
 
         if order_created:
             save_order_to_base44(
@@ -1621,11 +1918,10 @@ def chat(request: ChatRequest, session: SessionDep):
                 customer_phone=conversation.customer_phone,
                 pickup_time=merged_order["pickup_time"],
                 items=enriched_items,
-                total_amount=round(sum(i.get("total_price", 0.0) for i in enriched_items), 2),
+                total_amount=order_total,
             )
 
             pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
-            order_total = round(sum(i.get("total_price", 0.0) for i in enriched_items), 2)
             upsert_customer(
                 full_name=merged_order["customer_name"],
                 phone=conversation.customer_phone,
@@ -1662,6 +1958,14 @@ def chat(request: ChatRequest, session: SessionDep):
     session.add(log_entry)
     session.commit()
 
+    _log_chat_timing(
+        request.session_id,
+        "llm_path",
+        request_started_at,
+        state=conversation.state,
+        intent=intent,
+        valid=valid,
+    )
     return ChatResponse(
         session_id=request.session_id,
         user_message=request.message,
