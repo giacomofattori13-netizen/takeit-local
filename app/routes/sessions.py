@@ -42,7 +42,11 @@ def create_session(body: SessionCreateRequest, session: SessionDep):
     )
 
 
-@router.get("/{session_id}", response_model=SessionRead)
+@router.get(
+    "/{session_id}",
+    response_model=SessionRead,
+    dependencies=[Depends(require_admin_api_key)],
+)
 def get_session_state(session_id: str, session: SessionDep):
     statement = select(ConversationSession).where(
         ConversationSession.session_id == session_id
