@@ -1,3 +1,4 @@
+import copy
 import json
 import random
 import time
@@ -49,6 +50,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 _CUSTOMER_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_ORDER_SIDE_EFFECTS_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 
 
 def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
@@ -709,6 +711,79 @@ def enrich_items_with_pricing(
     return enriched_items, total_amount
 
 
+def _run_order_side_effects(payload: dict[str, Any]) -> None:
+    """Sincronizza servizi esterni senza far fallire il turno voce."""
+    started_at = time.perf_counter()
+    order_number = payload["order_number"]
+
+    try:
+        save_order_to_base44(
+            customer_name=payload["customer_name"],
+            customer_phone=payload["customer_phone"],
+            pickup_time=payload["pickup_time"],
+            order_number=order_number,
+            ai_confidence=payload["ai_confidence"],
+            items=payload["items"],
+        )
+        print(f"[SideEffects] Base44 ordine #{order_number} sincronizzato")
+    except Exception as exc:
+        print(f"[SideEffects] Base44 errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+
+    try:
+        print(
+            f"[SMS] Tentativo invio async: phone={payload['customer_phone']!r} "
+            f"name={payload['customer_name']!r}"
+        )
+        send_whatsapp_confirmation(
+            customer_name=payload["customer_name"],
+            customer_phone=payload["customer_phone"],
+            pickup_time=payload["pickup_time"],
+            items=payload["items"],
+            total_amount=payload["total_amount"],
+        )
+    except Exception as exc:
+        print(f"[SideEffects] WhatsApp errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+
+    try:
+        if payload["customer_name"]:
+            upsert_customer(
+                full_name=payload["customer_name"],
+                phone=payload["customer_phone"],
+                pizzas=payload["pizza_names"],
+                total_amount=payload["total_amount"],
+            )
+    except Exception as exc:
+        print(f"[SideEffects] Customer errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    print(f"[SideEffects] ordine #{order_number} completato elapsed_ms={elapsed_ms}")
+
+
+def _enqueue_order_side_effects(
+    *,
+    customer_name: str,
+    customer_phone: str | None,
+    pickup_time: str,
+    order_number: int,
+    ai_confidence: float,
+    items: list[dict[str, Any]],
+    total_amount: float,
+    pizza_names: list[str],
+) -> None:
+    payload = {
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "pickup_time": pickup_time,
+        "order_number": order_number,
+        "ai_confidence": ai_confidence,
+        "items": copy.deepcopy(items),
+        "total_amount": total_amount,
+        "pizza_names": list(pizza_names),
+    }
+    _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_run_order_side_effects, payload)
+    print(f"[SideEffects] ordine #{order_number} accodato")
+
+
 def determine_state(
     merged_order: dict,
     missing_messages: list[str],
@@ -1208,28 +1283,16 @@ def chat(request: ChatRequest, session: SessionDep):
             enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
 
             if order_created:
-                save_order_to_base44(
+                pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
+                _enqueue_order_side_effects(
                     customer_name=merged_order["customer_name"],
                     customer_phone=conversation.customer_phone,
                     pickup_time=merged_order["pickup_time"],
                     order_number=order.id,
                     ai_confidence=0.95,
                     items=enriched_items,
-                )
-                print(f"[SMS] Tentativo invio (awaiting_confirmation): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
-                send_whatsapp_confirmation(
-                    customer_name=merged_order["customer_name"],
-                    customer_phone=conversation.customer_phone,
-                    pickup_time=merged_order["pickup_time"],
-                    items=enriched_items,
                     total_amount=order_total,
-                )
-                pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
-                upsert_customer(
-                    full_name=merged_order["customer_name"],
-                    phone=conversation.customer_phone,
-                    pizzas=pizza_names,
-                    total_amount=order_total,
+                    pizza_names=pizza_names,
                 )
 
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
@@ -1904,29 +1967,16 @@ def chat(request: ChatRequest, session: SessionDep):
         enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
 
         if order_created:
-            save_order_to_base44(
+            pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
+            _enqueue_order_side_effects(
                 customer_name=merged_order["customer_name"],
                 customer_phone=conversation.customer_phone,
                 pickup_time=merged_order["pickup_time"],
                 order_number=order.id,
                 ai_confidence=0.9,
                 items=enriched_items,
-            )
-            print(f"[SMS] Tentativo invio (confirm_order): phone={conversation.customer_phone!r} name={merged_order['customer_name']!r}")
-            send_whatsapp_confirmation(
-                customer_name=merged_order["customer_name"],
-                customer_phone=conversation.customer_phone,
-                pickup_time=merged_order["pickup_time"],
-                items=enriched_items,
                 total_amount=order_total,
-            )
-
-            pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
-            upsert_customer(
-                full_name=merged_order["customer_name"],
-                phone=conversation.customer_phone,
-                pizzas=pizza_names,
-                total_amount=order_total,
+                pizza_names=pizza_names,
             )
 
     response_message = build_assistant_response(
