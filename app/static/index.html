@@ -587,8 +587,16 @@
       if (!sid) { addMessage("Incolla un session_id valido.", "bot"); return; }
 
       try {
-        const res = await fetch(`/sessions/${sid}`);
-        if (!res.ok) { addMessage(`Sessione '${sid}' non trovata.`, "bot"); return; }
+        const res = await fetch(`/sessions/${sid}`, {
+          headers: getAdminHeaders(),
+        });
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 503) {
+            localStorage.removeItem("takeit_admin_api_key");
+          }
+          addMessage(`Sessione '${sid}' non trovata o non autorizzata.`, "bot");
+          return;
+        }
 
         chatEl.innerHTML = "";
         resetSummary();
