@@ -2,6 +2,7 @@ import unittest
 
 from sqlmodel import SQLModel, Session, create_engine, select
 
+import app.routes.chat as chat_module
 from app.models import ConversationSession, MenuItem, Order, OrderItem
 from app.routes.chat import (
     _extract_local_customer_name,
@@ -157,6 +158,54 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(enriched[1]["extras_price"], 6.0)
         self.assertEqual(enriched[1]["total_price"], 13.5)
         self.assertEqual(total, 32.5)
+
+    def test_order_side_effects_continue_after_one_failure(self):
+        calls = []
+        original_save = chat_module.save_order_to_base44
+        original_send = chat_module.send_whatsapp_confirmation
+        original_upsert = chat_module.upsert_customer
+
+        def failing_save(**kwargs):
+            calls.append(("save", kwargs["order_number"]))
+            raise RuntimeError("base44 down")
+
+        def fake_send(**kwargs):
+            calls.append(("send", kwargs["total_amount"]))
+
+        def fake_upsert(**kwargs):
+            calls.append(("upsert", kwargs["pizzas"]))
+
+        chat_module.save_order_to_base44 = failing_save
+        chat_module.send_whatsapp_confirmation = fake_send
+        chat_module.upsert_customer = fake_upsert
+        try:
+            chat_module._run_order_side_effects({
+                "customer_name": "Mario",
+                "customer_phone": "+393331234567",
+                "pickup_time": "20:00",
+                "order_number": 42,
+                "ai_confidence": 0.95,
+                "items": [{
+                    "pizza_name": "Margherita",
+                    "pizza_type": "Normale",
+                    "quantity": 1,
+                    "base_price": 7.5,
+                    "extras_price": 0.0,
+                    "total_price": 7.5,
+                }],
+                "total_amount": 7.5,
+                "pizza_names": ["Margherita"],
+            })
+        finally:
+            chat_module.save_order_to_base44 = original_save
+            chat_module.send_whatsapp_confirmation = original_send
+            chat_module.upsert_customer = original_upsert
+
+        self.assertEqual(calls, [
+            ("save", 42),
+            ("send", 7.5),
+            ("upsert", ["Margherita"]),
+        ])
 
     def test_persist_order_once_is_idempotent_per_conversation(self):
         engine = create_engine("sqlite://")
