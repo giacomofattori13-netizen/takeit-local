@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.db import create_db_and_tables, engine
 from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
+from app.routes.chat import recover_order_side_effects
 from app.routes.chat import router as chat_router
 from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
@@ -52,6 +53,8 @@ def on_startup():
             conn.commit()
     except Exception as e:
         print(f"[Startup] Errore creazione indice idempotenza ordini: {type(e).__name__}: {e}")
+
+    recover_order_side_effects()
 
     synced = sync_menu_to_db()
     if synced:

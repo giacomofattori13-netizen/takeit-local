@@ -24,6 +24,7 @@ from app.services.conversation_service import (
     is_agent_active,
     lookup_customer,
 )
+from app.routes.chat import _extract_local_customer_name, _extract_local_pickup_time
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -96,8 +97,8 @@ _TRIVIAL_COLLECTING_RE = re.compile(
 def _needs_filler(speech: str, state: str) -> bool:
     """True se riprodurre 'Un momento...' è appropriato per questo messaggio.
 
-    collecting_name / collecting_pickup_time → sempre True: il cliente sta
-    fornendo dati attesi e OpenAI deve estrarre nome o orario (~400-800ms).
+    collecting_name / collecting_pickup_time → filler solo quando il testo non
+    è risolvibile dal fast path locale.
 
     collecting_items → True solo se il testo sembra contenere dati di ordine
     reali (nome pizza, ingrediente, frase complessa). False per risposte
@@ -106,8 +107,10 @@ def _needs_filler(speech: str, state: str) -> bool:
 
     Tutti gli altri stati → False (fast path Python, niente LLM pesante).
     """
-    if state in ("collecting_name", "collecting_pickup_time"):
-        return True
+    if state == "collecting_name":
+        return _extract_local_customer_name(speech) is None
+    if state == "collecting_pickup_time":
+        return _extract_local_pickup_time(speech) is None
     if state != "collecting_items":
         return False
     normalized = speech.strip().rstrip(".,!?")

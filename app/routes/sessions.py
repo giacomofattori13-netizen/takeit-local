@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 from app.db import get_session
 from app.models import ConversationSession
 from app.schemas import SessionCreateRequest, SessionCreateResponse, SessionRead
+from app.security import require_admin_api_key
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -62,7 +63,7 @@ def get_session_state(session_id: str, session: SessionDep):
     )
 
 
-@router.delete("/{session_id}")
+@router.delete("/{session_id}", dependencies=[Depends(require_admin_api_key)])
 def delete_session(session_id: str, session: SessionDep):
     statement = select(ConversationSession).where(
         ConversationSession.session_id == session_id
