@@ -31,6 +31,19 @@ class OrderItem(SQLModel, table=True):
     size: str = "normale"
 
 
+class OrderSideEffect(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    order_number: int = Field(index=True)
+    kind: str = Field(index=True)
+    payload_json: str
+    status: str = Field(default="pending", index=True)
+    attempts: int = 0
+    next_attempt_at: float = 0.0
+    last_error: Optional[str] = None
+    created_at: float = Field(default=0.0)
+    updated_at: float = Field(default=0.0)
+
+
 class ConversationSession(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: str = Field(index=True, unique=True)

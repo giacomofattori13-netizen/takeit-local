@@ -16,11 +16,13 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app.db import engine as _db_engine
 from app.db import get_session
 from app.models import (
     MenuItem,
     Order,
     OrderItem,
+    OrderSideEffect,
     ConversationSession,
     ConversationLog,
 )
@@ -51,6 +53,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 SessionDep = Annotated[Session, Depends(get_session)]
 _CUSTOMER_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 _ORDER_SIDE_EFFECTS_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_SIDE_EFFECT_MAX_ATTEMPTS = 5
+_SIDE_EFFECT_RETRY_BASE_SECONDS = 30.0
+_SIDE_EFFECT_RETRY_MAX_SECONDS = 15 * 60.0
 
 
 def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
@@ -545,6 +550,17 @@ def _format_customer_name(name: str) -> str:
     return " ".join(part[:1].upper() + part[1:].lower() for part in name.split())
 
 
+def _apply_evening_pickup_hour_rule(hour: int, text: str) -> int:
+    """Regola locale coerente col prompt: 6-11 senza mattina esplicita => sera."""
+    has_morning_marker = re.search(r"\b(?:mattina|di\s+mattina)\b", text) is not None
+    has_evening_marker = re.search(r"\b(?:sera|di\s+sera|stasera)\b", text) is not None
+    if 1 <= hour <= 11 and has_evening_marker:
+        return hour + 12
+    if 6 <= hour <= 11 and not has_morning_marker:
+        return hour + 12
+    return hour
+
+
 def _extract_local_customer_name(message: str) -> str | None:
     """Fast path prudente: accetta solo risposte che sembrano essere un nome puro."""
     raw = re.sub(r"[.!?,;:]+$", "", message.strip())
@@ -606,6 +622,7 @@ def _extract_local_pickup_time(message: str) -> str | None:
             elif minute_word:
                 minute = 15
             if 0 <= hour <= 23 and 0 <= minute <= 59:
+                hour = _apply_evening_pickup_hour_rule(hour, compact)
                 return f"{hour}:{minute:02d}"
 
     word_pattern = "|".join(sorted(_ITALIAN_HOUR_WORDS, key=len, reverse=True))
@@ -624,6 +641,7 @@ def _extract_local_pickup_time(message: str) -> str | None:
             hour = _ITALIAN_HOUR_WORDS[word_match.group(1)]
             minute_word = word_match.group(2)
             minute = 30 if minute_word in {"mezza", "mezzo"} else 15 if minute_word else 0
+            hour = _apply_evening_pickup_hour_rule(hour, compact)
             return f"{hour}:{minute:02d}"
 
     return None
@@ -711,25 +729,19 @@ def enrich_items_with_pricing(
     return enriched_items, total_amount
 
 
-def _run_order_side_effects(payload: dict[str, Any]) -> None:
-    """Sincronizza servizi esterni senza far fallire il turno voce."""
-    started_at = time.perf_counter()
-    order_number = payload["order_number"]
-
-    try:
+def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
+    if kind == "base44_order":
         save_order_to_base44(
             customer_name=payload["customer_name"],
             customer_phone=payload["customer_phone"],
             pickup_time=payload["pickup_time"],
-            order_number=order_number,
+            order_number=payload["order_number"],
             ai_confidence=payload["ai_confidence"],
             items=payload["items"],
         )
-        print(f"[SideEffects] Base44 ordine #{order_number} sincronizzato")
-    except Exception as exc:
-        print(f"[SideEffects] Base44 errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+        return
 
-    try:
+    if kind == "whatsapp_confirmation":
         print(
             f"[SMS] Tentativo invio async: phone={payload['customer_phone']!r} "
             f"name={payload['customer_name']!r}"
@@ -741,10 +753,9 @@ def _run_order_side_effects(payload: dict[str, Any]) -> None:
             items=payload["items"],
             total_amount=payload["total_amount"],
         )
-    except Exception as exc:
-        print(f"[SideEffects] WhatsApp errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+        return
 
-    try:
+    if kind == "customer_upsert":
         if payload["customer_name"]:
             upsert_customer(
                 full_name=payload["customer_name"],
@@ -752,15 +763,119 @@ def _run_order_side_effects(payload: dict[str, Any]) -> None:
                 pizzas=payload["pizza_names"],
                 total_amount=payload["total_amount"],
             )
-    except Exception as exc:
-        print(f"[SideEffects] Customer errore ordine #{order_number}: {type(exc).__name__}: {exc}")
+        return
 
+    raise ValueError(f"Side effect sconosciuto: {kind}")
+
+
+def _run_order_side_effects(payload: dict[str, Any]) -> None:
+    """Compatibilità/test: esegue i side effect senza persistenza outbox."""
+    started_at = time.perf_counter()
+    order_number = payload["order_number"]
+    side_effects = [
+        ("base44_order", payload),
+        ("whatsapp_confirmation", payload),
+        ("customer_upsert", payload),
+    ]
+    for kind, item_payload in side_effects:
+        try:
+            _execute_order_side_effect(kind, item_payload)
+            print(f"[SideEffects] {kind} ordine #{order_number} completato")
+        except Exception as exc:
+            print(f"[SideEffects] {kind} errore ordine #{order_number}: {type(exc).__name__}: {exc}")
     elapsed_ms = round((time.perf_counter() - started_at) * 1000)
     print(f"[SideEffects] ordine #{order_number} completato elapsed_ms={elapsed_ms}")
 
 
+def _side_effect_retry_delay(attempts: int) -> float:
+    return min(_SIDE_EFFECT_RETRY_BASE_SECONDS * (2 ** max(attempts - 1, 0)), _SIDE_EFFECT_RETRY_MAX_SECONDS)
+
+
+def _process_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> None:
+    if delay_seconds > 0:
+        time.sleep(delay_seconds)
+
+    with Session(_db_engine) as db_session:
+        job = db_session.get(OrderSideEffect, job_id)
+        if not job or job.status == "done":
+            return
+        if job.status == "failed" and job.attempts >= _SIDE_EFFECT_MAX_ATTEMPTS:
+            return
+
+        now = time.time()
+        if job.next_attempt_at and job.next_attempt_at > now and job.status != "running":
+            _schedule_order_side_effect_job(job.id, job.next_attempt_at - now)
+            return
+
+        job.status = "running"
+        job.attempts += 1
+        job.updated_at = now
+        db_session.add(job)
+        db_session.commit()
+
+        try:
+            payload = json.loads(job.payload_json)
+            _execute_order_side_effect(job.kind, payload)
+        except Exception as exc:
+            now = time.time()
+            job = db_session.get(OrderSideEffect, job_id)
+            if not job:
+                return
+            job.last_error = f"{type(exc).__name__}: {exc}"
+            job.updated_at = now
+            if job.attempts >= _SIDE_EFFECT_MAX_ATTEMPTS:
+                job.status = "failed"
+                print(f"[SideEffects] job={job_id} kind={job.kind} fallito definitivamente: {job.last_error}")
+            else:
+                job.status = "retry"
+                job.next_attempt_at = now + _side_effect_retry_delay(job.attempts)
+                print(
+                    f"[SideEffects] job={job_id} kind={job.kind} retry "
+                    f"attempt={job.attempts} next={int(job.next_attempt_at - now)}s error={job.last_error}"
+                )
+                _schedule_order_side_effect_job(job.id, job.next_attempt_at - now)
+            db_session.add(job)
+            db_session.commit()
+            return
+
+        now = time.time()
+        job = db_session.get(OrderSideEffect, job_id)
+        if not job:
+            return
+        job.status = "done"
+        job.last_error = None
+        job.next_attempt_at = 0.0
+        job.updated_at = now
+        db_session.add(job)
+        db_session.commit()
+        print(f"[SideEffects] job={job_id} kind={job.kind} completato")
+
+
+def _schedule_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> None:
+    _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_process_order_side_effect_job, job_id, delay_seconds)
+
+
+def recover_order_side_effects(limit: int = 100) -> int:
+    """Riaccoda job pendenti/running dopo restart del processo."""
+    now = time.time()
+    with Session(_db_engine) as db_session:
+        jobs = db_session.exec(
+            select(OrderSideEffect).where(OrderSideEffect.status.in_(["pending", "retry", "running"]))
+        ).all()
+
+    scheduled = 0
+    for job in jobs[:limit]:
+        delay = 0.0 if job.status == "running" else max(0.0, (job.next_attempt_at or 0.0) - now)
+        _schedule_order_side_effect_job(job.id, delay)
+        scheduled += 1
+    if scheduled:
+        print(f"[SideEffects] recuperati {scheduled} job pendenti")
+    return scheduled
+
+
 def _enqueue_order_side_effects(
     *,
+    session: Session,
     customer_name: str,
     customer_phone: str | None,
     pickup_time: str,
@@ -770,18 +885,53 @@ def _enqueue_order_side_effects(
     total_amount: float,
     pizza_names: list[str],
 ) -> None:
-    payload = {
-        "customer_name": customer_name,
-        "customer_phone": customer_phone,
-        "pickup_time": pickup_time,
-        "order_number": order_number,
-        "ai_confidence": ai_confidence,
-        "items": copy.deepcopy(items),
-        "total_amount": total_amount,
-        "pizza_names": list(pizza_names),
-    }
-    _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_run_order_side_effects, payload)
-    print(f"[SideEffects] ordine #{order_number} accodato")
+    now = time.time()
+    item_payload = copy.deepcopy(items)
+    job_specs = [
+        ("base44_order", {
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "pickup_time": pickup_time,
+            "order_number": order_number,
+            "ai_confidence": ai_confidence,
+            "items": item_payload,
+        }),
+        ("whatsapp_confirmation", {
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "pickup_time": pickup_time,
+            "items": item_payload,
+            "total_amount": total_amount,
+        }),
+    ]
+    if customer_name:
+        job_specs.append(("customer_upsert", {
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "pizza_names": list(pizza_names),
+            "total_amount": total_amount,
+        }))
+
+    jobs: list[OrderSideEffect] = []
+    for kind, payload in job_specs:
+        job = OrderSideEffect(
+            order_number=order_number,
+            kind=kind,
+            payload_json=json.dumps(payload, ensure_ascii=False),
+            status="pending",
+            attempts=0,
+            next_attempt_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(job)
+        jobs.append(job)
+    session.commit()
+
+    for job in jobs:
+        session.refresh(job)
+        _schedule_order_side_effect_job(job.id)
+    print(f"[SideEffects] ordine #{order_number} accodato: {len(jobs)} job")
 
 
 def determine_state(
@@ -1285,6 +1435,7 @@ def chat(request: ChatRequest, session: SessionDep):
             if order_created:
                 pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
                 _enqueue_order_side_effects(
+                    session=session,
                     customer_name=merged_order["customer_name"],
                     customer_phone=conversation.customer_phone,
                     pickup_time=merged_order["pickup_time"],
@@ -1969,6 +2120,7 @@ def chat(request: ChatRequest, session: SessionDep):
         if order_created:
             pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
             _enqueue_order_side_effects(
+                session=session,
                 customer_name=merged_order["customer_name"],
                 customer_phone=conversation.customer_phone,
                 pickup_time=merged_order["pickup_time"],

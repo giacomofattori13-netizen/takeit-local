@@ -447,6 +447,20 @@
       sessionIdEl.textContent = sessionId || "nessuna";
     }
 
+    function getAdminHeaders(extraHeaders = {}) {
+      let apiKey = localStorage.getItem("takeit_admin_api_key");
+      if (!apiKey) {
+        apiKey = window.prompt("API key amministrativa");
+        if (apiKey) {
+          localStorage.setItem("takeit_admin_api_key", apiKey);
+        }
+      }
+      return {
+        ...extraHeaders,
+        "X-Admin-Api-Key": apiKey || "",
+      };
+    }
+
     function resetSummary() {
       stateBadgeEl.textContent = "nessuno";
       stateBadgeEl.className = "badge";
@@ -677,9 +691,16 @@
       }
 
       try {
-        await fetch(`/sessions/${currentSessionId}`, {
-          method: "DELETE"
+        const res = await fetch(`/sessions/${currentSessionId}`, {
+          method: "DELETE",
+          headers: getAdminHeaders(),
         });
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 503) {
+            localStorage.removeItem("takeit_admin_api_key");
+          }
+          throw new Error(`Reset failed: ${res.status}`);
+        }
 
         setSession(null);
         chatEl.innerHTML = "";

@@ -3,7 +3,7 @@ import unittest
 from sqlmodel import SQLModel, Session, create_engine, select
 
 import app.routes.chat as chat_module
-from app.models import ConversationSession, MenuItem, Order, OrderItem
+from app.models import ConversationSession, MenuItem, Order, OrderItem, OrderSideEffect
 from app.routes.chat import (
     _extract_local_customer_name,
     _extract_local_pickup_time,
@@ -117,7 +117,8 @@ class ChatLogicTests(unittest.TestCase):
         self.assertIsNone(_extract_local_customer_name("sono io"))
 
     def test_local_pickup_time_parses_simple_times_only(self):
-        self.assertEqual(_extract_local_pickup_time("alle 8 e mezza"), "8:30")
+        self.assertEqual(_extract_local_pickup_time("alle 8 e mezza"), "20:30")
+        self.assertEqual(_extract_local_pickup_time("alle 8 e mezza di mattina"), "8:30")
         self.assertEqual(_extract_local_pickup_time("prima possibile"), "prima_possibile")
         self.assertIsNone(_extract_local_pickup_time("alle 8 e aggiungi una margherita"))
 
@@ -206,6 +207,47 @@ class ChatLogicTests(unittest.TestCase):
             ("send", 7.5),
             ("upsert", ["Margherita"]),
         ])
+
+    def test_enqueue_order_side_effects_persists_recoverable_jobs(self):
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+        scheduled = []
+        original_schedule = chat_module._schedule_order_side_effect_job
+
+        def fake_schedule(job_id, delay_seconds=0.0):
+            scheduled.append((job_id, delay_seconds))
+
+        chat_module._schedule_order_side_effect_job = fake_schedule
+        try:
+            with Session(engine) as session:
+                chat_module._enqueue_order_side_effects(
+                    session=session,
+                    customer_name="Mario",
+                    customer_phone="+393331234567",
+                    pickup_time="20:00",
+                    order_number=42,
+                    ai_confidence=0.95,
+                    items=[{
+                        "pizza_name": "Margherita",
+                        "pizza_type": "Normale",
+                        "quantity": 1,
+                        "base_price": 7.5,
+                        "extras_price": 0.0,
+                        "total_price": 7.5,
+                    }],
+                    total_amount=7.5,
+                    pizza_names=["Margherita"],
+                )
+                jobs = session.exec(select(OrderSideEffect)).all()
+        finally:
+            chat_module._schedule_order_side_effect_job = original_schedule
+
+        self.assertEqual(
+            {job.kind for job in jobs},
+            {"base44_order", "whatsapp_confirmation", "customer_upsert"},
+        )
+        self.assertEqual({job.status for job in jobs}, {"pending"})
+        self.assertEqual(len(scheduled), 3)
 
     def test_persist_order_once_is_idempotent_per_conversation(self):
         engine = create_engine("sqlite://")
