@@ -47,6 +47,7 @@ from app.services.conversation_service import (
     lookup_customer,
     upsert_customer,
 )
+from app.telemetry import record_latency
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -670,6 +671,7 @@ def _log_chat_timing(
     **fields: Any,
 ) -> None:
     elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    record_latency("chat", path, elapsed_ms, **fields)
     details = " ".join(f"{key}={value}" for key, value in fields.items())
     suffix = f" {details}" if details else ""
     print(f"[Latency] chat path={path} session={session_id} elapsed_ms={elapsed_ms}{suffix}")

@@ -126,6 +126,8 @@ Usare `--fail-fast` durante il debug rapido e più `--case-id` quando si vuole i
   - generazione TTS,
   - round-trip completo turno voce.
 - Aggiungere `request_id/session_id` in tutti i log per correlare gli step.
+- L'endpoint admin `GET /logs/latency` espone una finestra rolling in memoria
+  con `count`, `min_ms`, `p50_ms`, `p95_ms`, `p99_ms` e `max_ms` per path chat/LLM.
 
 ### 7) Ottimizzazione del fallback voce
 - Mantenere `Polly` come fallback immediato quando ElevenLabs non è pronto.
