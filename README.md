@@ -22,6 +22,7 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 - `VOICE_AUDIO_CACHE_TTL_SECONDS`: TTL opzionale della cache audio ElevenLabs, default 24 ore.
 - `VOICE_AUDIO_CACHE_MAX_ITEMS`: limite opzionale di entry audio cached in memoria, default 128.
 - `CUSTOMER_LOOKUP_TIMEOUT_SECONDS`: timeout opzionale per lookup cliente Base44 prima del saluto, default 1s.
+- `CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS`: timeout HTTP opzionale per il fetch profilo cliente, default 2s.
 
 ## Modello dati
 - `MenuItem`: anagrafica del menu.
