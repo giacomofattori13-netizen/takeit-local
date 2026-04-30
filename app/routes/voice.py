@@ -38,6 +38,7 @@ _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
 # Cache in memoria: testo → filename MP3. Evita chiamate ripetute a ElevenLabs.
 _AUDIO_CACHE: dict[str, str] = {}
+_AUDIO_CACHE_META: dict[str, dict[str, float | bool]] = {}
 
 # Streaming: testo registrato per essere servito via /voice/stream/{id}
 # Twilio richiede l'audio DOPO aver ricevuto il TwiML, quindi non dobbiamo
@@ -125,6 +126,106 @@ def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _audio_cache_ttl_seconds() -> float:
+    return _positive_float_env("VOICE_AUDIO_CACHE_TTL_SECONDS", 24 * 60 * 60)
+
+
+def _audio_cache_max_items() -> int:
+    return _positive_int_env("VOICE_AUDIO_CACHE_MAX_ITEMS", 128)
+
+
+def _drop_audio_cache_entry(text: str, *, remove_file: bool = True) -> None:
+    filename = _AUDIO_CACHE.pop(text, None)
+    _AUDIO_CACHE_META.pop(text, None)
+    if remove_file and filename:
+        try:
+            (AUDIO_DIR / filename).unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[ElevenLabs] Errore rimozione cache audio {filename}: {type(exc).__name__}: {exc}")
+
+
+def _prune_audio_cache(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    ttl_seconds = _audio_cache_ttl_seconds()
+
+    for text, filename in list(_AUDIO_CACHE.items()):
+        meta = _AUDIO_CACHE_META.get(text, {})
+        path = AUDIO_DIR / filename
+        is_pinned = bool(meta.get("pinned", False))
+        created_at = float(meta.get("created_at", now))
+        if not path.exists() or (not is_pinned and now - created_at > ttl_seconds):
+            _drop_audio_cache_entry(text)
+
+    max_items = _audio_cache_max_items()
+    overflow = len(_AUDIO_CACHE) - max_items
+    if overflow <= 0:
+        return
+
+    candidates = [
+        (
+            float(_AUDIO_CACHE_META.get(text, {}).get("last_used_at", 0.0)),
+            text,
+        )
+        for text in _AUDIO_CACHE
+        if not bool(_AUDIO_CACHE_META.get(text, {}).get("pinned", False))
+    ]
+    for _, text in sorted(candidates)[:overflow]:
+        _drop_audio_cache_entry(text)
+
+
+def _audio_cache_get(text: str) -> str | None:
+    filename = _AUDIO_CACHE.get(text)
+    if not filename:
+        return None
+    path = AUDIO_DIR / filename
+    now = time.time()
+    meta = _AUDIO_CACHE_META.get(text, {})
+    is_pinned = bool(meta.get("pinned", False))
+    created_at = float(meta.get("created_at", now))
+    if not path.exists() or (not is_pinned and now - created_at > _audio_cache_ttl_seconds()):
+        _drop_audio_cache_entry(text)
+        return None
+    meta["last_used_at"] = now
+    _AUDIO_CACHE_META[text] = meta
+    return filename
+
+
+def _audio_cache_put(text: str, filename: str, *, pinned: bool = False) -> str:
+    now = time.time()
+    previous = _AUDIO_CACHE_META.get(text, {})
+    old_filename = _AUDIO_CACHE.get(text)
+    created_at = previous.get("created_at", now) if old_filename == filename else now
+    _AUDIO_CACHE[text] = filename
+    _AUDIO_CACHE_META[text] = {
+        "created_at": float(created_at),
+        "last_used_at": now,
+        "pinned": bool(pinned or previous.get("pinned", False)),
+    }
+    if old_filename and old_filename != filename:
+        try:
+            (AUDIO_DIR / old_filename).unlink(missing_ok=True)
+        except OSError as exc:
+            print(f"[ElevenLabs] Errore rimozione vecchia cache audio {old_filename}: {type(exc).__name__}: {exc}")
+    _prune_audio_cache(now)
+    return filename
+
+
 async def _verify_twilio_request(request: Request) -> None:
     """Verifica X-Twilio-Signature sui webhook voce.
 
@@ -194,14 +295,15 @@ def _italian_title(full_name: str) -> str:
     return f"il signor {full_name}"
 
 
-def _synthesize(text: str) -> str | None:
+def _synthesize(text: str, *, pinned: bool = False) -> str | None:
     """Chiama ElevenLabs TTS (sync). Controlla la cache prima.
     Usata solo per il prewarm all'avvio; i route handler usano _synthesize_async."""
-    if text in _AUDIO_CACHE:
-        cached = _AUDIO_CACHE[text]
-        if (AUDIO_DIR / cached).exists():
-            print(f"[ElevenLabs] Cache hit: {text!r}")
-            return cached
+    cached = _audio_cache_get(text)
+    if cached:
+        print(f"[ElevenLabs] Cache hit: {text!r}")
+        if pinned:
+            _audio_cache_put(text, cached, pinned=True)
+        return cached
 
     api_key = os.getenv("ELEVENLABS_API_KEY")
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
@@ -227,7 +329,7 @@ def _synthesize(text: str) -> str | None:
         filename = f"{uuid.uuid4()}.mp3"
         (AUDIO_DIR / filename).write_bytes(resp.content)
         print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
-        return filename
+        return _audio_cache_put(text, filename, pinned=pinned)
     except httpx.TimeoutException as e:
         print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
         return None
@@ -239,13 +341,14 @@ def _synthesize(text: str) -> str | None:
         return None
 
 
-async def _synthesize_async(text: str) -> str | None:
+async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
     """Chiama ElevenLabs TTS (async). Controlla la cache prima."""
-    if text in _AUDIO_CACHE:
-        cached = _AUDIO_CACHE[text]
-        if (AUDIO_DIR / cached).exists():
-            print(f"[ElevenLabs] Cache hit: {text!r}")
-            return cached
+    cached = _audio_cache_get(text)
+    if cached:
+        print(f"[ElevenLabs] Cache hit: {text!r}")
+        if pinned:
+            _audio_cache_put(text, cached, pinned=True)
+        return cached
 
     api_key = os.getenv("ELEVENLABS_API_KEY")
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
@@ -271,7 +374,7 @@ async def _synthesize_async(text: str) -> str | None:
         filename = f"{uuid.uuid4()}.mp3"
         (AUDIO_DIR / filename).write_bytes(resp.content)
         print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
-        return filename
+        return _audio_cache_put(text, filename, pinned=pinned)
     except httpx.TimeoutException as e:
         print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
         return None
@@ -295,12 +398,11 @@ async def _audio_element_async(text: str) -> str:
     print(f"[TTS] Testo finale: {text!r}")
 
     # Cache hit: file già pronto su disco → nessuna latenza ElevenLabs
-    if text in _AUDIO_CACHE:
-        cached = _AUDIO_CACHE[text]
-        if (AUDIO_DIR / cached).exists():
-            print(f"[ElevenLabs] Cache hit: {text!r}")
-            url = f"{_public_base_url()}/voice/audio/{cached}"
-            return f"<Play>{escape(url)}</Play>"
+    cached = _audio_cache_get(text)
+    if cached:
+        print(f"[ElevenLabs] Cache hit: {text!r}")
+        url = f"{_public_base_url()}/voice/audio/{cached}"
+        return f"<Play>{escape(url)}</Play>"
 
     # ElevenLabs non configurato → fallback Polly (nessuna latenza di rete)
     if not os.getenv("ELEVENLABS_API_KEY") or not os.getenv("ELEVENLABS_VOICE_ID"):
@@ -324,9 +426,8 @@ def prewarm_audio_cache() -> None:
     print(f"[ElevenLabs] Prewarm di {len(_CACHED_PHRASES)} frasi frequenti...")
     cached_count = 0
     for phrase in _CACHED_PHRASES:
-        filename = _synthesize(phrase)
+        filename = _synthesize(phrase, pinned=True)
         if filename:
-            _AUDIO_CACHE[phrase] = filename
             cached_count += 1
             print(f"[ElevenLabs] Cached: {phrase!r} → {filename}")
         else:
@@ -421,8 +522,9 @@ async def _prefetch_openai_connection() -> None:
 
 def _filler_audio_element() -> str:
     """<Play> del filler dalla cache, o <Say> come fallback. Sempre sync (cache-only)."""
-    if _FILLER_PHRASE in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[_FILLER_PHRASE]).exists():
-        url = f"{_public_base_url()}/voice/audio/{_AUDIO_CACHE[_FILLER_PHRASE]}"
+    cached = _audio_cache_get(_FILLER_PHRASE)
+    if cached:
+        url = f"{_public_base_url()}/voice/audio/{cached}"
         return f"<Play>{escape(url)}</Play>"
     return f'<Say voice="{_POLLY_FALLBACK}">{escape(_FILLER_PHRASE)}</Say>'
 
@@ -430,7 +532,7 @@ def _filler_audio_element() -> str:
 async def _build_response_twiml(result, session_id: str) -> str:
     """Costruisce il TwiML finale dal risultato di chat()."""
     reply = result.response_message
-    cache_hit = reply in _AUDIO_CACHE and (AUDIO_DIR / _AUDIO_CACHE[reply]).exists()
+    cache_hit = _audio_cache_get(reply) is not None
     print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
     if result.state == "completed":
         audio = await _audio_element_async(reply)

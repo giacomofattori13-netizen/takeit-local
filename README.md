@@ -19,6 +19,8 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 - `SKIP_TWILIO_SIGNATURE_VALIDATION=true`: solo sviluppo locale, disattiva la verifica firma Twilio.
 - `PUBLIC_BASE_URL`: URL pubblico usato per ricostruire la firma Twilio e generare gli URL audio.
 - `SQL_ECHO=true`: abilita il log SQL dettagliato solo quando serve debugging.
+- `VOICE_AUDIO_CACHE_TTL_SECONDS`: TTL opzionale della cache audio ElevenLabs, default 24 ore.
+- `VOICE_AUDIO_CACHE_MAX_ITEMS`: limite opzionale di entry audio cached in memoria, default 128.
 
 ## Modello dati
 - `MenuItem`: anagrafica del menu.
@@ -111,6 +113,7 @@ Usare `--fail-fast` durante il debug rapido e più `--case-id` quando si vuole i
 ### 4) Caching aggressivo TTS e frasi frequenti
 - Estendere il prewarm di frasi ad alta frequenza e varianti orarie.
 - Introdurre cache LRU con TTL per audio e pulizia periodica file vecchi in `/tmp/takeit_audio`.
+- La cache voce usa TTL/LRU e mantiene pinned le frasi di prewarm più frequenti.
 
 ### 5) Parallelismo controllato
 - Quando possibile, eseguire in parallelo:
