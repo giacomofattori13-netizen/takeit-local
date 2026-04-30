@@ -21,6 +21,7 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 - `SQL_ECHO=true`: abilita il log SQL dettagliato solo quando serve debugging.
 - `VOICE_AUDIO_CACHE_TTL_SECONDS`: TTL opzionale della cache audio ElevenLabs, default 24 ore.
 - `VOICE_AUDIO_CACHE_MAX_ITEMS`: limite opzionale di entry audio cached in memoria, default 128.
+- `CUSTOMER_LOOKUP_TIMEOUT_SECONDS`: timeout opzionale per lookup cliente Base44 prima del saluto, default 1s.
 
 ## Modello dati
 - `MenuItem`: anagrafica del menu.
@@ -121,6 +122,7 @@ Usare `--fail-fast` durante il debug rapido e più `--case-id` quando si vuole i
   - normalizzazione input,
   - preparazione risposta TTS.
 - Evitare blocchi CPU nel thread principale (spostare eventuali task pesanti in worker dedicati).
+- Il lookup cliente è time-boxed: se Base44 è lento, il saluto parte senza profilo e la chiamata resta fluida.
 
 ### 6) Telemetria obbligatoria per trovare i veri colli di bottiglia
 - Misurare e loggare p50/p95/p99 per:

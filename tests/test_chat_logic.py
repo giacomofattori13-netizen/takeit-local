@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from sqlmodel import SQLModel, Session, create_engine, select
@@ -16,6 +17,15 @@ from app.routes.chat import (
 
 
 class ChatLogicTests(unittest.TestCase):
+    def setUp(self):
+        self.previous_lookup_timeout = os.environ.get("CUSTOMER_LOOKUP_TIMEOUT_SECONDS")
+
+    def tearDown(self):
+        if self.previous_lookup_timeout is None:
+            os.environ.pop("CUSTOMER_LOOKUP_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = self.previous_lookup_timeout
+
     def test_merge_same_item_accumulates_quantity(self):
         existing = [{
             "pizza_name": "Margherita",
@@ -290,6 +300,31 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(first_order.id, second_order.id)
         self.assertEqual(len(orders), 1)
         self.assertEqual(len(items), 1)
+
+    def test_customer_lookup_future_timeout_does_not_block_start(self):
+        os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = "0.25"
+
+        class SlowFuture:
+            cancelled = False
+            timeout_seen = None
+
+            def result(self, timeout=None):
+                self.timeout_seen = timeout
+                raise chat_module.FutureTimeoutError()
+
+            def cancel(self):
+                self.cancelled = True
+
+        future = SlowFuture()
+
+        customer = chat_module._resolve_customer_lookup_future(
+            future,
+            "+393331234567",
+        )
+
+        self.assertIsNone(customer)
+        self.assertTrue(future.cancelled)
+        self.assertEqual(future.timeout_seen, 0.25)
 
 
 if __name__ == "__main__":

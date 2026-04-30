@@ -11,6 +11,7 @@ from app.routes.voice import (
     _audio_cache_put,
     _needs_filler,
     _prune_audio_cache,
+    _resolve_customer_lookup_task,
 )
 
 
@@ -18,6 +19,7 @@ class VoiceLogicTests(unittest.TestCase):
     def setUp(self):
         self.previous_ttl = os.environ.get("VOICE_AUDIO_CACHE_TTL_SECONDS")
         self.previous_max = os.environ.get("VOICE_AUDIO_CACHE_MAX_ITEMS")
+        self.previous_lookup_timeout = os.environ.get("CUSTOMER_LOOKUP_TIMEOUT_SECONDS")
         _AUDIO_CACHE.clear()
         _AUDIO_CACHE_META.clear()
         self.created_files = []
@@ -35,6 +37,10 @@ class VoiceLogicTests(unittest.TestCase):
             os.environ.pop("VOICE_AUDIO_CACHE_MAX_ITEMS", None)
         else:
             os.environ["VOICE_AUDIO_CACHE_MAX_ITEMS"] = self.previous_max
+        if self.previous_lookup_timeout is None:
+            os.environ.pop("CUSTOMER_LOOKUP_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = self.previous_lookup_timeout
 
     def _write_audio_file(self, filename: str):
         path = AUDIO_DIR / filename
@@ -140,6 +146,30 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertEqual(result, filename)
         self.assertEqual(_AUDIO_CACHE["Ok!"], filename)
         self.assertTrue((AUDIO_DIR / filename).exists())
+
+    def test_customer_lookup_task_timeout_returns_none(self):
+        os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = "0.001"
+
+        async def run_lookup():
+            task = voice_module.asyncio.create_task(voice_module.asyncio.sleep(10))
+            result = await _resolve_customer_lookup_task(task, "+393331234567")
+            return result, task.cancelled()
+
+        result, cancelled = voice_module.asyncio.run(run_lookup())
+
+        self.assertIsNone(result)
+        self.assertTrue(cancelled)
+
+    def test_customer_lookup_task_returns_profile(self):
+        async def run_lookup():
+            task = voice_module.asyncio.create_task(
+                voice_module.asyncio.sleep(0, result={"full_name": "Mario Rossi"})
+            )
+            return await _resolve_customer_lookup_task(task, "+393331234567")
+
+        result = voice_module.asyncio.run(run_lookup())
+
+        self.assertEqual(result, {"full_name": "Mario Rossi"})
 
 
 if __name__ == "__main__":
