@@ -42,6 +42,30 @@ BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 INGREDIENT_EXTRA_PRICE = 2.0
 SIZE_MINI_DISCOUNT = 1.50
 SIZE_DOPPIO_SURCHARGE = 2.00
+CUSTOMER_LOOKUP_HTTP_TIMEOUT_DEFAULT_SECONDS = 2.0
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _customer_lookup_http_timeout_seconds() -> float:
+    return _positive_float_env(
+        "CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS",
+        CUSTOMER_LOOKUP_HTTP_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
+def _mask_phone(phone: str | None) -> str:
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return "unknown"
+    visible = digits[-4:]
+    return f"{'*' * max(len(digits) - len(visible), 0)}{visible}"
 
 
 def reset_menu_cache() -> None:
@@ -921,27 +945,33 @@ def lookup_customer(phone: str) -> dict | None:
     Scarica tutti i Customer e filtra in Python (Base44 non supporta query params).
     Restituisce il primo match (o None). Usa lookup_all_customers per i duplicati.
     """
-    matches = _fetch_customers_by_phone(phone)
+    matches = _fetch_customers_by_phone(
+        phone,
+        timeout_seconds=_customer_lookup_http_timeout_seconds(),
+    )
     return matches[0] if matches else None
 
 
-def _fetch_customers_by_phone(phone: str) -> list[dict]:
+def _fetch_customers_by_phone(
+    phone: str,
+    timeout_seconds: float = 10.0,
+) -> list[dict]:
     """Restituisce TUTTI i record Customer con quel numero di telefono."""
-    print(f"[Customer] Inizio lookup per {phone!r}")
+    masked_phone = _mask_phone(phone)
+    print(f"[Customer] Inizio lookup per {masked_phone}")
     token = os.getenv("BASE44_TOKEN")
     if not token:
         print("[Customer] BASE44_TOKEN non configurato, lookup saltato")
         return []
 
     try:
-        print(f"[Customer] GET {BASE44_CUSTOMER_URL}")
+        print(f"[Customer] GET {BASE44_CUSTOMER_URL} timeout={timeout_seconds}s")
         response = httpx.get(
             BASE44_CUSTOMER_URL,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
+            timeout=timeout_seconds,
         )
         print(f"[Customer] HTTP {response.status_code}")
-        print(f"[Customer] Body raw: {response.text[:800]}")
         response.raise_for_status()
         data = response.json()
         entities = data.get("entities", []) if isinstance(data, dict) else data
@@ -950,12 +980,11 @@ def _fetch_customers_by_phone(phone: str) -> list[dict]:
             return []
         print(f"[Customer] Totale record: {len(entities)}")
         phone_norm = re.sub(r"[\s\-\(\)]", "", phone)
-        print(f"[Customer] Cerco phone normalizzato: {phone_norm!r}")
+        print(f"[Customer] Cerco phone normalizzato: {_mask_phone(phone_norm)}")
         matches = []
         for record in entities:
             rec_phone_raw = record.get("phone") or ""
             rec_phone = re.sub(r"[\s\-\(\)]", "", rec_phone_raw)
-            print(f"[Customer]   record phone raw={rec_phone_raw!r} norm={rec_phone!r}")
             if rec_phone == phone_norm:
                 matches.append(record)
         print(f"[Customer] Match trovati: {len(matches)}")
