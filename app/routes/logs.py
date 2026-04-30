@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 from app.db import get_session
 from app.models import ConversationLog
 from app.security import require_admin_api_key
+from app.telemetry import get_latency_snapshot
 
 router = APIRouter(
     prefix="/logs",
@@ -15,6 +16,11 @@ router = APIRouter(
 )
 
 SessionDep = Annotated[Session, Depends(get_session)]
+
+
+@router.get("/latency")
+def latency_metrics():
+    return get_latency_snapshot()
 
 
 @router.get("/")

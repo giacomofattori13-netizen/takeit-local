@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.telemetry import record_latency
+
 load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
@@ -1663,9 +1665,26 @@ def extract_order_from_text(
         )
     except Exception as e:
         _elapsed_ms = int((time.time() - _t0) * 1000)
+        record_latency(
+            "llm",
+            "extract_order",
+            _elapsed_ms,
+            state=state,
+            model=MODEL_NAME,
+            result="error",
+            error_type=type(e).__name__,
+        )
         print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} ERROR={type(e).__name__}: {e} → fallback Ok!")
         return _fallback_extracted_payload()
     _elapsed_ms = int((time.time() - _t0) * 1000)
+    record_latency(
+        "llm",
+        "extract_order",
+        _elapsed_ms,
+        state=state,
+        model=MODEL_NAME,
+        result="ok",
+    )
     _usage = response.usage
     _tokens_in = getattr(_usage, "prompt_tokens", -1)
     _cached = getattr(getattr(_usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
