@@ -51,6 +51,7 @@ _FILLER_PHRASE = "Un momento..."
 _pending_responses: dict[str, asyncio.Task] = {}  # session_id → Task[ChatResponse]
 _filler_last_played: dict[str, float] = {}        # session_id → epoch dell'ultimo filler
 _FILLER_COOLDOWN = 20.0                            # secondi minimi tra un filler e il successivo
+_CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS = 1.0
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
@@ -148,6 +149,29 @@ def _audio_cache_ttl_seconds() -> float:
 
 def _audio_cache_max_items() -> int:
     return _positive_int_env("VOICE_AUDIO_CACHE_MAX_ITEMS", 128)
+
+
+def _customer_lookup_timeout_seconds() -> float:
+    return _positive_float_env(
+        "CUSTOMER_LOOKUP_TIMEOUT_SECONDS",
+        _CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
+async def _resolve_customer_lookup_task(
+    lookup_task: asyncio.Task | None,
+    phone: str | None,
+) -> dict | None:
+    if lookup_task is None:
+        return None
+    try:
+        return await asyncio.wait_for(lookup_task, timeout=_customer_lookup_timeout_seconds())
+    except asyncio.TimeoutError:
+        lookup_task.cancel()
+        print(f"[Customer] Lookup timeout per {phone!r}, saluto senza profilo")
+    except Exception as exc:
+        print(f"[Customer] Lookup errore per {phone!r}: {type(exc).__name__}: {exc}")
+    return None
 
 
 def _drop_audio_cache_entry(text: str, *, remove_file: bool = True) -> None:
@@ -638,7 +662,7 @@ async def voice_incoming(
     lookup_task = None
     if caller_phone:
         print(f"[Voice] Customer lookup per {caller_phone}")
-        lookup_task = asyncio.to_thread(lookup_customer, caller_phone)
+        lookup_task = asyncio.create_task(asyncio.to_thread(lookup_customer, caller_phone))
 
     session_id = str(uuid.uuid4())
     conversation = ConversationSession(
@@ -655,27 +679,26 @@ async def voice_incoming(
     greeting = get_agent_greeting()
 
     # Attendi il lookup (si sovrappone alle operazioni DB sopra)
-    if lookup_task is not None:
-        customer = await lookup_task
-        if customer:
-            found_name = (customer.get("full_name") or "").strip()
-            if found_name:
-                print(f"[Voice] Cliente trovato: {found_name}")
-                # Saluta direttamente per nome — il numero è conferma sufficiente
-                first_name = found_name.split()[0]
-                greeting = f"Ciao {first_name}! Come posso aiutarti?"
-                conversation.customer_name = found_name
-                # Salva le pizze preferite per il flusso "solite"
-                raw_fav = customer.get("favorite_pizzas") or []
-                if isinstance(raw_fav, str):
-                    raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
-                conversation.favorite_pizzas_json = json.dumps(raw_fav[:5], ensure_ascii=False)
-                session.add(conversation)
-                session.commit()
-            else:
-                print("[Voice] Cliente non trovato")
+    customer = await _resolve_customer_lookup_task(lookup_task, caller_phone)
+    if customer:
+        found_name = (customer.get("full_name") or "").strip()
+        if found_name:
+            print(f"[Voice] Cliente trovato: {found_name}")
+            # Saluta direttamente per nome — il numero è conferma sufficiente
+            first_name = found_name.split()[0]
+            greeting = f"Ciao {first_name}! Come posso aiutarti?"
+            conversation.customer_name = found_name
+            # Salva le pizze preferite per il flusso "solite"
+            raw_fav = customer.get("favorite_pizzas") or []
+            if isinstance(raw_fav, str):
+                raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
+            conversation.favorite_pizzas_json = json.dumps(raw_fav[:5], ensure_ascii=False)
+            session.add(conversation)
+            session.commit()
         else:
             print("[Voice] Cliente non trovato")
+    elif caller_phone:
+        print("[Voice] Cliente non trovato")
 
     print(f"[Voice] Saluto: {greeting!r}")
 

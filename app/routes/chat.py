@@ -1,11 +1,12 @@
 import copy
 import json
+import os
 import random
 import time
 import unicodedata
 import uuid
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from typing import Annotated, Any
 
@@ -57,6 +58,35 @@ _ORDER_SIDE_EFFECTS_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 _SIDE_EFFECT_MAX_ATTEMPTS = 5
 _SIDE_EFFECT_RETRY_BASE_SECONDS = 30.0
 _SIDE_EFFECT_RETRY_MAX_SECONDS = 15 * 60.0
+_CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS = 1.0
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _customer_lookup_timeout_seconds() -> float:
+    return _positive_float_env(
+        "CUSTOMER_LOOKUP_TIMEOUT_SECONDS",
+        _CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
+def _resolve_customer_lookup_future(lookup_future, phone: str | None) -> dict | None:
+    if lookup_future is None:
+        return None
+    try:
+        return lookup_future.result(timeout=_customer_lookup_timeout_seconds())
+    except FutureTimeoutError:
+        lookup_future.cancel()
+        print(f"[Customer] Lookup timeout per {phone!r}, saluto senza profilo")
+    except Exception as exc:
+        print(f"[Customer] Lookup errore per {phone!r}: {type(exc).__name__}: {exc}")
+    return None
 
 
 def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
@@ -1298,7 +1328,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     # Riconoscimento cliente dal numero di telefono
     greeting = get_agent_greeting()
     if lookup_future is not None:
-        customer = lookup_future.result()
+        customer = _resolve_customer_lookup_future(lookup_future, phone)
         if customer:
             found_name = customer.get("full_name", "").strip()
             if found_name:
