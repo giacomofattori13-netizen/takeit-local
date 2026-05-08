@@ -18,30 +18,18 @@ from app.routes.owner_command import router as owner_command_router
 from app.routes.voice import router as voice_router, prewarm_audio_cache
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant, prewarm_system_prompt
+from app.startup_migrations import apply_startup_column_migrations
 
 app = FastAPI(title="TakeIt Local Core")
 
 
 @app.on_event("startup")
 def on_startup():
-    for migration_sql in [
-        "ALTER TABLE conversationsession ADD COLUMN customer_phone VARCHAR",
-        "ALTER TABLE conversationsession ADD COLUMN intended_quantity INTEGER",
-        "ALTER TABLE conversationsession ADD COLUMN pending_customer_name VARCHAR",
-        "ALTER TABLE conversationsession ADD COLUMN favorite_pizzas_json VARCHAR DEFAULT '[]'",
-        "ALTER TABLE conversationsession ADD COLUMN no_input_count INTEGER DEFAULT 0",
-        'ALTER TABLE "order" ADD COLUMN conversation_session_id VARCHAR',
-        "ALTER TABLE orderitem ADD COLUMN dough_type VARCHAR DEFAULT 'classica'",
-        "ALTER TABLE orderitem ADD COLUMN size VARCHAR DEFAULT 'normale'",
-    ]:
-        try:
-            with engine.connect() as conn:
-                conn.execute(text(migration_sql))
-                conn.commit()
-        except Exception:
-            pass  # colonna già esistente
-
     create_db_and_tables()
+    applied_migrations = apply_startup_column_migrations(engine)
+    if applied_migrations:
+        print(f"[Startup] Migrazioni DB applicate: {applied_migrations}")
+
     try:
         with engine.connect() as conn:
             conn.execute(text(
