@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.privacy import mask_phone
 from app.telemetry import record_latency
 
 load_dotenv()
@@ -58,14 +59,6 @@ def _customer_lookup_http_timeout_seconds() -> float:
         "CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS",
         CUSTOMER_LOOKUP_HTTP_TIMEOUT_DEFAULT_SECONDS,
     )
-
-
-def _mask_phone(phone: str | None) -> str:
-    digits = re.sub(r"\D", "", phone or "")
-    if not digits:
-        return "unknown"
-    visible = digits[-4:]
-    return f"{'*' * max(len(digits) - len(visible), 0)}{visible}"
 
 
 def reset_menu_cache() -> None:
@@ -325,7 +318,8 @@ def save_order_to_base44(
         "items": base44_items,
     }
 
-    print(f"[Base44] Payload inviato: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+    log_payload = {**payload, "customer_phone": mask_phone(customer_phone)}
+    print(f"[Base44] Payload inviato: {json.dumps(log_payload, ensure_ascii=False, indent=2)}")
 
     try:
         response = httpx.post(
@@ -336,11 +330,11 @@ def save_order_to_base44(
             timeout=10,
         )
         print(f"[Base44] Status code: {response.status_code}")
-        print(f"[Base44] Response body: {response.text}")
+        print(f"[Base44] Response body_len={len(response.text)}")
         response.raise_for_status()
         print(f"[Base44] Ordine sincronizzato, id={response.json().get('id')}")
     except httpx.HTTPStatusError as e:
-        print(f"[Base44] HTTP error {e.response.status_code}: {e.response.text}")
+        print(f"[Base44] HTTP error {e.response.status_code}: body_len={len(e.response.text)}")
         return
     except Exception as e:
         print(f"[Base44] Errore generico: {type(e).__name__}: {e}")
@@ -400,13 +394,13 @@ def _send_sms(
     """Invia SMS di conferma ordine (canale principale).
     Restituisce 'sms_inviato:<status>', 'sms_skip:<motivo>', 'sms_errore:<msg>'."""
     raw_sms_from = os.getenv("TWILIO_NUMBER")
-    print(f"[SMS] TWILIO_NUMBER={raw_sms_from!r}")
+    print(f"[SMS] TWILIO_NUMBER={mask_phone(raw_sms_from)}")
     if not raw_sms_from:
         print("[SMS] TWILIO_NUMBER non configurato, skip")
         return "sms_skip:TWILIO_NUMBER_mancante"
 
     sms_from = raw_sms_from.removeprefix("whatsapp:")
-    print(f"[SMS] From={sms_from!r} To={phone!r}")
+    print(f"[SMS] From={mask_phone(sms_from)} To={mask_phone(phone)}")
 
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
     pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
@@ -437,12 +431,12 @@ def _send_sms(
             data={"From": sms_from, "To": phone, "Body": body},
             timeout=10,
         )
-        print(f"[SMS] Risposta Twilio: status={resp.status_code} body={resp.text[:500]}")
+        print(f"[SMS] Risposta Twilio: status={resp.status_code} body_len={len(resp.text)}")
         resp.raise_for_status()
-        print(f"[SMS] Inviato con successo a {phone!r}")
+        print(f"[SMS] Inviato con successo a {mask_phone(phone)}")
         return f"sms_inviato:{resp.status_code}"
     except httpx.HTTPStatusError as e:
-        print(f"[SMS] Errore HTTP {e.response.status_code}: {e.response.text}")
+        print(f"[SMS] Errore HTTP {e.response.status_code}: body_len={len(e.response.text)}")
         return f"sms_errore:HTTP_{e.response.status_code}"
     except Exception as e:
         import traceback
@@ -467,7 +461,10 @@ def _send_whatsapp(
     content_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
     content_variables = json.dumps({"1": pizzeria_name, "2": pickup_time})
 
-    print(f"[WhatsApp] POST Messages.json → From={wa_from!r} To={wa_to!r}")
+    print(
+        f"[WhatsApp] POST Messages.json → "
+        f"From={mask_phone(wa_from)} To={mask_phone(wa_to)}"
+    )
     print(f"[WhatsApp] ContentSid={content_sid} ContentVariables={content_variables}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
@@ -482,12 +479,12 @@ def _send_whatsapp(
             },
             timeout=10,
         )
-        print(f"[WhatsApp] Risposta: status={response.status_code} body={response.text}")
+        print(f"[WhatsApp] Risposta: status={response.status_code} body_len={len(response.text)}")
         response.raise_for_status()
         print(f"[WhatsApp] Inviato con successo")
         return f"wa_inviato:{response.status_code}"
     except httpx.HTTPStatusError as e:
-        print(f"[WhatsApp] Errore HTTP {e.response.status_code}: {e.response.text}")
+        print(f"[WhatsApp] Errore HTTP {e.response.status_code}: body_len={len(e.response.text)}")
         return f"wa_errore:HTTP_{e.response.status_code}"
     except Exception as e:
         import traceback
@@ -511,16 +508,24 @@ def send_whatsapp_confirmation(
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
     print(f"[Conferma] === INIZIO INVIO CONFERMA ORDINE ===")
-    print(f"[Conferma] customer_name={customer_name!r} customer_phone={customer_phone!r}")
+    print(f"[Conferma] customer_name={customer_name!r} customer_phone={mask_phone(customer_phone)}")
     print(f"[Conferma] pickup_time={pickup_time!r} total_amount={total_amount} items={len(items)}")
-    print(f"[Conferma] ACCOUNT_SID={'✓' if account_sid else '✗'} AUTH_TOKEN={'✓' if auth_token else '✗'} TWILIO_NUMBER={os.getenv('TWILIO_NUMBER')!r} TWILIO_WHATSAPP_FROM={wa_from_number!r}")
+    print(
+        f"[Conferma] ACCOUNT_SID={'✓' if account_sid else '✗'} "
+        f"AUTH_TOKEN={'✓' if auth_token else '✗'} "
+        f"TWILIO_NUMBER={mask_phone(os.getenv('TWILIO_NUMBER'))} "
+        f"TWILIO_WHATSAPP_FROM={mask_phone(wa_from_number)}"
+    )
 
     if not all([account_sid, auth_token]):
         print(f"[Conferma] Credenziali Twilio mancanti, skip")
         return "skip:credenziali_mancanti"
 
     phone = _normalize_phone(customer_phone)
-    print(f"[Conferma] Numero raw={customer_phone!r} → normalizzato={phone!r}")
+    print(
+        f"[Conferma] Numero raw={mask_phone(customer_phone)} "
+        f"→ normalizzato={mask_phone(phone)}"
+    )
     if not phone:
         print(f"[Conferma] Numero non valido o fisso, skip invio")
         return "skip:numero_non_valido"
@@ -957,7 +962,7 @@ def _fetch_customers_by_phone(
     timeout_seconds: float = 10.0,
 ) -> list[dict]:
     """Restituisce TUTTI i record Customer con quel numero di telefono."""
-    masked_phone = _mask_phone(phone)
+    masked_phone = mask_phone(phone)
     print(f"[Customer] Inizio lookup per {masked_phone}")
     token = os.getenv("BASE44_TOKEN")
     if not token:
@@ -980,7 +985,7 @@ def _fetch_customers_by_phone(
             return []
         print(f"[Customer] Totale record: {len(entities)}")
         phone_norm = re.sub(r"[\s\-\(\)]", "", phone)
-        print(f"[Customer] Cerco phone normalizzato: {_mask_phone(phone_norm)}")
+        print(f"[Customer] Cerco phone normalizzato: {mask_phone(phone_norm)}")
         matches = []
         for record in entities:
             rec_phone_raw = record.get("phone") or ""
@@ -1036,7 +1041,10 @@ def upsert_customer(
     # Deduplicazione: se ci sono più record con lo stesso phone, tieni quello
     # con più ordini e cancella gli altri, sommandone i dati.
     if len(all_matches) > 1:
-        print(f"[Customer] Trovati {len(all_matches)} duplicati per {phone!r} — unificazione in corso")
+        print(
+            f"[Customer] Trovati {len(all_matches)} duplicati per "
+            f"{mask_phone(phone)} — unificazione in corso"
+        )
         all_matches.sort(key=lambda r: int(r.get("total_orders") or 0), reverse=True)
         primary = all_matches[0]
         duplicates = all_matches[1:]

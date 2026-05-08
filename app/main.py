@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from app.db import create_db_and_tables, engine
+from app.privacy import mask_phone
 from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
 from app.routes.chat import recover_order_side_effects
@@ -67,8 +68,11 @@ def on_startup():
     _wa_from_raw = os.environ.get("TWILIO_WHATSAPP_FROM")
     _wa_from_clean = _wa_from_raw.removeprefix("whatsapp:") if _wa_from_raw else None
     _twilio_number = os.environ.get("TWILIO_NUMBER")
-    print(f"[Startup] TWILIO_WHATSAPP_FROM raw={_wa_from_raw!r} → clean={_wa_from_clean!r}")
-    print(f"[Startup] TWILIO_NUMBER={_twilio_number!r}")
+    print(
+        f"[Startup] TWILIO_WHATSAPP_FROM raw={mask_phone(_wa_from_raw)} "
+        f"→ clean={mask_phone(_wa_from_clean)}"
+    )
+    print(f"[Startup] TWILIO_NUMBER={mask_phone(_twilio_number)}")
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")

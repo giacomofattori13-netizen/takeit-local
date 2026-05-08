@@ -17,6 +17,7 @@ from sqlmodel import Session
 
 from app.db import get_session, engine as _db_engine
 from app.models import ConversationSession
+from app.privacy import mask_phone
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
     build_closed_message,
@@ -168,9 +169,9 @@ async def _resolve_customer_lookup_task(
         return await asyncio.wait_for(lookup_task, timeout=_customer_lookup_timeout_seconds())
     except asyncio.TimeoutError:
         lookup_task.cancel()
-        print(f"[Customer] Lookup timeout per {phone!r}, saluto senza profilo")
+        print(f"[Customer] Lookup timeout per {mask_phone(phone)}, saluto senza profilo")
     except Exception as exc:
-        print(f"[Customer] Lookup errore per {phone!r}: {type(exc).__name__}: {exc}")
+        print(f"[Customer] Lookup errore per {mask_phone(phone)}: {type(exc).__name__}: {exc}")
     return None
 
 
@@ -642,7 +643,7 @@ async def voice_incoming(
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
     await _verify_twilio_request(request)
     caller_phone = From.strip() or None
-    print(f"[Voice] Chiamata in arrivo da: {caller_phone!r}")
+    print(f"[Voice] Chiamata in arrivo da: {mask_phone(caller_phone)}")
 
     # Controlla agent_active prima di qualsiasi altra operazione
     if not is_agent_active():
@@ -661,7 +662,7 @@ async def voice_incoming(
     # prima ancora della sessione DB, così i ~500ms di Base44 si sovrappongono.
     lookup_task = None
     if caller_phone:
-        print(f"[Voice] Customer lookup per {caller_phone}")
+        print(f"[Voice] Customer lookup per {mask_phone(caller_phone)}")
         lookup_task = asyncio.create_task(asyncio.to_thread(lookup_customer, caller_phone))
 
     session_id = str(uuid.uuid4())
@@ -739,8 +740,9 @@ async def voice_gather(
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
     _phone = _conv.customer_phone if _conv else "NOT FOUND"
+    _masked_phone = mask_phone(_phone)
     _state = _conv.state if _conv else "N/A"
-    print(f"[Voice] Sessione {session_id}: customer_phone={_phone!r} stato={_state!r}")
+    print(f"[Voice] Sessione {session_id}: customer_phone={_masked_phone} stato={_state!r}")
 
     if not speech:
         count = (_conv.no_input_count or 0) + 1 if _conv else 1
@@ -801,10 +803,10 @@ async def voice_gather(
                     result = chat(chat_request, _db)
                 print(
                     f"[Voice] _chat_bg completato: session={session_id!r} stato={result.state!r} "
-                    f"order_id={result.order_id!r} phone={_phone!r}"
+                    f"order_id={result.order_id!r} phone={_masked_phone}"
                 )
                 if result.state == "completed":
-                    print(f"[SMS] Tentativo invio dopo filler: session={session_id!r} phone={_phone!r}")
+                    print(f"[SMS] Tentativo invio dopo filler: session={session_id!r} phone={_masked_phone}")
                 return result
             except Exception as exc:
                 print(f"[Voice] _chat_bg ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
@@ -825,7 +827,7 @@ async def voice_gather(
         else:
             _filler_el = ""
         print(
-            f"[Voice] Filler path: task avviato per session={session_id!r} phone={_phone!r} "
+            f"[Voice] Filler path: task avviato per session={session_id!r} phone={_masked_phone} "
             f"filler={'ON' if _cooldown_ok else f'SKIP (cooldown {int(_FILLER_COOLDOWN - (_now - _last))}s)'}"
         )
         twiml = (

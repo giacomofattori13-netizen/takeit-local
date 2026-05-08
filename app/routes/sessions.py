@@ -7,6 +7,7 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.models import ConversationSession
+from app.privacy import mask_phone
 from app.schemas import SessionCreateRequest, SessionCreateResponse, SessionRead
 from app.security import require_admin_api_key
 
@@ -17,8 +18,11 @@ SessionDep = Annotated[Session, Depends(get_session)]
 
 @router.post("/", response_model=SessionCreateResponse)
 def create_session(body: SessionCreateRequest, session: SessionDep):
-    print(f"[Session] POST /sessions/ body={body.model_dump()}")
-    print(f"[Session] Body ricevuto: {body}")
+    print(
+        "[Session] POST /sessions/ "
+        f"caller_phone={mask_phone(body.caller_phone)} "
+        f"test_phone={mask_phone(body.test_phone)}"
+    )
     new_session_id = str(uuid.uuid4())
 
     conversation = ConversationSession(
