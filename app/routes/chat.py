@@ -27,6 +27,7 @@ from app.models import (
     ConversationSession,
     ConversationLog,
 )
+from app.privacy import mask_phone
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
 from app.services.conversation_service import (
     build_closed_message,
@@ -83,9 +84,9 @@ def _resolve_customer_lookup_future(lookup_future, phone: str | None) -> dict | 
         return lookup_future.result(timeout=_customer_lookup_timeout_seconds())
     except FutureTimeoutError:
         lookup_future.cancel()
-        print(f"[Customer] Lookup timeout per {phone!r}, saluto senza profilo")
+        print(f"[Customer] Lookup timeout per {mask_phone(phone)}, saluto senza profilo")
     except Exception as exc:
-        print(f"[Customer] Lookup errore per {phone!r}: {type(exc).__name__}: {exc}")
+        print(f"[Customer] Lookup errore per {mask_phone(phone)}: {type(exc).__name__}: {exc}")
     return None
 
 
@@ -775,7 +776,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
 
     if kind == "whatsapp_confirmation":
         print(
-            f"[SMS] Tentativo invio async: phone={payload['customer_phone']!r} "
+            f"[SMS] Tentativo invio async: phone={mask_phone(payload['customer_phone'])} "
             f"name={payload['customer_name']!r}"
         )
         send_whatsapp_confirmation(
@@ -1291,7 +1292,7 @@ def _persist_order_once(
 
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
-    print(f"[ChatStart] Body ricevuto: {body}")
+    print(f"[ChatStart] test_phone={mask_phone(body.test_phone)}")
     if not is_agent_active():
         print("[Chat] agent_active=False → rifiuto start_chat")
         return ChatStartResponse(
@@ -1308,7 +1309,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     # si sovrappongono alle operazioni di commit locale.
     lookup_future = None
     if phone:
-        print(f"[Customer] Avvio lookup in parallelo per {phone!r}")
+        print(f"[Customer] Avvio lookup in parallelo per {mask_phone(phone)}")
         lookup_future = _CUSTOMER_LOOKUP_EXECUTOR.submit(lookup_customer, phone)
 
     conversation = ConversationSession(
@@ -1323,7 +1324,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     session.add(conversation)
     session.commit()
     session.refresh(conversation)
-    print(f"[Customer] customer_phone in sessione: {conversation.customer_phone!r}")
+    print(f"[Customer] customer_phone in sessione: {mask_phone(conversation.customer_phone)}")
 
     # Riconoscimento cliente dal numero di telefono
     greeting = get_agent_greeting()
