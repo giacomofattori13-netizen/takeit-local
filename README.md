@@ -10,7 +10,7 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 - Logica di conversazione e sincronizzazione dati in `app/services/`.
 
 ## Entry point
-- `app/main.py` avvia l'app FastAPI, monta statici, registra i router e svolge operazioni di startup (migrazioni SQL "best effort", sync menu, preload prompt/audio, check variabili Twilio).
+- `app/main.py` avvia l'app FastAPI, monta statici, registra i router e svolge operazioni di startup (migrazioni SQL idempotenti, sync menu, preload prompt/audio, check variabili Twilio).
 
 ## Variabili ambiente operative
 - `OPENAI_API_KEY`: richiesta quando l'agente deve chiamare OpenAI.
@@ -37,9 +37,9 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 
 ## Criticità individuate
 
-1. **Migrazioni fragili in startup**
-   - In `app/main.py` le ALTER TABLE sono tentate e poi ignorate in caso d'errore con `except Exception: pass`.
-   - Rischio: errori reali (schema inconsistente, lock DB, SQL errata) vengono nascosti.
+1. **Migrazioni ancora non versionate**
+   - Le migrazioni legacy in startup sono idempotenti e non ignorano più gli errori inattesi.
+   - Rischio residuo: manca ancora una storia di schema versionata e riproducibile come Alembic.
 
 2. **README storico vuoto / documentazione insufficiente**
    - Prima di questo aggiornamento il README conteneva solo il titolo, senza setup, architettura né workflow.
@@ -58,8 +58,8 @@ Backend FastAPI per gestione menu, ordini, sessioni conversazionali e integrazio
 - **Deliverable**: patch di copy + test snapshot dei messaggi principali.
 
 ### 2) Correggere un bug
-- **Attività**: introdurre migrazioni versionate (Alembic) e rimuovere il pattern `except Exception: pass` dalle ALTER TABLE in startup.
-- **Deliverable**: script migration idempotenti, logging errori esplicito e fallback controllato.
+- **Attività**: introdurre migrazioni versionate (Alembic) sopra l'attuale helper idempotente di startup.
+- **Deliverable**: baseline migration, versionamento dello schema e procedura di upgrade/rollback.
 
 ### 3) Correggere un commento o discrepanza documentale
 - **Attività**: mantenere il README allineato con gli endpoint reali e con le dipendenze runtime (Twilio/Base44), includendo sezione "come avviare" e "variabili ambiente richieste".
