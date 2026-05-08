@@ -522,13 +522,16 @@
 
         const res = await fetch("/tts/", {
           method: "POST",
-          headers: {
+          headers: getAdminHeaders({
             "Content-Type": "application/json"
-          },
+          }),
           body: JSON.stringify({ text })
         });
 
         if (!res.ok) {
+          if (res.status === 401 || res.status === 503) {
+            localStorage.removeItem("takeit_admin_api_key");
+          }
           throw new Error("Errore TTS backend");
         }
 
