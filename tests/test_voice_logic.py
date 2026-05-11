@@ -3,6 +3,7 @@ import time
 import unittest
 
 import app.routes.voice as voice_module
+from app.privacy import describe_text_for_log
 from app.routes.voice import (
     AUDIO_DIR,
     _AUDIO_CACHE,
@@ -10,7 +11,6 @@ from app.routes.voice import (
     _audio_cache_get,
     _audio_cache_put,
     _cleanup_stale_pending_responses,
-    _describe_text_for_log,
     _needs_filler,
     _pending_response_created_at,
     _pending_responses,
@@ -110,7 +110,7 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertFalse(first.exists())
 
     def test_describe_text_for_log_does_not_include_raw_text(self):
-        label = _describe_text_for_log("Mario ordina una margherita")
+        label = describe_text_for_log("Mario ordina una margherita")
 
         self.assertIn("chars=", label)
         self.assertIn("sha256=", label)
