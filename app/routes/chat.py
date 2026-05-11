@@ -848,6 +848,16 @@ def _process_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> N
 
         try:
             payload = json.loads(job.payload_json)
+        except json.JSONDecodeError as exc:
+            job.status = "failed"
+            job.last_error = f"JSONDecodeError: {exc}"
+            job.updated_at = time.time()
+            db_session.add(job)
+            db_session.commit()
+            print(f"[SideEffects] job={job_id} kind={job.kind} payload_json corrotto, fallito definitivamente: {job.last_error}")
+            return
+
+        try:
             _execute_order_side_effect(job.kind, payload)
         except Exception as exc:
             now = time.time()

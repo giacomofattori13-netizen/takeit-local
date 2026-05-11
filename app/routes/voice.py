@@ -467,13 +467,14 @@ def prewarm_audio_cache() -> None:
 @router.get("/audio/{filename}")
 def serve_audio(filename: str):
     """Serve i file MP3 generati da ElevenLabs a Twilio."""
-    # Blocca path traversal: accetta solo UUID.mp3
-    if not filename.endswith(".mp3") or "/" in filename or ".." in filename:
+    if not filename.endswith(".mp3"):
         raise HTTPException(status_code=400, detail="Invalid filename")
-    path = AUDIO_DIR / filename
-    if not path.exists():
+    resolved = (AUDIO_DIR / filename).resolve()
+    if not str(resolved).startswith(str(AUDIO_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not resolved.exists():
         raise HTTPException(status_code=404, detail="Audio not found")
-    return FileResponse(path, media_type="audio/mpeg")
+    return FileResponse(resolved, media_type="audio/mpeg")
 
 
 @router.get("/stream/{stream_id}")
@@ -743,9 +744,21 @@ async def voice_gather(
 
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
-    _phone = _conv.customer_phone if _conv else "NOT FOUND"
+    if _conv is None:
+        print(f"[Voice] voice_gather: sessione {session_id!r} non trovata, hangup")
+        return Response(
+            content=(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                "<Response>\n"
+                '  <Say voice="Polly.Giorgio">Mi dispiace, sessione non trovata. Arrivederci.</Say>\n'
+                "  <Hangup/>\n"
+                "</Response>"
+            ),
+            media_type="application/xml",
+        )
+    _phone = _conv.customer_phone
     _masked_phone = mask_phone(_phone)
-    _state = _conv.state if _conv else "N/A"
+    _state = _conv.state
     print(f"[Voice] Sessione {session_id}: customer_phone={_masked_phone} stato={_state!r}")
 
     if not speech:
