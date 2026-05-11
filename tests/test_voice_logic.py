@@ -9,7 +9,11 @@ from app.routes.voice import (
     _AUDIO_CACHE_META,
     _audio_cache_get,
     _audio_cache_put,
+    _cleanup_stale_pending_responses,
+    _describe_text_for_log,
     _needs_filler,
+    _pending_response_created_at,
+    _pending_responses,
     _prune_audio_cache,
     _resolve_customer_lookup_task,
 )
@@ -20,8 +24,11 @@ class VoiceLogicTests(unittest.TestCase):
         self.previous_ttl = os.environ.get("VOICE_AUDIO_CACHE_TTL_SECONDS")
         self.previous_max = os.environ.get("VOICE_AUDIO_CACHE_MAX_ITEMS")
         self.previous_lookup_timeout = os.environ.get("CUSTOMER_LOOKUP_TIMEOUT_SECONDS")
+        self.previous_pending_ttl = os.environ.get("VOICE_PENDING_RESPONSE_TTL_SECONDS")
         _AUDIO_CACHE.clear()
         _AUDIO_CACHE_META.clear()
+        _pending_responses.clear()
+        _pending_response_created_at.clear()
         self.created_files = []
 
     def tearDown(self):
@@ -41,6 +48,12 @@ class VoiceLogicTests(unittest.TestCase):
             os.environ.pop("CUSTOMER_LOOKUP_TIMEOUT_SECONDS", None)
         else:
             os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = self.previous_lookup_timeout
+        if self.previous_pending_ttl is None:
+            os.environ.pop("VOICE_PENDING_RESPONSE_TTL_SECONDS", None)
+        else:
+            os.environ["VOICE_PENDING_RESPONSE_TTL_SECONDS"] = self.previous_pending_ttl
+        _pending_responses.clear()
+        _pending_response_created_at.clear()
 
     def _write_audio_file(self, filename: str):
         path = AUDIO_DIR / filename
@@ -95,6 +108,32 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertNotIn("first", _AUDIO_CACHE)
         self.assertEqual(set(_AUDIO_CACHE), {"second", "third"})
         self.assertFalse(first.exists())
+
+    def test_describe_text_for_log_does_not_include_raw_text(self):
+        label = _describe_text_for_log("Mario ordina una margherita")
+
+        self.assertIn("chars=", label)
+        self.assertIn("sha256=", label)
+        self.assertNotIn("Mario", label)
+        self.assertNotIn("margherita", label)
+
+    def test_cleanup_stale_pending_response_cancels_task(self):
+        os.environ["VOICE_PENDING_RESPONSE_TTL_SECONDS"] = "0.001"
+
+        async def run_cleanup():
+            task = voice_module.asyncio.create_task(voice_module.asyncio.sleep(10))
+            _pending_responses["session-old"] = task
+            _pending_response_created_at["session-old"] = time.time() - 1
+            removed = _cleanup_stale_pending_responses(force=True)
+            await voice_module.asyncio.sleep(0)
+            return removed, task.cancelled()
+
+        removed, cancelled = voice_module.asyncio.run(run_cleanup())
+
+        self.assertEqual(removed, 1)
+        self.assertTrue(cancelled)
+        self.assertNotIn("session-old", _pending_responses)
+        self.assertNotIn("session-old", _pending_response_created_at)
 
     def test_synthesize_async_stores_generated_audio_in_cache(self):
         filename = "generated.mp3"

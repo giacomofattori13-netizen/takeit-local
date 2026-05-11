@@ -52,9 +52,15 @@ _pending_streams: dict[str, tuple[str, float]] = {}  # stream_id → (text, crea
 # chat() parte in background; Twilio riproduce il filler poi chiama /voice/process.
 _FILLER_PHRASE = "Un momento..."
 _pending_responses: dict[str, asyncio.Task] = {}  # session_id → Task[ChatResponse]
+_pending_response_created_at: dict[str, float] = {}
 _filler_last_played: dict[str, float] = {}        # session_id → epoch dell'ultimo filler
 _FILLER_COOLDOWN = 20.0                            # secondi minimi tra un filler e il successivo
 _CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS = 1.0
+_PENDING_RESPONSE_TTL_DEFAULT_SECONDS = 90.0
+_PENDING_RESPONSE_DONE_GRACE_DEFAULT_SECONDS = 30.0
+_pending_response_last_cleanup = 0.0
+_PREWARM_THREAD_STARTED = False
+_PREWARM_THREAD_LOCK = threading.Lock()
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
@@ -146,6 +152,11 @@ def _positive_float_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def _describe_text_for_log(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return f"chars={len(text)} sha256={digest}"
+
+
 def _audio_cache_ttl_seconds() -> float:
     return _positive_float_env("VOICE_AUDIO_CACHE_TTL_SECONDS", 24 * 60 * 60)
 
@@ -159,6 +170,61 @@ def _customer_lookup_timeout_seconds() -> float:
         "CUSTOMER_LOOKUP_TIMEOUT_SECONDS",
         _CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS,
     )
+
+
+def _pending_response_ttl_seconds() -> float:
+    return _positive_float_env(
+        "VOICE_PENDING_RESPONSE_TTL_SECONDS",
+        _PENDING_RESPONSE_TTL_DEFAULT_SECONDS,
+    )
+
+
+def _pending_response_done_grace_seconds() -> float:
+    return _positive_float_env(
+        "VOICE_PENDING_RESPONSE_DONE_GRACE_SECONDS",
+        _PENDING_RESPONSE_DONE_GRACE_DEFAULT_SECONDS,
+    )
+
+
+def _prewarm_request_timeout_seconds() -> float:
+    return _positive_float_env("VOICE_PREWARM_REQUEST_TIMEOUT_SECONDS", 4.0)
+
+
+def _prewarm_total_budget_seconds() -> float:
+    return _positive_float_env("VOICE_PREWARM_TOTAL_BUDGET_SECONDS", 18.0)
+
+
+def _cleanup_stale_pending_responses(*, force: bool = False) -> int:
+    global _pending_response_last_cleanup
+    now = time.time()
+    if not force and now - _pending_response_last_cleanup < 10.0:
+        return 0
+    _pending_response_last_cleanup = now
+
+    ttl = _pending_response_ttl_seconds()
+    removed = 0
+    for session_id, task in list(_pending_responses.items()):
+        created_at = _pending_response_created_at.get(session_id, now)
+        if now - created_at <= ttl:
+            continue
+        current = _pending_responses.pop(session_id, None)
+        _pending_response_created_at.pop(session_id, None)
+        if current is task:
+            removed += 1
+            if not task.done():
+                task.cancel()
+    if removed:
+        print(f"[Voice] Pending filler task scaduti rimossi: {removed}")
+    return removed
+
+
+async def _drop_pending_response_after_grace(session_id: str, task: asyncio.Task) -> None:
+    await asyncio.sleep(_pending_response_done_grace_seconds())
+    current = _pending_responses.get(session_id)
+    if current is task and task.done():
+        _pending_responses.pop(session_id, None)
+        _pending_response_created_at.pop(session_id, None)
+        print(f"[Voice] Pending filler task completato rimosso dopo grace: session={session_id!r}")
 
 
 async def _resolve_customer_lookup_task(
@@ -324,12 +390,12 @@ def _italian_title(full_name: str) -> str:
     return f"il signor {full_name}"
 
 
-def _synthesize(text: str, *, pinned: bool = False) -> str | None:
+def _synthesize(text: str, *, pinned: bool = False, timeout_seconds: float | None = None) -> str | None:
     """Chiama ElevenLabs TTS (sync). Controlla la cache prima.
     Usata solo per il prewarm all'avvio; i route handler usano _synthesize_async."""
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {text!r}")
+        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
         if pinned:
             _audio_cache_put(text, cached, pinned=True)
         return cached
@@ -342,28 +408,29 @@ def _synthesize(text: str, *, pinned: bool = False) -> str | None:
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {"text": text, "model_id": model_id, "language_code": "it"}
-    print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
+    timeout = timeout_seconds or _positive_float_env("ELEVENLABS_TTS_TIMEOUT_SECONDS", 15.0)
+    print(f"[ElevenLabs] POST sync model={model_id} {_describe_text_for_log(text)}")
     try:
         resp = httpx.post(
             url,
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             json=payload,
-            timeout=15,
+            timeout=timeout,
         )
         print(f"[ElevenLabs] HTTP {resp.status_code} size={len(resp.content)}")
         if resp.status_code != 200:
-            print(f"[ElevenLabs] Errore risposta: {resp.text}")
+            print(f"[ElevenLabs] Errore risposta status={resp.status_code}")
             return None
         resp.raise_for_status()
         filename = f"{uuid.uuid4()}.mp3"
         (AUDIO_DIR / filename).write_bytes(resp.content)
         print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
         return _audio_cache_put(text, filename, pinned=pinned)
-    except httpx.TimeoutException as e:
-        print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
+    except httpx.TimeoutException:
+        print(f"[ElevenLabs] Timeout dopo {timeout:g}s — fallback a Polly")
         return None
     except httpx.HTTPStatusError as e:
-        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code}: {e.response.text} — fallback a Polly")
+        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code} — fallback a Polly")
         return None
     except Exception as e:
         print(f"[ElevenLabs] Errore inatteso {type(e).__name__}: {e} — fallback a Polly")
@@ -374,7 +441,7 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
     """Chiama ElevenLabs TTS (async). Controlla la cache prima."""
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {text!r}")
+        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
         if pinned:
             _audio_cache_put(text, cached, pinned=True)
         return cached
@@ -387,9 +454,10 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {"text": text, "model_id": model_id, "language_code": "it"}
-    print(f"[ElevenLabs] POST {url} model={model_id} text={text!r}")
+    timeout = _positive_float_env("ELEVENLABS_TTS_TIMEOUT_SECONDS", 15.0)
+    print(f"[ElevenLabs] POST async model={model_id} {_describe_text_for_log(text)}")
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 url,
                 headers={"xi-api-key": api_key, "Content-Type": "application/json"},
@@ -397,18 +465,18 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
             )
         print(f"[ElevenLabs] HTTP {resp.status_code} size={len(resp.content)}")
         if resp.status_code != 200:
-            print(f"[ElevenLabs] Errore risposta: {resp.text}")
+            print(f"[ElevenLabs] Errore risposta status={resp.status_code}")
             return None
         resp.raise_for_status()
         filename = f"{uuid.uuid4()}.mp3"
         (AUDIO_DIR / filename).write_bytes(resp.content)
         print(f"[ElevenLabs] Audio salvato: {filename} ({len(resp.content)} bytes)")
         return _audio_cache_put(text, filename, pinned=pinned)
-    except httpx.TimeoutException as e:
-        print(f"[ElevenLabs] Timeout dopo 15s: {e} — fallback a Polly")
+    except httpx.TimeoutException:
+        print(f"[ElevenLabs] Timeout dopo {timeout:g}s — fallback a Polly")
         return None
     except httpx.HTTPStatusError as e:
-        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code}: {e.response.text} — fallback a Polly")
+        print(f"[ElevenLabs] HTTPStatusError {e.response.status_code} — fallback a Polly")
         return None
     except Exception as e:
         print(f"[ElevenLabs] Errore inatteso {type(e).__name__}: {e} — fallback a Polly")
@@ -424,12 +492,12 @@ async def _audio_element_async(text: str) -> str:
     lo riceverà in streaming non appena ElevenLabs inizia a generarlo (~200-400ms).
     """
     text = format_time_for_speech(text)
-    print(f"[TTS] Testo finale: {text!r}")
+    print(f"[TTS] Testo finale: {_describe_text_for_log(text)}")
 
     # Cache hit: file già pronto su disco → nessuna latenza ElevenLabs
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {text!r}")
+        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
         url = f"{_public_base_url()}/voice/audio/{cached}"
         return f"<Play>{escape(url)}</Play>"
 
@@ -441,27 +509,58 @@ async def _audio_element_async(text: str) -> str:
     stream_id = str(uuid.uuid4())
     _pending_streams[stream_id] = (text, time.time())
     url = f"{_public_base_url()}/voice/stream/{stream_id}"
-    print(f"[ElevenLabs] Stream registrato {stream_id}: {text!r}")
+    print(f"[ElevenLabs] Stream registrato {stream_id}: {_describe_text_for_log(text)}")
     return f"<Play>{escape(url)}</Play>"
 
 
-def prewarm_audio_cache() -> None:
-    """Pre-genera gli audio più frequenti all'avvio e li mette in cache.
-    Chiamata da main.py on_startup (sync)."""
+def _prewarm_audio_cache_sync() -> None:
+    """Pre-genera gli audio frequenti con un budget totale limitato."""
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         print("[ElevenLabs] Prewarm skip: ELEVENLABS_API_KEY non configurata")
         return
+    deadline = time.monotonic() + _prewarm_total_budget_seconds()
     print(f"[ElevenLabs] Prewarm di {len(_CACHED_PHRASES)} frasi frequenti...")
     cached_count = 0
     for phrase in _CACHED_PHRASES:
-        filename = _synthesize(phrase, pinned=True)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("[ElevenLabs] Prewarm interrotto: budget tempo esaurito")
+            break
+        timeout = min(_prewarm_request_timeout_seconds(), max(0.5, remaining))
+        filename = _synthesize(phrase, pinned=True, timeout_seconds=timeout)
         if filename:
             cached_count += 1
-            print(f"[ElevenLabs] Cached: {phrase!r} → {filename}")
+            print(f"[ElevenLabs] Cached: {_describe_text_for_log(phrase)} → {filename}")
         else:
-            print(f"[ElevenLabs] Prewarm fallito per: {phrase!r}")
+            print(f"[ElevenLabs] Prewarm fallito per: {_describe_text_for_log(phrase)}")
     print(f"[ElevenLabs] Prewarm completato: {cached_count}/{len(_CACHED_PHRASES)} frasi in cache")
+
+
+def prewarm_audio_cache(*, background: bool = True) -> None:
+    """Avvia il prewarm TTS senza bloccare la readiness dell'app."""
+    global _PREWARM_THREAD_STARTED
+    if not background:
+        _prewarm_audio_cache_sync()
+        return
+
+    if not os.getenv("ELEVENLABS_API_KEY"):
+        print("[ElevenLabs] Prewarm skip: ELEVENLABS_API_KEY non configurata")
+        return
+
+    with _PREWARM_THREAD_LOCK:
+        if _PREWARM_THREAD_STARTED:
+            print("[ElevenLabs] Prewarm già avviato")
+            return
+        _PREWARM_THREAD_STARTED = True
+
+    thread = threading.Thread(
+        target=_prewarm_audio_cache_sync,
+        name="voice-audio-prewarm",
+        daemon=True,
+    )
+    thread.start()
+    print("[ElevenLabs] Prewarm avviato in background")
 
 
 @router.get("/audio/{filename}")
@@ -502,7 +601,7 @@ async def stream_audio(stream_id: str):
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     el_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-    print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} text={text!r}")
+    print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} {_describe_text_for_log(text)}")
 
     async def generate():
         try:
@@ -516,8 +615,8 @@ async def stream_audio(stream_id: str):
                     json={"text": text, "model_id": model_id, "language_code": "it"},
                 ) as resp:
                     if resp.status_code != 200:
-                        body = await resp.aread()
-                        print(f"[ElevenLabs] Stream error {resp.status_code}: {body[:200]}")
+                        await resp.aread()
+                        print(f"[ElevenLabs] Stream error status={resp.status_code}")
                         return
                     print(f"[ElevenLabs] Stream {stream_id}: primo chunk in arrivo")
                     async for chunk in resp.aiter_bytes(chunk_size=4096):
@@ -563,7 +662,10 @@ async def _build_response_twiml(result, session_id: str) -> str:
     """Costruisce il TwiML finale dal risultato di chat()."""
     reply = result.response_message
     cache_hit = _audio_cache_get(reply) is not None
-    print(f"[Voice] Risposta agente: {reply!r} stato={result.state!r} cache_hit={cache_hit}")
+    print(
+        f"[Voice] Risposta agente: {_describe_text_for_log(reply)} "
+        f"stato={result.state!r} cache_hit={cache_hit}"
+    )
     if result.state == "completed":
         audio = await _audio_element_async(reply)
         return (
@@ -594,7 +696,9 @@ async def voice_process(request: Request, session_id: str = Query(...)):
     """Chiamato da Twilio dopo il filler audio per collecting_items.
     Attende il risultato del chat() in background e ritorna il TwiML finale."""
     await _verify_twilio_request(request)
+    _cleanup_stale_pending_responses()
     task = _pending_responses.pop(session_id, None)
+    _pending_response_created_at.pop(session_id, None)
     if task is None:
         print(f"[Voice] /process: nessun task per session={session_id!r} (già consumato o scaduto)")
         audio, no_input = await asyncio.gather(
@@ -740,7 +844,7 @@ async def voice_gather(
     from app.routes.chat import chat  # noqa: PLC0415
 
     speech = SpeechResult.strip()
-    print(f"[Voice] Gather session={session_id!r} speech={speech!r}")
+    print(f"[Voice] Gather session={session_id!r} speech={_describe_text_for_log(speech)}")
 
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
@@ -834,8 +938,20 @@ async def voice_gather(
                 print(f"[Voice] _chat_bg ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
                 raise
 
+        _cleanup_stale_pending_responses()
+        previous_task = _pending_responses.get(session_id)
+        if previous_task and not previous_task.done():
+            previous_task.cancel()
+            print(f"[Voice] Filler path: task precedente cancellato per session={session_id!r}")
+
         task = asyncio.create_task(_chat_task())
         _pending_responses[session_id] = task
+        _pending_response_created_at[session_id] = time.time()
+        task.add_done_callback(
+            lambda done_task, sid=session_id: asyncio.create_task(
+                _drop_pending_response_after_grace(sid, done_task)
+            )
+        )
 
         # Cooldown: riproduci il filler solo se sono passati almeno _FILLER_COOLDOWN
         # secondi dall'ultimo filler nella stessa sessione, per evitare che il cliente
