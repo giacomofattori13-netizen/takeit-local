@@ -4,8 +4,6 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from sqlalchemy import text
-
 from app.db import create_db_and_tables, engine
 from app.privacy import mask_phone
 from app.routes.menu import router as menu_router
@@ -19,7 +17,7 @@ from app.routes.owner_command import router as owner_command_router
 from app.routes.voice import router as voice_router, prewarm_audio_cache
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant, prewarm_system_prompt
-from app.startup_migrations import apply_startup_column_migrations
+from app.startup_migrations import apply_startup_column_migrations, ensure_order_idempotency_index
 
 app = FastAPI(title="TakeIt Local Core")
 
@@ -31,17 +29,8 @@ def on_startup():
     if applied_migrations:
         print(f"[Startup] Migrazioni DB applicate: {applied_migrations}")
 
-    try:
-        with engine.connect() as conn:
-            conn.execute(text(
-                'CREATE UNIQUE INDEX IF NOT EXISTS '
-                'ix_order_conversation_session_id_unique '
-                'ON "order" (conversation_session_id) '
-                'WHERE conversation_session_id IS NOT NULL'
-            ))
-            conn.commit()
-    except Exception as e:
-        print(f"[Startup] Errore creazione indice idempotenza ordini: {type(e).__name__}: {e}")
+    if ensure_order_idempotency_index(engine):
+        print("[Startup] Indice idempotenza ordini creato")
 
     recover_order_side_effects()
 

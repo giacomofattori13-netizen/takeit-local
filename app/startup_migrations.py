@@ -55,6 +55,13 @@ STARTUP_COLUMN_MIGRATIONS: tuple[ColumnMigration, ...] = (
     ),
 )
 
+ORDER_IDEMPOTENCY_INDEX_NAME = "ix_order_conversation_session_id_unique"
+ORDER_IDEMPOTENCY_INDEX_DDL = (
+    f"CREATE UNIQUE INDEX IF NOT EXISTS {ORDER_IDEMPOTENCY_INDEX_NAME} "
+    'ON "order" (conversation_session_id) '
+    "WHERE conversation_session_id IS NOT NULL"
+)
+
 
 def apply_startup_column_migrations(
     db_engine: Engine,
@@ -98,3 +105,26 @@ def apply_startup_column_migrations(
             applied.append(f"{migration.table_name}.{migration.column_name}")
 
     return applied
+
+
+def ensure_order_idempotency_index(db_engine: Engine) -> bool:
+    """Ensure the unique partial index used to make order confirmation idempotent."""
+    with db_engine.begin() as conn:
+        inspector = inspect(conn)
+        table_names = set(inspector.get_table_names())
+        if "order" not in table_names:
+            raise RuntimeError("Startup index target table missing: order")
+
+        existing_indexes = {
+            index["name"]
+            for index in inspector.get_indexes("order")
+        }
+        if ORDER_IDEMPOTENCY_INDEX_NAME in existing_indexes:
+            return False
+
+        try:
+            conn.execute(text(ORDER_IDEMPOTENCY_INDEX_DDL))
+        except SQLAlchemyError as exc:
+            raise RuntimeError("Startup index failed: order.conversation_session_id") from exc
+
+    return True
