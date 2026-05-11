@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -40,6 +41,7 @@ _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 # Cache in memoria: testo → filename MP3. Evita chiamate ripetute a ElevenLabs.
 _AUDIO_CACHE: dict[str, str] = {}
 _AUDIO_CACHE_META: dict[str, dict[str, float | bool]] = {}
+_AUDIO_CACHE_LOCK = threading.Lock()
 
 # Streaming: testo registrato per essere servito via /voice/stream/{id}
 # Twilio richiede l'audio DOPO aver ricevuto il TwiML, quindi non dobbiamo
@@ -215,40 +217,42 @@ def _prune_audio_cache(now: float | None = None) -> None:
 
 
 def _audio_cache_get(text: str) -> str | None:
-    filename = _AUDIO_CACHE.get(text)
-    if not filename:
-        return None
-    path = AUDIO_DIR / filename
-    now = time.time()
-    meta = _AUDIO_CACHE_META.get(text, {})
-    is_pinned = bool(meta.get("pinned", False))
-    created_at = float(meta.get("created_at", now))
-    if not path.exists() or (not is_pinned and now - created_at > _audio_cache_ttl_seconds()):
-        _drop_audio_cache_entry(text)
-        return None
-    meta["last_used_at"] = now
-    _AUDIO_CACHE_META[text] = meta
-    return filename
+    with _AUDIO_CACHE_LOCK:
+        filename = _AUDIO_CACHE.get(text)
+        if not filename:
+            return None
+        path = AUDIO_DIR / filename
+        now = time.time()
+        meta = _AUDIO_CACHE_META.get(text, {})
+        is_pinned = bool(meta.get("pinned", False))
+        created_at = float(meta.get("created_at", now))
+        if not path.exists() or (not is_pinned and now - created_at > _audio_cache_ttl_seconds()):
+            _drop_audio_cache_entry(text)
+            return None
+        meta["last_used_at"] = now
+        _AUDIO_CACHE_META[text] = meta
+        return filename
 
 
 def _audio_cache_put(text: str, filename: str, *, pinned: bool = False) -> str:
-    now = time.time()
-    previous = _AUDIO_CACHE_META.get(text, {})
-    old_filename = _AUDIO_CACHE.get(text)
-    created_at = previous.get("created_at", now) if old_filename == filename else now
-    _AUDIO_CACHE[text] = filename
-    _AUDIO_CACHE_META[text] = {
-        "created_at": float(created_at),
-        "last_used_at": now,
-        "pinned": bool(pinned or previous.get("pinned", False)),
-    }
-    if old_filename and old_filename != filename:
-        try:
-            (AUDIO_DIR / old_filename).unlink(missing_ok=True)
-        except OSError as exc:
-            print(f"[ElevenLabs] Errore rimozione vecchia cache audio {old_filename}: {type(exc).__name__}: {exc}")
-    _prune_audio_cache(now)
-    return filename
+    with _AUDIO_CACHE_LOCK:
+        now = time.time()
+        previous = _AUDIO_CACHE_META.get(text, {})
+        old_filename = _AUDIO_CACHE.get(text)
+        created_at = previous.get("created_at", now) if old_filename == filename else now
+        _AUDIO_CACHE[text] = filename
+        _AUDIO_CACHE_META[text] = {
+            "created_at": float(created_at),
+            "last_used_at": now,
+            "pinned": bool(pinned or previous.get("pinned", False)),
+        }
+        if old_filename and old_filename != filename:
+            try:
+                (AUDIO_DIR / old_filename).unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"[ElevenLabs] Errore rimozione vecchia cache audio {old_filename}: {type(exc).__name__}: {exc}")
+        _prune_audio_cache(now)
+        return filename
 
 
 async def _verify_twilio_request(request: Request) -> None:
@@ -797,10 +801,12 @@ async def voice_gather(
     if _needs_filler(speech, _state):
         # Filler path: lancia chat() in background con sessione DB propria,
         # rispondi subito con il filler audio + Redirect a /voice/process.
-        def _chat_bg():
-            try:
+        async def _chat_task():
+            def _run():
                 with Session(_db_engine) as _db:
-                    result = chat(chat_request, _db)
+                    return chat(chat_request, _db)
+            try:
+                result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=25.0)
                 print(
                     f"[Voice] _chat_bg completato: session={session_id!r} stato={result.state!r} "
                     f"order_id={result.order_id!r} phone={_masked_phone}"
@@ -808,11 +814,14 @@ async def voice_gather(
                 if result.state == "completed":
                     print(f"[SMS] Tentativo invio dopo filler: session={session_id!r} phone={_masked_phone}")
                 return result
+            except asyncio.TimeoutError:
+                print(f"[Voice] _chat_bg TIMEOUT session={session_id!r}")
+                raise
             except Exception as exc:
                 print(f"[Voice] _chat_bg ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
                 raise
 
-        task = asyncio.create_task(asyncio.to_thread(_chat_bg))
+        task = asyncio.create_task(_chat_task())
         _pending_responses[session_id] = task
 
         # Cooldown: riproduci il filler solo se sono passati almeno _FILLER_COOLDOWN
@@ -839,15 +848,32 @@ async def voice_gather(
         )
         return Response(content=twiml, media_type="application/xml")
 
-    if _state in _SPECULATIVE_STATES:
-        # Parallelismo speculativo: OpenAI + pre-generazione "Ok!" in parallelo.
-        print(f"[Voice] Parallel speculative: OpenAI + ElevenLabs('Ok!') per stato={_state!r}")
-        result, _ = await asyncio.gather(
-            asyncio.to_thread(chat, chat_request, session),
-            _synthesize_async("Ok!"),
-        )
-    else:
-        result = await asyncio.to_thread(chat, chat_request, session)
+    _timeout_twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        '  <Say voice="Polly.Giorgio">Mi dispiace, riprovare.</Say>\n'
+        "  <Hangup/>\n"
+        "</Response>"
+    )
+    try:
+        if _state in _SPECULATIVE_STATES:
+            # Parallelismo speculativo: OpenAI + pre-generazione "Ok!" in parallelo.
+            print(f"[Voice] Parallel speculative: OpenAI + ElevenLabs('Ok!') per stato={_state!r}")
+            result, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    asyncio.to_thread(chat, chat_request, session),
+                    _synthesize_async("Ok!"),
+                ),
+                timeout=25.0,
+            )
+        else:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(chat, chat_request, session),
+                timeout=25.0,
+            )
+    except asyncio.TimeoutError:
+        print(f"[Voice] voice_gather TIMEOUT session={session_id!r}")
+        return Response(content=_timeout_twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
     if result.state != "completed":

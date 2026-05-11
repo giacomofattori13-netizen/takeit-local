@@ -16,6 +16,10 @@ def sync_menu_to_db() -> int:
         print("[MenuSync] Menu vuoto, DB non aggiornato")
         return 0
 
+    if len(menu) < 5:
+        print(f"[MenuSync] Menu sospettosamente piccolo ({len(menu)} voci), sync annullato per sicurezza")
+        return 0
+
     with Session(engine) as session:
         session.exec(delete(MenuItem))
         for item in menu:
