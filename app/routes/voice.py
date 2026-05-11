@@ -167,6 +167,11 @@ def _customer_lookup_timeout_seconds() -> float:
     )
 
 
+def _run_chat_with_fresh_session(chat_func, chat_request: ChatRequest):
+    with Session(_db_engine) as db:
+        return chat_func(chat_request, db)
+
+
 def _pending_response_ttl_seconds() -> float:
     return _positive_float_env(
         "VOICE_PENDING_RESPONSE_TTL_SECONDS",
@@ -914,11 +919,11 @@ async def voice_gather(
         # Filler path: lancia chat() in background con sessione DB propria,
         # rispondi subito con il filler audio + Redirect a /voice/process.
         async def _chat_task():
-            def _run():
-                with Session(_db_engine) as _db:
-                    return chat(chat_request, _db)
             try:
-                result = await asyncio.wait_for(asyncio.to_thread(_run), timeout=25.0)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(_run_chat_with_fresh_session, chat, chat_request),
+                    timeout=25.0,
+                )
                 print(
                     f"[Voice] _chat_bg completato: session={session_id!r} stato={result.state!r} "
                     f"order_id={result.order_id!r} phone={_masked_phone}"
@@ -985,14 +990,14 @@ async def voice_gather(
             print(f"[Voice] Parallel speculative: OpenAI + ElevenLabs('Ok!') per stato={_state!r}")
             result, _ = await asyncio.wait_for(
                 asyncio.gather(
-                    asyncio.to_thread(chat, chat_request, session),
+                    asyncio.to_thread(_run_chat_with_fresh_session, chat, chat_request),
                     _synthesize_async("Ok!"),
                 ),
                 timeout=25.0,
             )
         else:
             result = await asyncio.wait_for(
-                asyncio.to_thread(chat, chat_request, session),
+                asyncio.to_thread(_run_chat_with_fresh_session, chat, chat_request),
                 timeout=25.0,
             )
     except asyncio.TimeoutError:
