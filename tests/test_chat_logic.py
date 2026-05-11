@@ -259,6 +259,90 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual({job.status for job in jobs}, {"pending"})
         self.assertEqual(len(scheduled), 3)
 
+    def test_schedule_delayed_side_effect_uses_timer_not_worker(self):
+        events = []
+        original_timer = chat_module.threading.Timer
+        original_executor = chat_module._ORDER_SIDE_EFFECTS_EXECUTOR
+        chat_module._ORDER_SIDE_EFFECT_TIMERS.clear()
+
+        class FakeTimer:
+            def __init__(self, delay_seconds, callback):
+                self.delay_seconds = delay_seconds
+                self.callback = callback
+                self.daemon = False
+
+            def start(self):
+                events.append(("timer_start", self.delay_seconds))
+
+            def cancel(self):
+                events.append(("timer_cancel", self.delay_seconds))
+
+        class FakeExecutor:
+            def submit(self, *args, **kwargs):
+                events.append(("executor_submit", args, kwargs))
+
+        chat_module.threading.Timer = FakeTimer
+        chat_module._ORDER_SIDE_EFFECTS_EXECUTOR = FakeExecutor()
+        try:
+            chat_module._schedule_order_side_effect_job(7, delay_seconds=45.0)
+        finally:
+            chat_module.threading.Timer = original_timer
+            chat_module._ORDER_SIDE_EFFECTS_EXECUTOR = original_executor
+            chat_module._ORDER_SIDE_EFFECT_TIMERS.clear()
+
+        self.assertEqual(events, [("timer_start", 45.0)])
+
+    def test_recover_order_side_effects_batches_and_orders_jobs(self):
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+        now = 1_000.0
+        scheduled = []
+        original_engine = chat_module._db_engine
+        original_schedule = chat_module._schedule_order_side_effect_job
+        original_time = chat_module.time.time
+
+        chat_module._db_engine = engine
+        chat_module._schedule_order_side_effect_job = lambda job_id, delay_seconds=0.0: scheduled.append((job_id, delay_seconds))
+        chat_module.time.time = lambda: now
+        try:
+            with Session(engine) as session:
+                due = OrderSideEffect(
+                    order_number=42,
+                    kind="base44_order",
+                    payload_json="{}",
+                    status="pending",
+                    next_attempt_at=now,
+                )
+                mid = OrderSideEffect(
+                    order_number=42,
+                    kind="whatsapp_confirmation",
+                    payload_json="{}",
+                    status="retry",
+                    next_attempt_at=now + 10,
+                )
+                late = OrderSideEffect(
+                    order_number=42,
+                    kind="customer_upsert",
+                    payload_json="{}",
+                    status="retry",
+                    next_attempt_at=now + 30,
+                )
+                session.add(due)
+                session.add(mid)
+                session.add(late)
+                session.commit()
+                expected_order = [due.id, mid.id, late.id]
+
+            recovered = chat_module.recover_order_side_effects(limit=2)
+        finally:
+            chat_module._db_engine = original_engine
+            chat_module._schedule_order_side_effect_job = original_schedule
+            chat_module.time.time = original_time
+
+        self.assertEqual(recovered, 3)
+        self.assertEqual([job_id for job_id, _ in scheduled], expected_order)
+        self.assertEqual([delay for _, delay in scheduled], [0.0, 10.0, 30.0])
+
     def test_persist_order_once_is_idempotent_per_conversation(self):
         engine = create_engine("sqlite://")
         SQLModel.metadata.create_all(engine)

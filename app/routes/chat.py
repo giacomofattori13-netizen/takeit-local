@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import random
+import threading
 import time
 import unicodedata
 import uuid
@@ -56,6 +57,8 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 SessionDep = Annotated[Session, Depends(get_session)]
 _CUSTOMER_LOOKUP_EXECUTOR = ThreadPoolExecutor(max_workers=4)
 _ORDER_SIDE_EFFECTS_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+_ORDER_SIDE_EFFECT_TIMERS: dict[int, threading.Timer] = {}
+_ORDER_SIDE_EFFECT_TIMERS_LOCK = threading.Lock()
 _SIDE_EFFECT_MAX_ATTEMPTS = 5
 _SIDE_EFFECT_RETRY_BASE_SECONDS = 30.0
 _SIDE_EFFECT_RETRY_MAX_SECONDS = 15 * 60.0
@@ -824,10 +827,7 @@ def _side_effect_retry_delay(attempts: int) -> float:
     return min(_SIDE_EFFECT_RETRY_BASE_SECONDS * (2 ** max(attempts - 1, 0)), _SIDE_EFFECT_RETRY_MAX_SECONDS)
 
 
-def _process_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> None:
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
-
+def _process_order_side_effect_job(job_id: int) -> None:
     with Session(_db_engine) as db_session:
         job = db_session.get(OrderSideEffect, job_id)
         if not job or job.status == "done":
@@ -876,9 +876,10 @@ def _process_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> N
                     f"[SideEffects] job={job_id} kind={job.kind} retry "
                     f"attempt={job.attempts} next={int(job.next_attempt_at - now)}s error={job.last_error}"
                 )
-                _schedule_order_side_effect_job(job.id, job.next_attempt_at - now)
             db_session.add(job)
             db_session.commit()
+            if job.status == "retry":
+                _schedule_order_side_effect_job(job.id, max(0.0, job.next_attempt_at - time.time()))
             return
 
         now = time.time()
@@ -895,22 +896,57 @@ def _process_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> N
 
 
 def _schedule_order_side_effect_job(job_id: int, delay_seconds: float = 0.0) -> None:
-    _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_process_order_side_effect_job, job_id, delay_seconds)
+    delay_seconds = max(0.0, delay_seconds)
+    with _ORDER_SIDE_EFFECT_TIMERS_LOCK:
+        old_timer = _ORDER_SIDE_EFFECT_TIMERS.pop(job_id, None)
+        if old_timer:
+            old_timer.cancel()
+
+    if delay_seconds <= 0:
+        _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_process_order_side_effect_job, job_id)
+        return
+
+    def _submit_due_job() -> None:
+        with _ORDER_SIDE_EFFECT_TIMERS_LOCK:
+            _ORDER_SIDE_EFFECT_TIMERS.pop(job_id, None)
+        _ORDER_SIDE_EFFECTS_EXECUTOR.submit(_process_order_side_effect_job, job_id)
+
+    timer = threading.Timer(delay_seconds, _submit_due_job)
+    timer.daemon = True
+    with _ORDER_SIDE_EFFECT_TIMERS_LOCK:
+        _ORDER_SIDE_EFFECT_TIMERS[job_id] = timer
+    timer.start()
 
 
 def recover_order_side_effects(limit: int = 100) -> int:
-    """Riaccoda job pendenti/running dopo restart del processo."""
-    now = time.time()
-    with Session(_db_engine) as db_session:
-        jobs = db_session.exec(
-            select(OrderSideEffect).where(OrderSideEffect.status.in_(["pending", "retry", "running"]))
-        ).all()
-
+    """Riaccoda job pendenti/running dopo restart del processo, in batch ordinati."""
     scheduled = 0
-    for job in jobs[:limit]:
-        delay = 0.0 if job.status == "running" else max(0.0, (job.next_attempt_at or 0.0) - now)
-        _schedule_order_side_effect_job(job.id, delay)
-        scheduled += 1
+    batch_size = max(1, limit)
+    offset = 0
+    now = time.time()
+    while True:
+        with Session(_db_engine) as db_session:
+            jobs = db_session.exec(
+                select(OrderSideEffect)
+                .where(OrderSideEffect.status.in_(["pending", "retry", "running"]))
+                .order_by(OrderSideEffect.next_attempt_at, OrderSideEffect.id)
+                .offset(offset)
+                .limit(batch_size)
+            ).all()
+        if not jobs:
+            break
+
+        for job in jobs:
+            if job.id is None:
+                continue
+            delay = 0.0 if job.status == "running" else max(0.0, (job.next_attempt_at or 0.0) - now)
+            _schedule_order_side_effect_job(job.id, delay)
+            scheduled += 1
+
+        if len(jobs) < batch_size:
+            break
+        offset += batch_size
+
     if scheduled:
         print(f"[SideEffects] recuperati {scheduled} job pendenti")
     return scheduled
