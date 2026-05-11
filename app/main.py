@@ -14,7 +14,7 @@ from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
-from app.routes.voice import router as voice_router, prewarm_audio_cache
+from app.routes.voice import close_tts_stream_client, router as voice_router, prewarm_audio_cache
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import fetch_and_save_doughs, fetch_and_save_restaurant, prewarm_system_prompt
 from app.startup_migrations import apply_startup_column_migrations, ensure_order_idempotency_index
@@ -62,6 +62,11 @@ def on_startup():
         f"→ clean={mask_phone(_wa_from_clean)}"
     )
     print(f"[Startup] TWILIO_NUMBER={mask_phone(_twilio_number)}")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await close_tts_stream_client()
 
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
