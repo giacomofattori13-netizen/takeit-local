@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.privacy import mask_phone
+from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.telemetry import record_latency
 
 load_dotenv()
@@ -318,8 +318,10 @@ def save_order_to_base44(
         "items": base44_items,
     }
 
-    log_payload = {**payload, "customer_phone": mask_phone(customer_phone)}
-    print(f"[Base44] Payload inviato: {json.dumps(log_payload, ensure_ascii=False, indent=2)}")
+    print(
+        f"[Base44] Payload ordine=#{order_number} customer={mask_name(customer_name)} "
+        f"phone={mask_phone(customer_phone)} items={len(base44_items)} total={total_amount}"
+    )
 
     try:
         response = httpx.post(
@@ -422,7 +424,7 @@ def _send_sms(
         parts.append(contact_line)
     body = "\n".join(parts)
 
-    print(f"[SMS] Body ({len(body)} chars): {body!r}")
+    print(f"[SMS] Body {describe_text_for_log(body)}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
         resp = httpx.post(
@@ -465,7 +467,7 @@ def _send_whatsapp(
         f"[WhatsApp] POST Messages.json → "
         f"From={mask_phone(wa_from)} To={mask_phone(wa_to)}"
     )
-    print(f"[WhatsApp] ContentSid={content_sid} ContentVariables={content_variables}")
+    print(f"[WhatsApp] ContentSid={content_sid} ContentVariables={describe_text_for_log(content_variables)}")
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
         response = httpx.post(
@@ -508,7 +510,7 @@ def send_whatsapp_confirmation(
     pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
     print(f"[Conferma] === INIZIO INVIO CONFERMA ORDINE ===")
-    print(f"[Conferma] customer_name={customer_name!r} customer_phone={mask_phone(customer_phone)}")
+    print(f"[Conferma] customer_name={mask_name(customer_name)} customer_phone={mask_phone(customer_phone)}")
     print(f"[Conferma] pickup_time={pickup_time!r} total_amount={total_amount} items={len(items)}")
     print(
         f"[Conferma] ACCOUNT_SID={'✓' if account_sid else '✗'} "
@@ -1135,7 +1137,7 @@ def upsert_customer(
             )
             response.raise_for_status()
             print(
-                f"[Customer] Aggiornato: {full_name} | ordini={new_total_orders} "
+                f"[Customer] Aggiornato: {mask_name(full_name)} | ordini={new_total_orders} "
                 f"total_spend={new_total_spend} avg={new_average_spend}"
             )
         except Exception as e:
@@ -1159,12 +1161,10 @@ def upsert_customer(
                 timeout=10,
             )
             response.raise_for_status()
-            print(f"[Customer] Creato: {full_name} | total_spend={payload['total_spend']}")
+            print(f"[Customer] Creato: {mask_name(full_name)} | total_spend={payload['total_spend']}")
         except Exception as e:
             print(f"[Customer] Errore create: {type(e).__name__}: {e}")
 
-
-print("DEBUG conversation_service loaded")
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 LLM_RESPONSE_FORMAT = {"type": "json_object"}

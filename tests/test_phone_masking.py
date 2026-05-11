@@ -5,7 +5,7 @@ from concurrent.futures import Future
 from contextlib import redirect_stdout
 
 import app.services.conversation_service as conversation_service
-from app.privacy import mask_phone
+from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.routes.chat import _resolve_customer_lookup_future
 from app.services.conversation_service import send_whatsapp_confirmation
 
@@ -45,6 +45,21 @@ class PhoneMaskingTests(unittest.TestCase):
     def test_mask_phone_handles_empty_values(self):
         self.assertEqual(mask_phone(None), "unknown")
         self.assertEqual(mask_phone(""), "unknown")
+
+    def test_mask_name_hides_raw_name(self):
+        masked = mask_name("Mario Rossi")
+
+        self.assertEqual(masked, "M*** R***")
+        self.assertNotIn("Mario", masked)
+        self.assertNotIn("Rossi", masked)
+
+    def test_describe_text_for_log_hides_raw_text(self):
+        label = describe_text_for_log("Mario ordina una Margherita")
+
+        self.assertIn("chars=", label)
+        self.assertIn("sha256=", label)
+        self.assertNotIn("Mario", label)
+        self.assertNotIn("Margherita", label)
 
     def test_customer_lookup_failure_log_masks_phone(self):
         future = Future()
@@ -107,8 +122,10 @@ class PhoneMaskingTests(unittest.TestCase):
 
         logs = output.getvalue()
         self.assertEqual(calls[0]["json"]["customer_phone"], "+393331234567")
+        self.assertEqual(calls[0]["json"]["customer_name"], "Mario")
         self.assertIn("********4567", logs)
         self.assertNotIn("+393331234567", logs)
+        self.assertNotIn("Mario", logs)
 
     def test_confirmation_skip_log_masks_phone(self):
         output = io.StringIO()
@@ -125,8 +142,10 @@ class PhoneMaskingTests(unittest.TestCase):
         logs = output.getvalue()
         self.assertEqual(status, "skip:credenziali_mancanti")
         self.assertIn("********4567", logs)
+        self.assertIn("M***", logs)
         self.assertNotIn("+39 333 123 4567", logs)
         self.assertNotIn("+393331234567", logs)
+        self.assertNotIn("Mario", logs)
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ from app.models import (
     ConversationSession,
     ConversationLog,
 )
-from app.privacy import mask_phone
+from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
 from app.services.conversation_service import (
     build_closed_message,
@@ -780,7 +780,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
     if kind == "whatsapp_confirmation":
         print(
             f"[SMS] Tentativo invio async: phone={mask_phone(payload['customer_phone'])} "
-            f"name={payload['customer_name']!r}"
+            f"name={mask_name(payload['customer_name'])}"
         )
         send_whatsapp_confirmation(
             customer_name=payload["customer_name"],
@@ -1393,7 +1393,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     else:
         print("[Customer] phone non disponibile, lookup saltato")
 
-    print(f"[Agent] Saluto: {greeting!r}")
+    print(f"[Agent] Saluto: {describe_text_for_log(greeting)}")
 
     return ChatStartResponse(
         session_id=conversation.session_id,

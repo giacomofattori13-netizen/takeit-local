@@ -18,7 +18,7 @@ from sqlmodel import Session
 
 from app.db import get_session, engine as _db_engine
 from app.models import ConversationSession
-from app.privacy import mask_phone
+from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
 from app.services.conversation_service import (
     build_closed_message,
@@ -150,11 +150,6 @@ def _positive_float_env(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if value > 0 else default
-
-
-def _describe_text_for_log(text: str) -> str:
-    digest = hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()[:10]
-    return f"chars={len(text)} sha256={digest}"
 
 
 def _audio_cache_ttl_seconds() -> float:
@@ -395,7 +390,7 @@ def _synthesize(text: str, *, pinned: bool = False, timeout_seconds: float | Non
     Usata solo per il prewarm all'avvio; i route handler usano _synthesize_async."""
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
+        print(f"[ElevenLabs] Cache hit: {describe_text_for_log(text)}")
         if pinned:
             _audio_cache_put(text, cached, pinned=True)
         return cached
@@ -409,7 +404,7 @@ def _synthesize(text: str, *, pinned: bool = False, timeout_seconds: float | Non
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {"text": text, "model_id": model_id, "language_code": "it"}
     timeout = timeout_seconds or _positive_float_env("ELEVENLABS_TTS_TIMEOUT_SECONDS", 15.0)
-    print(f"[ElevenLabs] POST sync model={model_id} {_describe_text_for_log(text)}")
+    print(f"[ElevenLabs] POST sync model={model_id} {describe_text_for_log(text)}")
     try:
         resp = httpx.post(
             url,
@@ -441,7 +436,7 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
     """Chiama ElevenLabs TTS (async). Controlla la cache prima."""
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
+        print(f"[ElevenLabs] Cache hit: {describe_text_for_log(text)}")
         if pinned:
             _audio_cache_put(text, cached, pinned=True)
         return cached
@@ -455,7 +450,7 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     payload = {"text": text, "model_id": model_id, "language_code": "it"}
     timeout = _positive_float_env("ELEVENLABS_TTS_TIMEOUT_SECONDS", 15.0)
-    print(f"[ElevenLabs] POST async model={model_id} {_describe_text_for_log(text)}")
+    print(f"[ElevenLabs] POST async model={model_id} {describe_text_for_log(text)}")
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
@@ -492,12 +487,12 @@ async def _audio_element_async(text: str) -> str:
     lo riceverà in streaming non appena ElevenLabs inizia a generarlo (~200-400ms).
     """
     text = format_time_for_speech(text)
-    print(f"[TTS] Testo finale: {_describe_text_for_log(text)}")
+    print(f"[TTS] Testo finale: {describe_text_for_log(text)}")
 
     # Cache hit: file già pronto su disco → nessuna latenza ElevenLabs
     cached = _audio_cache_get(text)
     if cached:
-        print(f"[ElevenLabs] Cache hit: {_describe_text_for_log(text)}")
+        print(f"[ElevenLabs] Cache hit: {describe_text_for_log(text)}")
         url = f"{_public_base_url()}/voice/audio/{cached}"
         return f"<Play>{escape(url)}</Play>"
 
@@ -509,7 +504,7 @@ async def _audio_element_async(text: str) -> str:
     stream_id = str(uuid.uuid4())
     _pending_streams[stream_id] = (text, time.time())
     url = f"{_public_base_url()}/voice/stream/{stream_id}"
-    print(f"[ElevenLabs] Stream registrato {stream_id}: {_describe_text_for_log(text)}")
+    print(f"[ElevenLabs] Stream registrato {stream_id}: {describe_text_for_log(text)}")
     return f"<Play>{escape(url)}</Play>"
 
 
@@ -531,9 +526,9 @@ def _prewarm_audio_cache_sync() -> None:
         filename = _synthesize(phrase, pinned=True, timeout_seconds=timeout)
         if filename:
             cached_count += 1
-            print(f"[ElevenLabs] Cached: {_describe_text_for_log(phrase)} → {filename}")
+            print(f"[ElevenLabs] Cached: {describe_text_for_log(phrase)} → {filename}")
         else:
-            print(f"[ElevenLabs] Prewarm fallito per: {_describe_text_for_log(phrase)}")
+            print(f"[ElevenLabs] Prewarm fallito per: {describe_text_for_log(phrase)}")
     print(f"[ElevenLabs] Prewarm completato: {cached_count}/{len(_CACHED_PHRASES)} frasi in cache")
 
 
@@ -601,7 +596,7 @@ async def stream_audio(stream_id: str):
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     el_url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
-    print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} {_describe_text_for_log(text)}")
+    print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} {describe_text_for_log(text)}")
 
     async def generate():
         try:
@@ -663,7 +658,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
     reply = result.response_message
     cache_hit = _audio_cache_get(reply) is not None
     print(
-        f"[Voice] Risposta agente: {_describe_text_for_log(reply)} "
+        f"[Voice] Risposta agente: {describe_text_for_log(reply)} "
         f"stato={result.state!r} cache_hit={cache_hit}"
     )
     if result.state == "completed":
@@ -793,7 +788,7 @@ async def voice_incoming(
     if customer:
         found_name = (customer.get("full_name") or "").strip()
         if found_name:
-            print(f"[Voice] Cliente trovato: {found_name}")
+            print(f"[Voice] Cliente trovato: {mask_name(found_name)}")
             # Saluta direttamente per nome — il numero è conferma sufficiente
             first_name = found_name.split()[0]
             greeting = f"Ciao {first_name}! Come posso aiutarti?"
@@ -810,7 +805,7 @@ async def voice_incoming(
     elif caller_phone:
         print("[Voice] Cliente non trovato")
 
-    print(f"[Voice] Saluto: {greeting!r}")
+    print(f"[Voice] Saluto: {describe_text_for_log(greeting)}")
 
     # Genera in parallelo l'audio del saluto e dell'eventuale no-input timeout
     audio, no_input = await asyncio.gather(
@@ -844,7 +839,7 @@ async def voice_gather(
     from app.routes.chat import chat  # noqa: PLC0415
 
     speech = SpeechResult.strip()
-    print(f"[Voice] Gather session={session_id!r} speech={_describe_text_for_log(speech)}")
+    print(f"[Voice] Gather session={session_id!r} speech={describe_text_for_log(speech)}")
 
     from sqlmodel import select as _select
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
