@@ -2,6 +2,8 @@ import os
 import time
 import unittest
 
+from sqlmodel import create_engine
+
 import app.routes.voice as voice_module
 from app.privacy import describe_text_for_log
 from app.routes.voice import (
@@ -16,6 +18,7 @@ from app.routes.voice import (
     _pending_responses,
     _prune_audio_cache,
     _resolve_customer_lookup_task,
+    _run_chat_with_fresh_session,
 )
 
 
@@ -209,6 +212,24 @@ class VoiceLogicTests(unittest.TestCase):
         result = voice_module.asyncio.run(run_lookup())
 
         self.assertEqual(result, {"full_name": "Mario Rossi"})
+
+    def test_chat_thread_uses_fresh_session(self):
+        test_engine = create_engine("sqlite:///:memory:")
+        original_engine = voice_module._db_engine
+        captured_binds = []
+
+        def fake_chat(request, db):
+            captured_binds.append(db.get_bind())
+            return "ok"
+
+        voice_module._db_engine = test_engine
+        try:
+            result = _run_chat_with_fresh_session(fake_chat, object())
+        finally:
+            voice_module._db_engine = original_engine
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(captured_binds, [test_engine])
 
 
 if __name__ == "__main__":
