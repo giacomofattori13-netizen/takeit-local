@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import re
+import threading
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -33,10 +34,13 @@ _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
 _restaurant_cache: dict | None = None
 _restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
+_restaurant_refresh_inflight = False
+_restaurant_refresh_lock = threading.Lock()
 _system_prompt_cache: str | None = None
 _system_prompt_slim_cache: dict[str, str] = {}  # state → slim prompt
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
+RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
@@ -61,6 +65,13 @@ def _customer_lookup_http_timeout_seconds() -> float:
     )
 
 
+def _restaurant_refresh_timeout_seconds() -> float:
+    return _positive_float_env(
+        "RESTAURANT_REFRESH_TIMEOUT_SECONDS",
+        RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
 def reset_menu_cache() -> None:
     global _menu_cache, _system_prompt_cache, _system_prompt_slim_cache
     _menu_cache = []
@@ -76,8 +87,10 @@ def reset_dough_cache() -> None:
 
 
 def reset_restaurant_cache() -> None:
-    global _restaurant_cache
+    global _restaurant_cache, _restaurant_cache_ts, _restaurant_refresh_inflight
     _restaurant_cache = None
+    _restaurant_cache_ts = 0.0
+    _restaurant_refresh_inflight = False
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -546,7 +559,7 @@ def send_whatsapp_confirmation(
     return sms_status
 
 
-def _fetch_restaurant_from_base44() -> dict | None:
+def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict | None:
     """Fa la GET a Base44 e restituisce il dict del ristorante, o None in caso di errore."""
     token = os.getenv("BASE44_TOKEN")
     if not token:
@@ -554,7 +567,8 @@ def _fetch_restaurant_from_base44() -> dict | None:
         return None
     url = f"{BASE44_APP}/Restaurant"
     try:
-        response = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        timeout = timeout_seconds or _restaurant_refresh_timeout_seconds()
+        response = httpx.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
         response.raise_for_status()
         body = response.json()
         entities = body.get("entities", body) if isinstance(body, dict) else body
@@ -584,41 +598,80 @@ def _load_restaurant_from_file() -> dict:
     return {}
 
 
-def load_restaurant() -> dict:
-    """Restituisce i dati del ristorante con cache in memoria e TTL di 10 minuti.
-
-    - Se la cache è valida (< 10 min), la restituisce direttamente.
-    - Se è scaduta, tenta un refresh da Base44.
-    - Se Base44 non risponde, usa i dati cached precedenti come fallback.
-    - Non dipende da nessun file su disco.
-    """
+def _cache_restaurant_data(data: dict, source: str) -> dict:
     global _restaurant_cache, _restaurant_cache_ts
+    _restaurant_cache = data
+    _restaurant_cache_ts = time.monotonic()
+    print(f"[Restaurant] Cache aggiornata da {source}. Campi: {list(_restaurant_cache.keys())}")
+    print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
+    return _restaurant_cache
+
+
+def _refresh_restaurant_cache_blocking() -> dict | None:
+    started = time.perf_counter()
+    fresh = _fetch_restaurant_from_base44()
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    if fresh is not None:
+        record_latency("restaurant", "refresh", elapsed_ms, result="success")
+        return _cache_restaurant_data(fresh, "Base44")
+
+    record_latency("restaurant", "refresh", elapsed_ms, result="failed")
+    return None
+
+
+def _restaurant_refresh_worker(reason: str) -> None:
+    global _restaurant_refresh_inflight
+    try:
+        print(f"[Restaurant] Refresh Base44 in background ({reason})")
+        _refresh_restaurant_cache_blocking()
+    finally:
+        with _restaurant_refresh_lock:
+            _restaurant_refresh_inflight = False
+
+
+def _start_restaurant_refresh_background(reason: str) -> bool:
+    global _restaurant_refresh_inflight
+    with _restaurant_refresh_lock:
+        if _restaurant_refresh_inflight:
+            return False
+        _restaurant_refresh_inflight = True
+
+    thread = threading.Thread(
+        target=_restaurant_refresh_worker,
+        args=(reason,),
+        name="restaurant-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def load_restaurant() -> dict:
+    """Restituisce i dati ristorante senza bloccare il turno cliente su Base44.
+
+    Usa stale-while-revalidate: cache/file locale rispondono subito; Base44 aggiorna
+    in background quando il TTL scade o al primo cold load.
+    """
     now = time.monotonic()
 
     if _restaurant_cache and (now - _restaurant_cache_ts) < RESTAURANT_CACHE_TTL:
         return _restaurant_cache
 
-    fresh = _fetch_restaurant_from_base44()
-    if fresh is not None:
-        _restaurant_cache = fresh
-        _restaurant_cache_ts = now
-        print(f"[Restaurant] Cache aggiornata da Base44. Campi: {list(_restaurant_cache.keys())}")
-        print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
-        return _restaurant_cache
-
-    # Base44 non disponibile — usa cache precedente se esiste
     if _restaurant_cache:
         age = int(now - _restaurant_cache_ts)
-        print(f"[Restaurant] Base44 non disponibile, uso cache precedente (età {age}s)")
+        print(f"[Restaurant] Uso cache stale (età {age}s), refresh in background")
+        _start_restaurant_refresh_background("cache_stale")
         return _restaurant_cache
 
     local = _load_restaurant_from_file()
     if local:
-        _restaurant_cache = local
-        _restaurant_cache_ts = now
-        return _restaurant_cache
+        cached = _cache_restaurant_data(local, "file")
+        _start_restaurant_refresh_background("cold_file_fallback")
+        return cached
 
-    print("[Restaurant] Nessun dato disponibile: né Base44, né cache, né file")
+    _start_restaurant_refresh_background("cold_empty")
+    print("[Restaurant] Nessun dato immediato disponibile: né cache, né file")
     return {}
 
 
@@ -636,9 +689,10 @@ def is_agent_active() -> bool:
 
 
 def fetch_and_save_restaurant() -> dict:
-    """Alias usato all'avvio in main.py: forza un refresh da Base44 ignorando il TTL."""
-    global _restaurant_cache_ts
-    _restaurant_cache_ts = 0.0  # azzera il TTL così load_restaurant fa sempre il fetch
+    """Alias usato all'avvio in main.py: prova un refresh Base44 breve, poi fallback locale."""
+    fresh = _refresh_restaurant_cache_blocking()
+    if fresh:
+        return fresh
     return load_restaurant()
 
 
