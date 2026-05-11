@@ -20,6 +20,7 @@ from app.db import get_session, engine as _db_engine
 from app.models import ConversationSession
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
+from app.telemetry import record_latency
 from app.services.conversation_service import (
     build_closed_message,
     get_agent_greeting,
@@ -56,11 +57,13 @@ _pending_response_created_at: dict[str, float] = {}
 _filler_last_played: dict[str, float] = {}        # session_id → epoch dell'ultimo filler
 _FILLER_COOLDOWN = 20.0                            # secondi minimi tra un filler e il successivo
 _CUSTOMER_LOOKUP_TIMEOUT_DEFAULT_SECONDS = 1.0
+_VOICE_GREETING_LOOKUP_TIMEOUT_DEFAULT_SECONDS = 0.25
 _PENDING_RESPONSE_TTL_DEFAULT_SECONDS = 90.0
 _PENDING_RESPONSE_DONE_GRACE_DEFAULT_SECONDS = 30.0
 _pending_response_last_cleanup = 0.0
 _PREWARM_THREAD_STARTED = False
 _PREWARM_THREAD_LOCK = threading.Lock()
+_tts_stream_client: httpx.AsyncClient | None = None
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
@@ -167,6 +170,13 @@ def _customer_lookup_timeout_seconds() -> float:
     )
 
 
+def _voice_greeting_lookup_timeout_seconds() -> float:
+    return _positive_float_env(
+        "VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS",
+        _VOICE_GREETING_LOOKUP_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
 def _run_chat_with_fresh_session(chat_func, chat_request: ChatRequest):
     with Session(_db_engine) as db:
         return chat_func(chat_request, db)
@@ -230,15 +240,42 @@ async def _drop_pending_response_after_grace(session_id: str, task: asyncio.Task
 async def _resolve_customer_lookup_task(
     lookup_task: asyncio.Task | None,
     phone: str | None,
+    *,
+    timeout_seconds: float | None = None,
 ) -> dict | None:
     if lookup_task is None:
         return None
+    timeout = timeout_seconds if timeout_seconds is not None else _customer_lookup_timeout_seconds()
+    started = time.perf_counter()
     try:
-        return await asyncio.wait_for(lookup_task, timeout=_customer_lookup_timeout_seconds())
+        result = await asyncio.wait_for(lookup_task, timeout=timeout)
+        record_latency(
+            "voice",
+            "customer_lookup",
+            (time.perf_counter() - started) * 1000,
+            result="found" if result else "missing",
+            timeout_seconds=timeout,
+        )
+        return result
     except asyncio.TimeoutError:
+        record_latency(
+            "voice",
+            "customer_lookup",
+            (time.perf_counter() - started) * 1000,
+            result="timeout",
+            timeout_seconds=timeout,
+        )
         lookup_task.cancel()
         print(f"[Customer] Lookup timeout per {mask_phone(phone)}, saluto senza profilo")
     except Exception as exc:
+        record_latency(
+            "voice",
+            "customer_lookup",
+            (time.perf_counter() - started) * 1000,
+            result="error",
+            timeout_seconds=timeout,
+            error=type(exc).__name__,
+        )
         print(f"[Customer] Lookup errore per {mask_phone(phone)}: {type(exc).__name__}: {exc}")
     return None
 
@@ -563,6 +600,23 @@ def prewarm_audio_cache(*, background: bool = True) -> None:
     print("[ElevenLabs] Prewarm avviato in background")
 
 
+async def _get_tts_stream_client() -> httpx.AsyncClient:
+    global _tts_stream_client
+    if _tts_stream_client is None or _tts_stream_client.is_closed:
+        _tts_stream_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+        )
+    return _tts_stream_client
+
+
+async def close_tts_stream_client() -> None:
+    global _tts_stream_client
+    if _tts_stream_client is not None and not _tts_stream_client.is_closed:
+        await _tts_stream_client.aclose()
+    _tts_stream_client = None
+
+
 @router.get("/audio/{filename}")
 def serve_audio(filename: str):
     """Serve i file MP3 generati da ElevenLabs a Twilio."""
@@ -604,24 +658,47 @@ async def stream_audio(stream_id: str):
     print(f"[ElevenLabs] Avvio stream {stream_id}: model={model_id} {describe_text_for_log(text)}")
 
     async def generate():
+        started = time.perf_counter()
+        first_chunk_seen = False
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
-            ) as http:
-                async with http.stream(
-                    "POST",
-                    el_url,
-                    headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-                    json={"text": text, "model_id": model_id, "language_code": "it"},
-                ) as resp:
-                    if resp.status_code != 200:
-                        await resp.aread()
-                        print(f"[ElevenLabs] Stream error status={resp.status_code}")
-                        return
-                    print(f"[ElevenLabs] Stream {stream_id}: primo chunk in arrivo")
-                    async for chunk in resp.aiter_bytes(chunk_size=4096):
-                        yield chunk
+            http = await _get_tts_stream_client()
+            async with http.stream(
+                "POST",
+                el_url,
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json={"text": text, "model_id": model_id, "language_code": "it"},
+            ) as resp:
+                if resp.status_code != 200:
+                    await resp.aread()
+                    record_latency(
+                        "voice",
+                        "tts_stream",
+                        (time.perf_counter() - started) * 1000,
+                        result="provider_error",
+                        status_code=resp.status_code,
+                    )
+                    print(f"[ElevenLabs] Stream error status={resp.status_code}")
+                    return
+                async for chunk in resp.aiter_bytes(chunk_size=4096):
+                    if not first_chunk_seen:
+                        first_chunk_seen = True
+                        record_latency(
+                            "voice",
+                            "tts_first_byte",
+                            (time.perf_counter() - started) * 1000,
+                            result="success",
+                            status_code=resp.status_code,
+                        )
+                        print(f"[ElevenLabs] Stream {stream_id}: primo chunk in arrivo")
+                    yield chunk
         except Exception as e:
+            record_latency(
+                "voice",
+                "tts_stream",
+                (time.perf_counter() - started) * 1000,
+                result="error",
+                error=type(e).__name__,
+            )
             print(f"[ElevenLabs] Stream {stream_id} eccezione: {type(e).__name__}: {e}")
 
     return StreamingResponse(generate(), media_type="audio/mpeg")
@@ -750,6 +827,7 @@ async def voice_incoming(
     session: Session = Depends(get_session),
 ):
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
+    started = time.perf_counter()
     await _verify_twilio_request(request)
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {mask_phone(caller_phone)}")
@@ -764,6 +842,12 @@ async def voice_incoming(
             f"  {closed_audio}\n"
             "  <Hangup/>\n"
             "</Response>"
+        )
+        record_latency(
+            "voice",
+            "incoming",
+            (time.perf_counter() - started) * 1000,
+            result="closed",
         )
         return Response(content=twiml, media_type="application/xml")
 
@@ -789,7 +873,11 @@ async def voice_incoming(
     greeting = get_agent_greeting()
 
     # Attendi il lookup (si sovrappone alle operazioni DB sopra)
-    customer = await _resolve_customer_lookup_task(lookup_task, caller_phone)
+    customer = await _resolve_customer_lookup_task(
+        lookup_task,
+        caller_phone,
+        timeout_seconds=_voice_greeting_lookup_timeout_seconds(),
+    )
     if customer:
         found_name = (customer.get("full_name") or "").strip()
         if found_name:
@@ -827,6 +915,13 @@ async def voice_incoming(
         f"  {no_input}\n"
         "</Response>"
     )
+    record_latency(
+        "voice",
+        "incoming",
+        (time.perf_counter() - started) * 1000,
+        result="gather",
+        customer_profile=bool(customer),
+    )
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -839,6 +934,7 @@ async def voice_gather(
 ):
     """Riceve il testo trascritto da Twilio, lo passa al motore di chat
     e risponde con TwiML per far sentire la risposta al cliente."""
+    started = time.perf_counter()
     await _verify_twilio_request(request)
     # Import locale per evitare import circolare (chat importa da conversation_service)
     from app.routes.chat import chat  # noqa: PLC0415
@@ -850,6 +946,12 @@ async def voice_gather(
     _conv = session.exec(_select(ConversationSession).where(ConversationSession.session_id == session_id)).first()
     if _conv is None:
         print(f"[Voice] voice_gather: sessione {session_id!r} non trovata, hangup")
+        record_latency(
+            "voice",
+            "gather",
+            (time.perf_counter() - started) * 1000,
+            result="session_missing",
+        )
         return Response(
             content=(
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -975,6 +1077,13 @@ async def voice_gather(
             f'  <Redirect method="POST">/voice/process?session_id={session_id}</Redirect>\n'
             "</Response>"
         )
+        record_latency(
+            "voice",
+            "gather",
+            (time.perf_counter() - started) * 1000,
+            result="filler_redirect",
+            state=_state,
+        )
         return Response(content=twiml, media_type="application/xml")
 
     _timeout_twiml = (
@@ -1002,9 +1111,23 @@ async def voice_gather(
             )
     except asyncio.TimeoutError:
         print(f"[Voice] voice_gather TIMEOUT session={session_id!r}")
+        record_latency(
+            "voice",
+            "gather",
+            (time.perf_counter() - started) * 1000,
+            result="timeout",
+            state=_state,
+        )
         return Response(content=_timeout_twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
     if result.state != "completed":
         asyncio.create_task(_prefetch_openai_connection())
+    record_latency(
+        "voice",
+        "gather",
+        (time.perf_counter() - started) * 1000,
+        result="response",
+        state=result.state,
+    )
     return Response(content=twiml, media_type="application/xml")

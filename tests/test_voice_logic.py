@@ -13,12 +13,15 @@ from app.routes.voice import (
     _audio_cache_get,
     _audio_cache_put,
     _cleanup_stale_pending_responses,
+    _get_tts_stream_client,
     _needs_filler,
     _pending_response_created_at,
     _pending_responses,
     _prune_audio_cache,
     _resolve_customer_lookup_task,
     _run_chat_with_fresh_session,
+    _voice_greeting_lookup_timeout_seconds,
+    close_tts_stream_client,
 )
 
 
@@ -27,11 +30,13 @@ class VoiceLogicTests(unittest.TestCase):
         self.previous_ttl = os.environ.get("VOICE_AUDIO_CACHE_TTL_SECONDS")
         self.previous_max = os.environ.get("VOICE_AUDIO_CACHE_MAX_ITEMS")
         self.previous_lookup_timeout = os.environ.get("CUSTOMER_LOOKUP_TIMEOUT_SECONDS")
+        self.previous_greeting_lookup_timeout = os.environ.get("VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS")
         self.previous_pending_ttl = os.environ.get("VOICE_PENDING_RESPONSE_TTL_SECONDS")
         _AUDIO_CACHE.clear()
         _AUDIO_CACHE_META.clear()
         _pending_responses.clear()
         _pending_response_created_at.clear()
+        voice_module._tts_stream_client = None
         self.created_files = []
 
     def tearDown(self):
@@ -51,12 +56,17 @@ class VoiceLogicTests(unittest.TestCase):
             os.environ.pop("CUSTOMER_LOOKUP_TIMEOUT_SECONDS", None)
         else:
             os.environ["CUSTOMER_LOOKUP_TIMEOUT_SECONDS"] = self.previous_lookup_timeout
+        if self.previous_greeting_lookup_timeout is None:
+            os.environ.pop("VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS"] = self.previous_greeting_lookup_timeout
         if self.previous_pending_ttl is None:
             os.environ.pop("VOICE_PENDING_RESPONSE_TTL_SECONDS", None)
         else:
             os.environ["VOICE_PENDING_RESPONSE_TTL_SECONDS"] = self.previous_pending_ttl
         _pending_responses.clear()
         _pending_response_created_at.clear()
+        voice_module._tts_stream_client = None
 
     def _write_audio_file(self, filename: str):
         path = AUDIO_DIR / filename
@@ -202,6 +212,11 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(cancelled)
 
+    def test_voice_greeting_lookup_timeout_default_is_short(self):
+        os.environ.pop("VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS", None)
+
+        self.assertEqual(_voice_greeting_lookup_timeout_seconds(), 0.25)
+
     def test_customer_lookup_task_returns_profile(self):
         async def run_lookup():
             task = voice_module.asyncio.create_task(
@@ -230,6 +245,33 @@ class VoiceLogicTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(captured_binds, [test_engine])
+
+    def test_tts_stream_client_is_reused_and_closed(self):
+        class FakeAsyncClient:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.is_closed = False
+                self.args = args
+                self.kwargs = kwargs
+                FakeAsyncClient.instances.append(self)
+
+            async def aclose(self):
+                self.is_closed = True
+
+        original_client = voice_module.httpx.AsyncClient
+        voice_module.httpx.AsyncClient = FakeAsyncClient
+        try:
+            first = voice_module.asyncio.run(_get_tts_stream_client())
+            second = voice_module.asyncio.run(_get_tts_stream_client())
+            voice_module.asyncio.run(close_tts_stream_client())
+        finally:
+            voice_module.httpx.AsyncClient = original_client
+            voice_module._tts_stream_client = None
+
+        self.assertIs(first, second)
+        self.assertEqual(len(FakeAsyncClient.instances), 1)
+        self.assertTrue(first.is_closed)
 
 
 if __name__ == "__main__":
