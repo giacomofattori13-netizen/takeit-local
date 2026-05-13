@@ -242,13 +242,15 @@ async def _resolve_customer_lookup_task(
     phone: str | None,
     *,
     timeout_seconds: float | None = None,
+    cancel_on_timeout: bool = True,
 ) -> dict | None:
     if lookup_task is None:
         return None
     timeout = timeout_seconds if timeout_seconds is not None else _customer_lookup_timeout_seconds()
     started = time.perf_counter()
     try:
-        result = await asyncio.wait_for(lookup_task, timeout=timeout)
+        awaitable = lookup_task if cancel_on_timeout else asyncio.shield(lookup_task)
+        result = await asyncio.wait_for(awaitable, timeout=timeout)
         record_latency(
             "voice",
             "customer_lookup",
@@ -265,7 +267,8 @@ async def _resolve_customer_lookup_task(
             result="timeout",
             timeout_seconds=timeout,
         )
-        lookup_task.cancel()
+        if cancel_on_timeout:
+            lookup_task.cancel()
         print(f"[Customer] Lookup timeout per {mask_phone(phone)}, saluto senza profilo")
     except Exception as exc:
         record_latency(
@@ -278,6 +281,70 @@ async def _resolve_customer_lookup_task(
         )
         print(f"[Customer] Lookup errore per {mask_phone(phone)}: {type(exc).__name__}: {exc}")
     return None
+
+
+def _apply_customer_profile_to_conversation(
+    conversation: ConversationSession,
+    customer: dict,
+) -> tuple[str | None, bool]:
+    found_name = (customer.get("full_name") or "").strip()
+    raw_fav = customer.get("favorite_pizzas") or []
+    if isinstance(raw_fav, str):
+        raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
+    favorite_pizzas = raw_fav[:5] if isinstance(raw_fav, list) else []
+
+    changed = False
+    if found_name and not conversation.customer_name:
+        conversation.customer_name = found_name
+        changed = True
+    if favorite_pizzas:
+        fav_json = json.dumps(favorite_pizzas, ensure_ascii=False)
+        if conversation.favorite_pizzas_json != fav_json:
+            conversation.favorite_pizzas_json = fav_json
+            changed = True
+    return found_name or None, changed
+
+
+def _store_customer_profile_sync(session_id: str, customer: dict) -> None:
+    from sqlmodel import select as _select
+
+    with Session(_db_engine) as db:
+        conversation = db.exec(
+            _select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+        if not conversation or conversation.completed:
+            return
+        found_name, changed = _apply_customer_profile_to_conversation(conversation, customer)
+        if not changed:
+            return
+        db.add(conversation)
+        db.commit()
+        print(
+            f"[Voice] Profilo cliente aggiornato in background: "
+            f"session={session_id!r} name={mask_name(found_name)}"
+        )
+
+
+async def _store_customer_profile_from_task(session_id: str, lookup_task: asyncio.Task) -> None:
+    try:
+        customer = lookup_task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        print(f"[Voice] Lookup cliente background errore session={session_id!r}: {type(exc).__name__}: {exc}")
+        return
+    if not customer:
+        return
+    await asyncio.to_thread(_store_customer_profile_sync, session_id, customer)
+
+
+def _defer_customer_profile_update(session_id: str, lookup_task: asyncio.Task) -> None:
+    loop = asyncio.get_running_loop()
+
+    def _on_done(done_task: asyncio.Task) -> None:
+        loop.create_task(_store_customer_profile_from_task(session_id, done_task))
+
+    lookup_task.add_done_callback(_on_done)
 
 
 def _drop_audio_cache_entry(text: str, *, remove_file: bool = True) -> None:
@@ -768,6 +835,26 @@ async def _build_response_twiml(result, session_id: str) -> str:
     )
 
 
+async def _build_retry_gather_twiml(
+    session_id: str,
+    message: str = "Scusi, non ho capito. Può ripetere?",
+) -> str:
+    audio, no_input = await asyncio.gather(
+        _audio_element_async(message),
+        _audio_element_async(_NO_INPUT_MSG),
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f"  <Gather {_GATHER_ATTRS} "
+        f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+        f"    {audio}\n"
+        "  </Gather>\n"
+        f"  {no_input}\n"
+        "</Response>"
+    )
+
+
 @router.post("/process")
 async def voice_process(request: Request, session_id: str = Query(...)):
     """Chiamato da Twilio dopo il filler audio per collecting_items.
@@ -877,24 +964,23 @@ async def voice_incoming(
         lookup_task,
         caller_phone,
         timeout_seconds=_voice_greeting_lookup_timeout_seconds(),
+        cancel_on_timeout=False,
     )
     if customer:
-        found_name = (customer.get("full_name") or "").strip()
+        found_name, changed = _apply_customer_profile_to_conversation(conversation, customer)
         if found_name:
             print(f"[Voice] Cliente trovato: {mask_name(found_name)}")
             # Saluta direttamente per nome — il numero è conferma sufficiente
             first_name = found_name.split()[0]
             greeting = f"Ciao {first_name}! Come posso aiutarti?"
-            conversation.customer_name = found_name
-            # Salva le pizze preferite per il flusso "solite"
-            raw_fav = customer.get("favorite_pizzas") or []
-            if isinstance(raw_fav, str):
-                raw_fav = [p.strip() for p in raw_fav.split(",") if p.strip()]
-            conversation.favorite_pizzas_json = json.dumps(raw_fav[:5], ensure_ascii=False)
-            session.add(conversation)
-            session.commit()
+            if changed:
+                session.add(conversation)
+                session.commit()
         else:
             print("[Voice] Cliente non trovato")
+    elif lookup_task and not lookup_task.done():
+        _defer_customer_profile_update(session_id, lookup_task)
+        print("[Voice] Lookup cliente ancora in corso: aggiorno la sessione se arriva")
     elif caller_phone:
         print("[Voice] Cliente non trovato")
 
@@ -1119,6 +1205,18 @@ async def voice_gather(
             state=_state,
         )
         return Response(content=_timeout_twiml, media_type="application/xml")
+    except Exception as exc:
+        print(f"[Voice] voice_gather ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
+        record_latency(
+            "voice",
+            "gather",
+            (time.perf_counter() - started) * 1000,
+            result="error",
+            state=_state,
+            error=type(exc).__name__,
+        )
+        twiml = await _build_retry_gather_twiml(session_id)
+        return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
     if result.state != "completed":
