@@ -1831,7 +1831,7 @@ def extract_order_from_text(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
-    print(f"[LLM] Estrazione da messaggio corrente: {normalized!r}")
+    print(f"[LLM] Estrazione da messaggio corrente: {describe_text_for_log(normalized)}")
 
     # Chat Completions (non Responses API) per attivare il prefix-caching automatico:
     # OpenAI cachea il system message prefix dopo la prima chiamata (~5 min TTL),

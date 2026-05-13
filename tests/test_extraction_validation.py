@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 
 import app.services.conversation_service as conversation_service
 from app.services.conversation_service import (
@@ -126,18 +128,24 @@ class ExtractionValidationTests(unittest.TestCase):
         )()
 
         conversation_service.get_openai_client = lambda: fake_client
+        output = io.StringIO()
         try:
-            parsed = extract_order_from_text(
-                "ciao",
-                [{"name": "Margherita", "ingredients": []}],
-                [{"name": "Classica", "code": "classica", "surcharge": 0.0}],
-            )
+            with redirect_stdout(output):
+                parsed = extract_order_from_text(
+                    "Mario Rossi vuole una margherita",
+                    [{"name": "Margherita", "ingredients": []}],
+                    [{"name": "Classica", "code": "classica", "surcharge": 0.0}],
+                )
         finally:
             conversation_service.get_openai_client = original_get_client
 
         self.assertEqual(parsed["intent"], "unknown")
         self.assertEqual(calls[0]["response_format"], {"type": "json_object"})
         self.assertEqual(calls[0]["temperature"], 0)
+        logs = output.getvalue()
+        self.assertIn("chars=", logs)
+        self.assertNotIn("Mario Rossi", logs)
+        self.assertNotIn("margherita", logs.lower())
 
 
 if __name__ == "__main__":
