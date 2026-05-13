@@ -13,6 +13,7 @@ from app.routes.voice import (
     _audio_cache_get,
     _audio_cache_put,
     _apply_customer_profile_to_conversation,
+    _build_retry_gather_twiml,
     _cleanup_stale_pending_responses,
     _get_tts_stream_client,
     _needs_filler,
@@ -123,6 +124,16 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertNotIn("first", _AUDIO_CACHE)
         self.assertEqual(set(_AUDIO_CACHE), {"second", "third"})
         self.assertFalse(first.exists())
+
+    def test_retry_gather_twiml_keeps_call_open(self):
+        twiml = voice_module.asyncio.run(
+            _build_retry_gather_twiml("session-1", "Scusi, può ripetere?")
+        )
+
+        self.assertIn('action="/voice/gather?session_id=session-1"', twiml)
+        self.assertIn("<Gather", twiml)
+        self.assertIn("</Gather>", twiml)
+        self.assertIn("</Response>", twiml)
 
     def test_describe_text_for_log_does_not_include_raw_text(self):
         label = describe_text_for_log("Mario ordina una margherita")
