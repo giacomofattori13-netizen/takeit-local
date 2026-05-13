@@ -12,6 +12,8 @@ class CustomerLookupTests(unittest.TestCase):
         self.previous_token = os.environ.get("BASE44_TOKEN")
         self.previous_timeout = os.environ.get("CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS")
         self.previous_cache_ttl = os.environ.get("CUSTOMER_LOOKUP_CACHE_TTL_SECONDS")
+        self.previous_miss_cache_ttl = os.environ.get("CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS")
+        self.previous_cache_max = os.environ.get("CUSTOMER_LOOKUP_CACHE_MAX_ITEMS")
         reset_customer_lookup_cache()
 
     def tearDown(self):
@@ -28,6 +30,14 @@ class CustomerLookupTests(unittest.TestCase):
             os.environ.pop("CUSTOMER_LOOKUP_CACHE_TTL_SECONDS", None)
         else:
             os.environ["CUSTOMER_LOOKUP_CACHE_TTL_SECONDS"] = self.previous_cache_ttl
+        if self.previous_miss_cache_ttl is None:
+            os.environ.pop("CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS", None)
+        else:
+            os.environ["CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS"] = self.previous_miss_cache_ttl
+        if self.previous_cache_max is None:
+            os.environ.pop("CUSTOMER_LOOKUP_CACHE_MAX_ITEMS", None)
+        else:
+            os.environ["CUSTOMER_LOOKUP_CACHE_MAX_ITEMS"] = self.previous_cache_max
 
     def test_lookup_customer_uses_short_timeout_and_masks_logs(self):
         calls = []
@@ -112,6 +122,63 @@ class CustomerLookupTests(unittest.TestCase):
         self.assertEqual(first["full_name"], "Mario Rossi")
         self.assertEqual(second["full_name"], "Mario Rossi")
         self.assertEqual(len(calls), 1)
+
+    def test_lookup_customer_miss_cache_expires_independently(self):
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, entities):
+                self._entities = entities
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"entities": self._entities}
+
+        def fake_get(url, headers, timeout):
+            calls.append(url)
+            if len(calls) == 1:
+                return FakeResponse([])
+            return FakeResponse([{
+                "full_name": "Mario Rossi",
+                "phone": "+393331234567",
+            }])
+
+        original_get = conversation_service.httpx.get
+        os.environ["BASE44_TOKEN"] = "test-token"
+        os.environ["CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS"] = "1"
+        conversation_service.httpx.get = fake_get
+        try:
+            self.assertIsNone(lookup_customer("+393331234567"))
+            with conversation_service._customer_lookup_cache_lock:
+                cached_at, cached_customer, ttl = conversation_service._customer_lookup_cache["+393331234567"]
+                conversation_service._customer_lookup_cache["+393331234567"] = (
+                    cached_at - ttl - 0.01,
+                    cached_customer,
+                    ttl,
+                )
+            customer = lookup_customer("+393331234567")
+        finally:
+            conversation_service.httpx.get = original_get
+
+        self.assertEqual(customer["full_name"], "Mario Rossi")
+        self.assertEqual(len(calls), 2)
+
+    def test_lookup_customer_cache_prunes_to_max_items(self):
+        os.environ["CUSTOMER_LOOKUP_CACHE_MAX_ITEMS"] = "2"
+
+        with conversation_service._customer_lookup_cache_lock:
+            conversation_service._customer_lookup_cache["+391"] = (1.0, None, 300.0)
+            conversation_service._customer_lookup_cache["+392"] = (2.0, None, 300.0)
+            conversation_service._customer_lookup_cache["+393"] = (3.0, None, 300.0)
+            conversation_service._prune_customer_lookup_cache(now=4.0)
+
+            keys = list(conversation_service._customer_lookup_cache)
+
+        self.assertEqual(keys, ["+392", "+393"])
 
 
 if __name__ == "__main__":

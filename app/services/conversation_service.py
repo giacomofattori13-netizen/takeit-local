@@ -38,7 +38,7 @@ _restaurant_cache: dict | None = None
 _restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
 _restaurant_refresh_inflight = False
 _restaurant_refresh_lock = threading.Lock()
-_customer_lookup_cache: dict[str, tuple[float, dict | None]] = {}
+_customer_lookup_cache: dict[str, tuple[float, dict | None, float]] = {}
 _customer_lookup_cache_lock = threading.Lock()
 _system_prompt_cache: str | None = None
 _system_prompt_slim_cache: dict[str, str] = {}  # state → slim prompt
@@ -47,6 +47,8 @@ RESTAURANT_CACHE_TTL = 600  # 10 minuti
 RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 DOUGH_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 CUSTOMER_LOOKUP_CACHE_TTL_DEFAULT_SECONDS = 300.0
+CUSTOMER_LOOKUP_MISS_CACHE_TTL_DEFAULT_SECONDS = 30.0
+CUSTOMER_LOOKUP_CACHE_MAX_ITEMS_DEFAULT = 256
 
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
@@ -59,6 +61,14 @@ CUSTOMER_LOOKUP_HTTP_TIMEOUT_DEFAULT_SECONDS = 2.0
 def _positive_float_env(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, "").strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip())
     except ValueError:
         return default
     return value if value > 0 else default
@@ -82,6 +92,20 @@ def _customer_lookup_cache_ttl_seconds() -> float:
     return _positive_float_env(
         "CUSTOMER_LOOKUP_CACHE_TTL_SECONDS",
         CUSTOMER_LOOKUP_CACHE_TTL_DEFAULT_SECONDS,
+    )
+
+
+def _customer_lookup_miss_cache_ttl_seconds() -> float:
+    return _positive_float_env(
+        "CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS",
+        CUSTOMER_LOOKUP_MISS_CACHE_TTL_DEFAULT_SECONDS,
+    )
+
+
+def _customer_lookup_cache_max_items() -> int:
+    return _positive_int_env(
+        "CUSTOMER_LOOKUP_CACHE_MAX_ITEMS",
+        CUSTOMER_LOOKUP_CACHE_MAX_ITEMS_DEFAULT,
     )
 
 
@@ -117,6 +141,28 @@ def reset_restaurant_cache() -> None:
 def reset_customer_lookup_cache() -> None:
     with _customer_lookup_cache_lock:
         _customer_lookup_cache.clear()
+
+
+def _prune_customer_lookup_cache(now: float | None = None) -> None:
+    now = time.monotonic() if now is None else now
+    expired = [
+        key
+        for key, (cached_at, _customer, ttl_seconds) in _customer_lookup_cache.items()
+        if now - cached_at >= ttl_seconds
+    ]
+    for key in expired:
+        _customer_lookup_cache.pop(key, None)
+
+    max_items = _customer_lookup_cache_max_items()
+    while len(_customer_lookup_cache) > max_items:
+        oldest_key = next(iter(_customer_lookup_cache))
+        _customer_lookup_cache.pop(oldest_key, None)
+
+
+def _customer_lookup_cache_ttl_for(customer: dict | None) -> float:
+    if customer:
+        return _customer_lookup_cache_ttl_seconds()
+    return _customer_lookup_miss_cache_ttl_seconds()
 
 # Mappature bidirezionali tra dough_type Base44 e pizza_type interno (usato nel DB locale)
 _DOUGH_TO_PIZZA_TYPE: dict[str, str] = {
@@ -1092,8 +1138,9 @@ def lookup_customer(phone: str) -> dict | None:
     cache_key = re.sub(r"[\s\-\(\)]", "", phone or "")
     now = time.monotonic()
     with _customer_lookup_cache_lock:
+        _prune_customer_lookup_cache(now)
         cached = _customer_lookup_cache.get(cache_key)
-        if cached and now - cached[0] < _customer_lookup_cache_ttl_seconds():
+        if cached:
             print(f"[Customer] Lookup cache hit per {mask_phone(cache_key)}")
             return cached[1]
 
@@ -1103,7 +1150,12 @@ def lookup_customer(phone: str) -> dict | None:
     )
     customer = matches[0] if matches else None
     with _customer_lookup_cache_lock:
-        _customer_lookup_cache[cache_key] = (time.monotonic(), customer)
+        _customer_lookup_cache[cache_key] = (
+            time.monotonic(),
+            customer,
+            _customer_lookup_cache_ttl_for(customer),
+        )
+        _prune_customer_lookup_cache()
     return customer
 
 
