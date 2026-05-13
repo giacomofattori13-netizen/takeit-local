@@ -32,6 +32,8 @@ RESTAURANT_JSON_PATH = os.path.normpath(
 
 _menu_cache: list[dict] = []
 _dough_cache: list[dict] = []
+_dough_refresh_inflight = False
+_dough_refresh_lock = threading.Lock()
 _restaurant_cache: dict | None = None
 _restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
 _restaurant_refresh_inflight = False
@@ -41,6 +43,7 @@ _system_prompt_slim_cache: dict[str, str] = {}  # state → slim prompt
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
 RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
+DOUGH_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 
 BASE44_APP = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities"
 
@@ -65,6 +68,13 @@ def _customer_lookup_http_timeout_seconds() -> float:
     )
 
 
+def _dough_refresh_timeout_seconds() -> float:
+    return _positive_float_env(
+        "DOUGH_REFRESH_TIMEOUT_SECONDS",
+        DOUGH_REFRESH_TIMEOUT_DEFAULT_SECONDS,
+    )
+
+
 def _restaurant_refresh_timeout_seconds() -> float:
     return _positive_float_env(
         "RESTAURANT_REFRESH_TIMEOUT_SECONDS",
@@ -80,8 +90,9 @@ def reset_menu_cache() -> None:
 
 
 def reset_dough_cache() -> None:
-    global _dough_cache, _system_prompt_cache, _system_prompt_slim_cache
+    global _dough_cache, _dough_refresh_inflight, _system_prompt_cache, _system_prompt_slim_cache
     _dough_cache = []
+    _dough_refresh_inflight = False
     _system_prompt_cache = None
     _system_prompt_slim_cache = {}
 
@@ -185,46 +196,103 @@ def load_doughs() -> list[dict]:
         return []
 
 
-def fetch_and_save_doughs() -> list[dict]:
-    """
-    Scarica gli impasti dall'endpoint DoughType di Base44, salva su
-    dough_data.json e aggiorna la cache. Se il fetch fallisce, carica
-    da file.
-    """
-    global _dough_cache
+def _parse_doughs_from_base44_body(body: Any) -> list[dict]:
+    raw = body.get("entities", body) if isinstance(body, dict) else body
+    if not isinstance(raw, list):
+        print(f"[Dough] Formato Base44 inatteso: {type(raw).__name__}")
+        return []
+    return [
+        {
+            "name": item["name"],
+            "code": item["code"],
+            "surcharge": float(item.get("surcharge", 0.0)),
+            "available": item.get("available", True),
+        }
+        for item in raw
+        if isinstance(item, dict)
+    ]
+
+
+def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict]:
     token = os.getenv("BASE44_TOKEN")
     if not token:
-        print("[Dough] BASE44_TOKEN non configurato, carico da file")
-        return load_doughs()
+        print("[Dough] BASE44_TOKEN non configurato, skip refresh")
+        return []
 
     url = f"{BASE44_APP}/DoughType"
     try:
+        timeout = timeout_seconds or _dough_refresh_timeout_seconds()
         response = httpx.get(
             url,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
+            timeout=timeout,
         )
         response.raise_for_status()
         body = response.json()
         print(f"[Dough] Body keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__}")
-        raw = body.get("entities", body) if isinstance(body, dict) else body
-        doughs = [
-            {
-                "name": item["name"],
-                "code": item["code"],
-                "surcharge": float(item.get("surcharge", 0.0)),
-                "available": item.get("available", True),
-            }
-            for item in raw
-        ]
+        return _parse_doughs_from_base44_body(body)
+    except Exception as e:
+        print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {e}")
+        return []
+
+
+def _cache_doughs(doughs: list[dict], *, save_to_file: bool) -> list[dict]:
+    global _dough_cache
+    if save_to_file:
         with open(DOUGH_JSON_PATH, "w", encoding="utf-8") as f:
             json.dump(doughs, f, ensure_ascii=False, indent=2)
-        _dough_cache = _filter_doughs([d for d in doughs if d.get("available", True)])
-        print(f"[Dough] Scaricati da Base44, salvati. Impasti attivi: {[d['code'] for d in _dough_cache]}")
-        return _dough_cache
-    except Exception as e:
-        print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {e} — carico da file")
-        return load_doughs()
+    _dough_cache = _filter_doughs([d for d in doughs if d.get("available", True)])
+    print(f"[Dough] Cache aggiornata. Impasti attivi: {[d['code'] for d in _dough_cache]}")
+    return _dough_cache
+
+
+def _refresh_doughs_from_base44_blocking(*, save_to_file: bool = True) -> list[dict]:
+    started = time.perf_counter()
+    doughs = _fetch_doughs_from_base44()
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if not doughs:
+        record_latency("dough", "refresh", elapsed_ms, result="failed")
+        return []
+    record_latency("dough", "refresh", elapsed_ms, result="success")
+    return _cache_doughs(doughs, save_to_file=save_to_file)
+
+
+def _dough_refresh_worker() -> None:
+    global _dough_refresh_inflight
+    try:
+        print("[Dough] Refresh Base44 in background")
+        _refresh_doughs_from_base44_blocking(save_to_file=True)
+    finally:
+        with _dough_refresh_lock:
+            _dough_refresh_inflight = False
+
+
+def _start_dough_refresh_background() -> bool:
+    global _dough_refresh_inflight
+    with _dough_refresh_lock:
+        if _dough_refresh_inflight:
+            return False
+        _dough_refresh_inflight = True
+
+    thread = threading.Thread(
+        target=_dough_refresh_worker,
+        name="dough-refresh",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def fetch_and_save_doughs() -> list[dict]:
+    """Carica subito gli impasti locali e aggiorna Base44 in background."""
+    local = load_doughs()
+    if local:
+        _start_dough_refresh_background()
+        return local
+
+    print("[Dough] Nessun file locale disponibile: provo refresh Base44 breve")
+    fresh = _refresh_doughs_from_base44_blocking(save_to_file=True)
+    return fresh or []
 
 
 def get_dough_surcharge(dough_code: str) -> float:
