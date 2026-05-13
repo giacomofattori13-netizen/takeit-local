@@ -768,6 +768,26 @@ async def _build_response_twiml(result, session_id: str) -> str:
     )
 
 
+async def _build_retry_gather_twiml(
+    session_id: str,
+    message: str = "Scusi, non ho capito. Può ripetere?",
+) -> str:
+    audio, no_input = await asyncio.gather(
+        _audio_element_async(message),
+        _audio_element_async(_NO_INPUT_MSG),
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f"  <Gather {_GATHER_ATTRS} "
+        f'action="/voice/gather?session_id={session_id}" method="POST">\n'
+        f"    {audio}\n"
+        "  </Gather>\n"
+        f"  {no_input}\n"
+        "</Response>"
+    )
+
+
 @router.post("/process")
 async def voice_process(request: Request, session_id: str = Query(...)):
     """Chiamato da Twilio dopo il filler audio per collecting_items.
@@ -1119,6 +1139,18 @@ async def voice_gather(
             state=_state,
         )
         return Response(content=_timeout_twiml, media_type="application/xml")
+    except Exception as exc:
+        print(f"[Voice] voice_gather ERRORE session={session_id!r}: {type(exc).__name__}: {exc}")
+        record_latency(
+            "voice",
+            "gather",
+            (time.perf_counter() - started) * 1000,
+            result="error",
+            state=_state,
+            error=type(exc).__name__,
+        )
+        twiml = await _build_retry_gather_twiml(session_id)
+        return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
     if result.state != "completed":
