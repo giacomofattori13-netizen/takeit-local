@@ -2,7 +2,7 @@ import os
 import time
 import unittest
 
-from sqlmodel import create_engine
+from sqlmodel import SQLModel, Session, create_engine, select
 
 import app.routes.voice as voice_module
 from app.privacy import describe_text_for_log
@@ -12,6 +12,8 @@ from app.routes.voice import (
     _AUDIO_CACHE_META,
     _audio_cache_get,
     _audio_cache_put,
+    _apply_customer_profile_to_conversation,
+    _build_retry_gather_twiml,
     _cleanup_stale_pending_responses,
     _get_tts_stream_client,
     _needs_filler,
@@ -20,6 +22,7 @@ from app.routes.voice import (
     _prune_audio_cache,
     _resolve_customer_lookup_task,
     _run_chat_with_fresh_session,
+    _store_customer_profile_sync,
     _voice_greeting_lookup_timeout_seconds,
     close_tts_stream_client,
 )
@@ -122,6 +125,16 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertEqual(set(_AUDIO_CACHE), {"second", "third"})
         self.assertFalse(first.exists())
 
+    def test_retry_gather_twiml_keeps_call_open(self):
+        twiml = voice_module.asyncio.run(
+            _build_retry_gather_twiml("session-1", "Scusi, può ripetere?")
+        )
+
+        self.assertIn('action="/voice/gather?session_id=session-1"', twiml)
+        self.assertIn("<Gather", twiml)
+        self.assertIn("</Gather>", twiml)
+        self.assertIn("</Response>", twiml)
+
     def test_describe_text_for_log_does_not_include_raw_text(self):
         label = describe_text_for_log("Mario ordina una margherita")
 
@@ -212,6 +225,26 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(cancelled)
 
+    def test_customer_lookup_task_can_timeout_without_cancel(self):
+        async def run_lookup():
+            task = voice_module.asyncio.create_task(voice_module.asyncio.sleep(10))
+            try:
+                result = await _resolve_customer_lookup_task(
+                    task,
+                    "+393331234567",
+                    timeout_seconds=0.001,
+                    cancel_on_timeout=False,
+                )
+                return result, task.cancelled(), task.done()
+            finally:
+                task.cancel()
+
+        result, cancelled, done = voice_module.asyncio.run(run_lookup())
+
+        self.assertIsNone(result)
+        self.assertFalse(cancelled)
+        self.assertFalse(done)
+
     def test_voice_greeting_lookup_timeout_default_is_short(self):
         os.environ.pop("VOICE_GREETING_LOOKUP_TIMEOUT_SECONDS", None)
 
@@ -245,6 +278,52 @@ class VoiceLogicTests(unittest.TestCase):
 
         self.assertEqual(result, "ok")
         self.assertEqual(captured_binds, [test_engine])
+
+    def test_customer_profile_updates_name_and_favorites(self):
+        conversation = voice_module.ConversationSession(session_id="s1", items_json="[]")
+
+        found_name, changed = _apply_customer_profile_to_conversation(
+            conversation,
+            {
+                "full_name": "Mario Rossi",
+                "favorite_pizzas": "Margherita, Diavola",
+            },
+        )
+
+        self.assertEqual(found_name, "Mario Rossi")
+        self.assertTrue(changed)
+        self.assertEqual(conversation.customer_name, "Mario Rossi")
+        self.assertEqual(conversation.favorite_pizzas_json, '["Margherita", "Diavola"]')
+
+    def test_store_customer_profile_sync_updates_existing_session(self):
+        test_engine = create_engine("sqlite:///:memory:")
+        SQLModel.metadata.create_all(test_engine)
+        original_engine = voice_module._db_engine
+        with Session(test_engine) as db:
+            db.add(voice_module.ConversationSession(session_id="s1", items_json="[]"))
+            db.commit()
+
+        voice_module._db_engine = test_engine
+        try:
+            _store_customer_profile_sync(
+                "s1",
+                {
+                    "full_name": "Mario Rossi",
+                    "favorite_pizzas": ["Margherita"],
+                },
+            )
+        finally:
+            voice_module._db_engine = original_engine
+
+        with Session(test_engine) as db:
+            conversation = db.exec(
+                select(voice_module.ConversationSession).where(
+                    voice_module.ConversationSession.session_id == "s1"
+                )
+            ).first()
+
+        self.assertEqual(conversation.customer_name, "Mario Rossi")
+        self.assertEqual(conversation.favorite_pizzas_json, '["Margherita"]')
 
     def test_tts_stream_client_is_reused_and_closed(self):
         class FakeAsyncClient:
