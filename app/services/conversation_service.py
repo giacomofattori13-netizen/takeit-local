@@ -20,6 +20,7 @@ load_dotenv()
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
 BASE44_RESERVATION_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Reservation"
+BASE44_TABLE_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Table"
 
 MENU_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "menu_data.json")
@@ -1380,24 +1381,33 @@ def detect_reservation_intent(message: str) -> bool:
     return bool(_RESERVATION_INTENT_PATTERNS.search(message))
 
 
-def check_reservation_availability(date: str, time: str, party_size: int) -> tuple[bool, str | None]:
-    """
-    Controlla se c'è disponibilità per lo slot richiesto.
-    Ritorna (available, next_slot_suggestion).
-    Se max_covers non è configurato, assume sempre disponibile.
-    """
-    restaurant = load_restaurant()
-    max_covers = restaurant.get("max_covers")
-    slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
-
-    if not max_covers:
-        return True, None
-
-    max_covers = int(max_covers)
+def _fetch_tables_from_base44() -> list[dict]:
+    """Recupera tutti i tavoli configurati su Base44. Restituisce [] in caso di errore."""
     token = os.getenv("BASE44_TOKEN")
     if not token:
-        return True, None
+        return []
+    try:
+        response = httpx.get(
+            BASE44_TABLE_URL,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        entities = data.get("entities", []) if isinstance(data, dict) else data
+        tables = [t for t in (entities if isinstance(entities, list) else []) if t.get("status") != "maintenance"]
+        print(f"[Table] Recuperati {len(tables)} tavoli da Base44")
+        return tables
+    except Exception as e:
+        print(f"[Table] Errore fetch tavoli: {type(e).__name__}: {e}")
+        return []
 
+
+def _fetch_reservations_for_date(date: str) -> list[dict]:
+    """Recupera le prenotazioni per una data specifica."""
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        return []
     try:
         response = httpx.get(
             BASE44_RESERVATION_URL,
@@ -1408,61 +1418,191 @@ def check_reservation_availability(date: str, time: str, party_size: int) -> tup
         data = response.json()
         entities = data.get("entities", []) if isinstance(data, dict) else data
         if not isinstance(entities, list):
-            return True, None
+            return []
+        return [r for r in entities if r.get("date") == date and r.get("status") == "confermata"]
     except Exception as e:
-        print(f"[Reservation] Errore fetch disponibilità: {type(e).__name__}: {e}")
-        return True, None
+        print(f"[Reservation] Errore fetch prenotazioni: {type(e).__name__}: {e}")
+        return []
 
-    # Calcola lo slot di riferimento in minuti
+
+def _slot_overlaps(r_time_str: str, req_start: int, req_end: int, slot_minutes: int) -> bool:
+    try:
+        rh, rm = map(int, r_time_str.split(":"))
+        r_start = rh * 60 + rm
+        r_end = r_start + slot_minutes
+        return r_start < req_end and r_end > req_start
+    except Exception:
+        return False
+
+
+def assign_table(
+    date: str,
+    time: str,
+    party_size: int,
+    all_reservations: list[dict] | None = None,
+    slot_minutes: int = 90,
+) -> dict | None:
+    """
+    Assegna il tavolo migliore disponibile per lo slot richiesto.
+
+    Strategia (in ordine):
+    1. Tavolo singolo più piccolo che basta (least waste)
+    2. Tavolo singolo con prolunga (extended_capacity)
+    3. Combinazione di tavoli (combinable_with)
+
+    Ritorna {table_id, table_name, extended, combined_tables} oppure None.
+    """
+    tables = _fetch_tables_from_base44()
+    if not tables:
+        print("[Table] Nessun tavolo configurato, skip assign_table")
+        return None
+
+    if all_reservations is None:
+        all_reservations = _fetch_reservations_for_date(date)
+
+    # Calcola intervallo richiesto in minuti
     try:
         h, m = map(int, time.split(":"))
-        requested_start = h * 60 + m
-        requested_end = requested_start + slot_minutes
+        req_start = h * 60 + m
+        req_end = req_start + slot_minutes
     except Exception:
-        return True, None
+        return None
 
-    # Conta i coperti già prenotati che si sovrappongono con lo slot richiesto
-    booked_covers = 0
-    active_statuses = {"confermata"}
-    for r in entities:
-        if r.get("date") != date or r.get("status") not in active_statuses:
-            continue
+    # Tavoli già occupati in questo slot
+    occupied_ids: set[str] = set()
+    for r in all_reservations:
+        r_time = r.get("time") or ""
+        if _slot_overlaps(r_time, req_start, req_end, slot_minutes):
+            if r.get("table_id"):
+                occupied_ids.add(r["table_id"])
+            for tid in (r.get("combined_tables") or []):
+                occupied_ids.add(tid)
+
+    available = [t for t in tables if t.get("id") not in occupied_ids]
+    avail_by_id = {t["id"]: t for t in available}
+
+    # 1. Tavolo singolo (least waste)
+    single_fits = [t for t in available if (t.get("capacity") or 0) >= party_size]
+    if single_fits:
+        best = min(single_fits, key=lambda t: t.get("capacity", 0))
+        print(f"[Table] Assegnato tavolo singolo: {best['name']} cap={best.get('capacity')}")
+        return {
+            "table_id": best["id"],
+            "table_name": best["name"],
+            "extended": False,
+            "combined_tables": [],
+        }
+
+    # 2. Tavolo con prolunga
+    extendable = [
+        t for t in available
+        if t.get("extendable") and (t.get("extended_capacity") or 0) >= party_size
+    ]
+    if extendable:
+        best = min(extendable, key=lambda t: t.get("extended_capacity", 0))
+        print(f"[Table] Assegnato con prolunga: {best['name']} ext_cap={best.get('extended_capacity')}")
+        return {
+            "table_id": best["id"],
+            "table_name": best["name"],
+            "extended": True,
+            "combined_tables": [],
+        }
+
+    # 3. Combinazione di tavoli
+    for table in sorted(available, key=lambda t: t.get("capacity", 0), reverse=True):
+        for partner_id in (table.get("combinable_with") or []):
+            partner = avail_by_id.get(partner_id)
+            if not partner:
+                continue
+            combined_cap = (
+                table.get("combined_capacity")
+                or (table.get("capacity", 0) + partner.get("capacity", 0))
+            )
+            if combined_cap >= party_size:
+                name = f"{table['name']} + {partner['name']}"
+                print(f"[Table] Assegnata combinazione: {name} cap={combined_cap}")
+                return {
+                    "table_id": table["id"],
+                    "table_name": name,
+                    "extended": False,
+                    "combined_tables": [partner_id],
+                }
+
+    print(f"[Table] Nessun tavolo disponibile per party_size={party_size} date={date} time={time}")
+    return None
+
+
+def check_reservation_availability(
+    date: str, time: str, party_size: int
+) -> tuple[bool, str | None, dict | None]:
+    """
+    Controlla disponibilità per lo slot richiesto tramite assegnazione tavolo reale.
+    Fallback su max_covers quando nessun Table è configurato su Base44.
+
+    Ritorna (available, next_slot_suggestion, table_info).
+    table_info è {table_id, table_name, extended, combined_tables} oppure None.
+    """
+    restaurant = load_restaurant()
+    slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
+
+    # Tenta assegnazione tavolo reale
+    all_reservations = _fetch_reservations_for_date(date)
+    table_info = assign_table(date, time, party_size, all_reservations, slot_minutes)
+
+    if table_info is not None:
+        return True, None, table_info
+
+    # Verifica se ci sono tavoli configurati (se sì, il fallback max_covers non si applica)
+    tables_configured = bool(_fetch_tables_from_base44())
+
+    if not tables_configured:
+        # Fallback: logica max_covers originale
+        max_covers = restaurant.get("max_covers")
+        if not max_covers:
+            return True, None, None
+        max_covers = int(max_covers)
         try:
-            rh, rm = map(int, (r.get("time") or "0:0").split(":"))
-            r_start = rh * 60 + rm
-            r_end = r_start + slot_minutes
-            if r_start < requested_end and r_end > requested_start:
-                booked_covers += int(r.get("party_size") or 0)
+            h, m = map(int, time.split(":"))
+            req_start = h * 60 + m
+            req_end = req_start + slot_minutes
         except Exception:
-            continue
+            return True, None, None
 
-    if booked_covers + party_size <= max_covers:
-        return True, None
+        booked = sum(
+            int(r.get("party_size") or 0)
+            for r in all_reservations
+            if _slot_overlaps(r.get("time") or "", req_start, req_end, slot_minutes)
+        )
+        if booked + party_size <= max_covers:
+            return True, None, None
 
-    # Trova il prossimo slot disponibile (prova ogni slot_minutes avanti, fino a 3 tentativi)
+    # Nessuna disponibilità nello slot richiesto: cerca i prossimi slot
+    try:
+        h, m = map(int, time.split(":"))
+        req_start = h * 60 + m
+    except Exception:
+        return False, None, None
+
     for delta in range(1, 4):
-        next_start = requested_start + delta * slot_minutes
+        next_start = req_start + delta * slot_minutes
         next_h, next_m = divmod(next_start, 60)
         next_time = f"{next_h:02d}:{next_m:02d}"
-        next_end = next_start + slot_minutes
+        if tables_configured:
+            next_table = assign_table(date, next_time, party_size, all_reservations, slot_minutes)
+            if next_table is not None:
+                return False, next_time, None
+        else:
+            max_covers = int(restaurant.get("max_covers") or 0)
+            next_end = next_start + slot_minutes
+            next_booked = sum(
+                int(r.get("party_size") or 0)
+                for r in all_reservations
+                if _slot_overlaps(r.get("time") or "", next_start, next_end, slot_minutes)
+            )
+            if max_covers and next_booked + party_size <= max_covers:
+                return False, next_time, None
 
-        next_covers = 0
-        for r in entities:
-            if r.get("date") != date or r.get("status") not in active_statuses:
-                continue
-            try:
-                rh, rm = map(int, (r.get("time") or "0:0").split(":"))
-                r_start = rh * 60 + rm
-                r_end = r_start + slot_minutes
-                if r_start < next_end and r_end > next_start:
-                    next_covers += int(r.get("party_size") or 0)
-            except Exception:
-                continue
-
-        if next_covers + party_size <= max_covers:
-            return False, next_time
-
-    return False, None
+    return False, None, None
 
 
 def save_reservation_to_base44(
@@ -1473,6 +1613,10 @@ def save_reservation_to_base44(
     party_size: int,
     session_id: str,
     notes: str = "",
+    table_id: str | None = None,
+    table_name: str | None = None,
+    combined_tables: list[str] | None = None,
+    extended: bool = False,
 ) -> str | None:
     """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore."""
     api_key = os.getenv("BASE44_API_KEY")
@@ -1490,10 +1634,15 @@ def save_reservation_to_base44(
         "source": "telefono",
         "notes": notes,
         "session_id": session_id,
+        "table_id": table_id,
+        "table_name": table_name,
+        "combined_tables": combined_tables or [],
+        "extended": extended,
     }
     print(
         f"[Reservation] Salvo: customer={mask_name(customer_name)} "
-        f"phone={mask_phone(customer_phone)} date={date} time={time} party={party_size} session={session_id}"
+        f"phone={mask_phone(customer_phone)} date={date} time={time} party={party_size} "
+        f"table={table_name!r} session={session_id}"
     )
     try:
         response = httpx.post(
@@ -1518,6 +1667,7 @@ def send_reservation_sms(
     date: str,
     time: str,
     party_size: int,
+    table_name: str | None = None,
 ) -> str:
     """Invia SMS di conferma prenotazione. Ritorna stringa di stato."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
@@ -1547,9 +1697,11 @@ def send_reservation_sms(
     except Exception:
         date_str = date
 
+    persons_str = f"{party_size} {'persona' if party_size == 1 else 'persone'}"
+    table_part = f", {table_name}" if table_name else ""
     parts = [
         f"{pizzeria_name} ✅",
-        f"Prenotazione confermata — {customer_name}, {date_str} alle {time}, {party_size} {'persona' if party_size == 1 else 'persone'}.",
+        f"Prenotazione confermata — {customer_name}, {date_str} alle {time}, {persons_str}{table_part}.",
     ]
     if pizzeria_phone:
         parts.append(f"Per modifiche chiama il {pizzeria_phone}.")

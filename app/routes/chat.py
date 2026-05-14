@@ -1694,12 +1694,19 @@ def chat(request: ChatRequest, session: SessionDep):
             res_data["party_size"] = party
             conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
 
-            # Controllo disponibilità
-            available, next_slot = check_reservation_availability(
+            # Controllo disponibilità e assegnazione tavolo
+            available, next_slot, table_info = check_reservation_availability(
                 res_data.get("date", ""),
                 res_data.get("time", ""),
                 party,
             )
+            if table_info:
+                res_data["table_id"] = table_info.get("table_id")
+                res_data["table_name"] = table_info.get("table_name")
+                res_data["combined_tables"] = table_info.get("combined_tables", [])
+                res_data["extended"] = table_info.get("extended", False)
+                conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+                print(f"[Reservation] Tavolo assegnato: {table_info.get('table_name')!r}")
             if not available:
                 if next_slot:
                     res_data["time"] = next_slot
@@ -1713,7 +1720,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 else:
                     conversation.state = "collecting_reservation_date"
                     conversation.reservation_json = "{}"
-                    msg = "Mi dispiace, non ho disponibilità per quella data. Per quale altro giorno?",
+                    msg = "Mi dispiace, non ho disponibilità per quella data. Per quale altro giorno?"
                 _log_chat_timing(request.session_id, "reservation_no_availability", request_started_at)
                 return _res_response(conversation.state, msg)
 
@@ -1738,9 +1745,10 @@ def chat(request: ChatRequest, session: SessionDep):
             time_str = res_data.get("time", "")
             party_str = res_data.get("party_size", "")
             name_str = conversation.customer_name or ""
+            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
             msg = (
                 f"Riepilogo: {name_str}, {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}. Confermo?"
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}. Confermo?"
             )
             return _res_response("awaiting_reservation_confirmation", msg)
 
@@ -1753,9 +1761,10 @@ def chat(request: ChatRequest, session: SessionDep):
             date_it = _format_reservation_date_it(res_data.get("date", ""))
             time_str = res_data.get("time", "")
             party_str = res_data.get("party_size", "")
+            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
             msg = (
                 f"Riepilogo: {local_name}, {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}. Confermo?"
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}. Confermo?"
             )
             print(f"[Reservation] Nome: {mask_name(local_name)}")
             _log_chat_timing(request.session_id, "reservation_name", request_started_at)
@@ -1771,6 +1780,10 @@ def chat(request: ChatRequest, session: SessionDep):
 
         if _is_confirm_res:
             res_data = json.loads(conversation.reservation_json or "{}")
+            _res_table_id = res_data.get("table_id")
+            _res_table_name = res_data.get("table_name")
+            _res_combined = res_data.get("combined_tables") or []
+            _res_extended = bool(res_data.get("extended", False))
             # Salva su Base44
             reservation_id = save_reservation_to_base44(
                 customer_name=conversation.customer_name or "Ospite",
@@ -1779,22 +1792,28 @@ def chat(request: ChatRequest, session: SessionDep):
                 time=res_data.get("time", ""),
                 party_size=int(res_data.get("party_size") or 1),
                 session_id=request.session_id,
+                table_id=_res_table_id,
+                table_name=_res_table_name,
+                combined_tables=_res_combined,
+                extended=_res_extended,
             )
             print(
                 f"[Reservation] Confermata session={request.session_id} "
                 f"id={reservation_id} date={res_data.get('date')} time={res_data.get('time')} "
-                f"party={res_data.get('party_size')} name={mask_name(conversation.customer_name or '')}"
+                f"party={res_data.get('party_size')} table={_res_table_name!r} "
+                f"name={mask_name(conversation.customer_name or '')}"
             )
             # Invia SMS in background
             threading.Thread(
                 target=send_reservation_sms,
-                args=(
-                    conversation.customer_name or "Ospite",
-                    conversation.customer_phone,
-                    res_data.get("date", ""),
-                    res_data.get("time", ""),
-                    int(res_data.get("party_size") or 1),
-                ),
+                kwargs={
+                    "customer_name": conversation.customer_name or "Ospite",
+                    "customer_phone": conversation.customer_phone,
+                    "date": res_data.get("date", ""),
+                    "time": res_data.get("time", ""),
+                    "party_size": int(res_data.get("party_size") or 1),
+                    "table_name": _res_table_name,
+                },
                 daemon=True,
             ).start()
 
@@ -1823,9 +1842,10 @@ def chat(request: ChatRequest, session: SessionDep):
             time_str = res_data.get("time", "")
             party_str = res_data.get("party_size", "")
             name_str = conversation.customer_name or ""
+            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
             msg = (
                 f"{name_str}, confermo per {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}?"
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}?"
             )
             _log_chat_timing(request.session_id, "reservation_confirm_retry", request_started_at)
             return _res_response("awaiting_reservation_confirmation", msg)
