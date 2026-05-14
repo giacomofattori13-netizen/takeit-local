@@ -147,6 +147,80 @@ class ExtractionValidationTests(unittest.TestCase):
         self.assertNotIn("Mario Rossi", logs)
         self.assertNotIn("margherita", logs.lower())
 
+    def test_extract_order_masks_alias_and_item_logs(self):
+        original_get_client = conversation_service.get_openai_client
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                return type(
+                    "FakeResponse",
+                    (),
+                    {
+                        "usage": None,
+                        "choices": [
+                            type(
+                                "FakeChoice",
+                                (),
+                                {
+                                    "message": type(
+                                        "FakeMessage",
+                                        (),
+                                        {
+                                            "content": (
+                                                '{"intent": "add_items", '
+                                                '"customer_name": null, '
+                                                '"pickup_time": null, '
+                                                '"items": [{'
+                                                '"pizza_name": "Margherita", '
+                                                '"dough_type": "classica", '
+                                                '"quantity": 1, '
+                                                '"size": "normale", '
+                                                '"add_ingredients": ["gorgonzola"], '
+                                                '"remove_ingredients": ["olive"]'
+                                                '}]}'
+                                            )
+                                        },
+                                    )()
+                                },
+                            )()
+                        ],
+                    },
+                )()
+
+        fake_client = type(
+            "FakeClient",
+            (),
+            {
+                "chat": type(
+                    "FakeChat",
+                    (),
+                    {"completions": FakeCompletions()},
+                )()
+            },
+        )()
+
+        conversation_service.get_openai_client = lambda: fake_client
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                parsed = extract_order_from_text(
+                    "aggiungi verde alla pizza di Mario",
+                    [{"name": "Margherita", "ingredients": []}],
+                    [{"name": "Classica", "code": "classica", "surcharge": 0.0}],
+                )
+        finally:
+            conversation_service.get_openai_client = original_get_client
+
+        self.assertEqual(parsed["items"][0]["pizza_name"], "Margherita")
+        logs = output.getvalue().lower()
+        self.assertIn("alias applicati", logs)
+        self.assertIn("add_count=1", logs)
+        self.assertNotIn("verde", logs)
+        self.assertNotIn("gorgonzola", logs)
+        self.assertNotIn("margherita", logs)
+        self.assertNotIn("olive", logs)
+        self.assertNotIn("mario", logs)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1862,7 +1862,11 @@ def extract_order_from_text(
 
     normalized = _apply_aliases(message)
     if normalized != message:
-        print(f"[LLM] Alias applicati: {message!r} → {normalized!r}")
+        print(
+            "[LLM] Alias applicati: "
+            f"before={describe_text_for_log(message)} "
+            f"after={describe_text_for_log(normalized)}"
+        )
 
     # Per collecting_items inietta il contesto di sessione nel messaggio utente
     # (non nel system prompt, che rimane statico per attivare il prefix caching OpenAI).
@@ -1945,7 +1949,14 @@ def extract_order_from_text(
         if size not in ("normale", "mini", "doppio"):
             size = "normale"
         item["size"] = size
-        print(f"[LLM] estratto: pizza={item.get('pizza_name')!r} dough={dough_log!r} size={size!r} add={add_ing} remove={rem_ing}")
+        add_count = len(add_ing) if isinstance(add_ing, list) else 0
+        remove_count = len(rem_ing) if isinstance(rem_ing, list) else 0
+        print(
+            "[LLM] estratto: "
+            f"pizza={describe_text_for_log(str(item.get('pizza_name') or ''))} "
+            f"dough={dough_log!r} size={size!r} "
+            f"add_count={add_count} remove_count={remove_count}"
+        )
         dough = item.get("dough_type", "classica")
         item["dough_type"] = dough
         item["pizza_type"] = _DOUGH_TO_PIZZA_TYPE.get(dough, "Normale")
@@ -1958,7 +1969,11 @@ def extract_order_from_text(
         key = (item["pizza_name"].lower(), item["dough_type"])
         canonical = name_lookup.get(key)
         if canonical and canonical != item["pizza_name"]:
-            print(f"[LLM] Nome corretto: '{item['pizza_name']}' → '{canonical}'")
+            print(
+                "[LLM] Nome corretto: "
+                f"from={describe_text_for_log(item['pizza_name'])} "
+                f"to={describe_text_for_log(canonical)}"
+            )
             item["pizza_name"] = canonical
 
     return parsed
