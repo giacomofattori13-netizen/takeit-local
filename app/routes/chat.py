@@ -49,6 +49,10 @@ from app.services.conversation_service import (
     resolve_pickup_time,
     lookup_customer,
     upsert_customer,
+    detect_reservation_intent,
+    check_reservation_availability,
+    save_reservation_to_base44,
+    send_reservation_sms,
 )
 from app.telemetry import record_latency
 
@@ -680,6 +684,114 @@ def _extract_local_pickup_time(message: str) -> str | None:
             return f"{hour}:{minute:02d}"
 
     return None
+
+
+_ITALIAN_MONTHS = {
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4,
+    "maggio": 5, "giugno": 6, "luglio": 7, "agosto": 8,
+    "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+
+_ITALIAN_WEEKDAYS = {
+    "lunedì": 0, "lunedi": 0, "martedì": 1, "martedi": 1,
+    "mercoledì": 2, "mercoledi": 2, "giovedì": 3, "giovedi": 3,
+    "venerdì": 4, "venerdi": 4, "sabato": 5, "domenica": 6,
+}
+
+
+def _extract_reservation_date(message: str) -> str | None:
+    """Estrae una data dal testo e la restituisce in formato YYYY-MM-DD."""
+    import datetime as _dt
+    normalized = _normalize_for_match(message).strip()
+    today = _dt.date.today()
+
+    if re.search(r"\b(oggi)\b", normalized):
+        return today.isoformat()
+    if re.search(r"\b(domani)\b", normalized):
+        return (today + _dt.timedelta(days=1)).isoformat()
+    if re.search(r"\b(dopodomani)\b", normalized):
+        return (today + _dt.timedelta(days=2)).isoformat()
+
+    # Giorno della settimana: "sabato", "domenica prossima" ecc.
+    for it_name, weekday in _ITALIAN_WEEKDAYS.items():
+        if re.search(rf"\b{re.escape(it_name)}\b", normalized):
+            days_ahead = (weekday - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            return (today + _dt.timedelta(days=days_ahead)).isoformat()
+
+    # "21 maggio", "21/05", "21/05/2026", "21-05-2026"
+    match = re.search(
+        r"(\d{1,2})[/\-\s](\d{1,2})(?:[/\-\s](\d{2,4}))?",
+        normalized,
+    )
+    if match:
+        day = int(match.group(1))
+        month = int(match.group(2))
+        year_raw = match.group(3)
+        year = int(year_raw) if year_raw else today.year
+        if year < 100:
+            year += 2000
+        try:
+            d = _dt.date(year, month, day)
+            if d < today:
+                d = _dt.date(year + 1, month, day)
+            return d.isoformat()
+        except ValueError:
+            pass
+
+    # "21 maggio"
+    match2 = re.search(
+        r"(\d{1,2})\s+(" + "|".join(_ITALIAN_MONTHS.keys()) + r")\b",
+        normalized,
+    )
+    if match2:
+        day = int(match2.group(1))
+        month = _ITALIAN_MONTHS[match2.group(2)]
+        year = today.year
+        try:
+            d = _dt.date(year, month, day)
+            if d < today:
+                d = _dt.date(year + 1, month, day)
+            return d.isoformat()
+        except ValueError:
+            pass
+
+    return None
+
+
+def _extract_party_size(message: str) -> int | None:
+    """Estrae il numero di persone dal testo."""
+    normalized = _normalize_for_match(message)
+    word_to_num = {
+        "una": 1, "uno": 1, "un": 1, "due": 2, "tre": 3, "quattro": 4,
+        "cinque": 5, "sei": 6, "sette": 7, "otto": 8, "nove": 9, "dieci": 10,
+    }
+    # Cifra numerica
+    m = re.search(r"\b(\d+)\b", normalized)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 30:
+            return n
+    # Parola
+    for word, n in word_to_num.items():
+        if re.search(rf"\b{word}\b", normalized):
+            return n
+    return None
+
+
+def _format_reservation_date_it(date_str: str) -> str:
+    """Formatta una data YYYY-MM-DD in italiano: '21 maggio 2026'."""
+    import datetime as _dt
+    months_it = [
+        "", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+        "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+    ]
+    try:
+        d = _dt.date.fromisoformat(date_str)
+        return f"{d.day} {months_it[d.month]} {d.year}"
+    except Exception:
+        return date_str
 
 
 def _build_pickup_time_error(
@@ -1488,6 +1600,239 @@ def chat(request: ChatRequest, session: SessionDep):
             order_id=existing_order.id if existing_order else None,
             state="completed",
         )
+
+    # ── FLUSSO PRENOTAZIONE ───────────────────────────────────────────────────
+    # Rilevamento nel primo turno (collecting_items + carrello vuoto)
+    _res_states = {
+        "collecting_reservation_date",
+        "collecting_reservation_time",
+        "collecting_reservation_party",
+        "collecting_reservation_name",
+        "awaiting_reservation_confirmation",
+        "reservation_completed",
+    }
+
+    def _res_response(state: str, resp: str, valid: bool = False) -> ChatResponse:
+        stub = {"intent": "reservation", "items": [], "customer_name": None, "pickup_time": None}
+        res_data = json.loads(conversation.reservation_json or "{}")
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps(stub, ensure_ascii=False),
+            merged_order_json=json.dumps(res_data, ensure_ascii=False),
+            response_message=resp,
+            valid=valid,
+            missing_items_json="[]",
+            state=state,
+        ))
+        session.add(conversation)
+        session.commit()
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order=stub,
+            merged_order=res_data,
+            valid=valid,
+            missing_items=[],
+            response_message=resp,
+            order_id=None,
+            state=state,
+        )
+
+    # Trigger: messaggio di prenotazione nel primo turno
+    if (
+        conversation.state == "collecting_items"
+        and not json.loads(conversation.items_json)
+        and detect_reservation_intent(request.message)
+    ):
+        conversation.state = "collecting_reservation_date"
+        conversation.reservation_json = "{}"
+        print(f"[Reservation] Intent rilevato, entro nel flusso prenotazione")
+        _log_chat_timing(request.session_id, "reservation_intent", request_started_at)
+        return _res_response(
+            "collecting_reservation_date",
+            "Certo! Per quale giorno vuole prenotare?",
+        )
+
+    if conversation.state == "collecting_reservation_date":
+        res_date = _extract_reservation_date(request.message)
+        if res_date:
+            res_data = json.loads(conversation.reservation_json or "{}")
+            res_data["date"] = res_date
+            conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+            conversation.state = "collecting_reservation_time"
+            print(f"[Reservation] Data: {res_date}")
+            _log_chat_timing(request.session_id, "reservation_date", request_started_at)
+            return _res_response("collecting_reservation_time", "A che ora?")
+        _log_chat_timing(request.session_id, "reservation_date_retry", request_started_at)
+        return _res_response(
+            "collecting_reservation_date",
+            "Non ho capito la data. Può dirmi il giorno? (Es: sabato, 21 maggio)",
+        )
+
+    if conversation.state == "collecting_reservation_time":
+        local_time = _extract_local_pickup_time(request.message)
+        if local_time:
+            res_time = resolve_pickup_time(local_time)
+            res_data = json.loads(conversation.reservation_json or "{}")
+            res_data["time"] = res_time
+            conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+            conversation.state = "collecting_reservation_party"
+            print(f"[Reservation] Orario: {res_time}")
+            _log_chat_timing(request.session_id, "reservation_time", request_started_at)
+            return _res_response("collecting_reservation_party", "Per quante persone?")
+        _log_chat_timing(request.session_id, "reservation_time_retry", request_started_at)
+        return _res_response(
+            "collecting_reservation_time",
+            "Non ho capito l'orario. Può indicarmi a che ora? (Es: 20:00, alle 8 di sera)",
+        )
+
+    if conversation.state == "collecting_reservation_party":
+        party = _extract_party_size(request.message)
+        if party and party >= 1:
+            res_data = json.loads(conversation.reservation_json or "{}")
+            res_data["party_size"] = party
+            conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+
+            # Controllo disponibilità
+            available, next_slot = check_reservation_availability(
+                res_data.get("date", ""),
+                res_data.get("time", ""),
+                party,
+            )
+            if not available:
+                if next_slot:
+                    res_data["time"] = next_slot
+                    conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+                    conversation.state = "collecting_reservation_party"
+                    msg = (
+                        f"Mi dispiace, quello slot è esaurito. "
+                        f"Ho disponibilità alle {next_slot} — va bene?"
+                    )
+                    print(f"[Reservation] Slot esaurito, propongo {next_slot}")
+                else:
+                    conversation.state = "collecting_reservation_date"
+                    conversation.reservation_json = "{}"
+                    msg = "Mi dispiace, non ho disponibilità per quella data. Per quale altro giorno?",
+                _log_chat_timing(request.session_id, "reservation_no_availability", request_started_at)
+                return _res_response(conversation.state, msg)
+
+            if not conversation.customer_name:
+                conversation.state = "collecting_reservation_name"
+                print(f"[Reservation] Party: {party}, chiedo nome")
+                _log_chat_timing(request.session_id, "reservation_party", request_started_at)
+                return _res_response("collecting_reservation_name", "A nome di chi?")
+            else:
+                conversation.state = "awaiting_reservation_confirmation"
+                _log_chat_timing(request.session_id, "reservation_party_known_name", request_started_at)
+        else:
+            _log_chat_timing(request.session_id, "reservation_party_retry", request_started_at)
+            return _res_response(
+                "collecting_reservation_party",
+                "Non ho capito. Per quante persone è la prenotazione?",
+            )
+
+        if conversation.state == "awaiting_reservation_confirmation":
+            res_data = json.loads(conversation.reservation_json or "{}")
+            date_it = _format_reservation_date_it(res_data.get("date", ""))
+            time_str = res_data.get("time", "")
+            party_str = res_data.get("party_size", "")
+            name_str = conversation.customer_name or ""
+            msg = (
+                f"Riepilogo: {name_str}, {date_it} alle {time_str}, "
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}. Confermo?"
+            )
+            return _res_response("awaiting_reservation_confirmation", msg)
+
+    if conversation.state == "collecting_reservation_name":
+        local_name = _extract_local_customer_name(request.message)
+        if local_name:
+            conversation.customer_name = local_name
+            conversation.state = "awaiting_reservation_confirmation"
+            res_data = json.loads(conversation.reservation_json or "{}")
+            date_it = _format_reservation_date_it(res_data.get("date", ""))
+            time_str = res_data.get("time", "")
+            party_str = res_data.get("party_size", "")
+            msg = (
+                f"Riepilogo: {local_name}, {date_it} alle {time_str}, "
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}. Confermo?"
+            )
+            print(f"[Reservation] Nome: {mask_name(local_name)}")
+            _log_chat_timing(request.session_id, "reservation_name", request_started_at)
+            return _res_response("awaiting_reservation_confirmation", msg)
+        _log_chat_timing(request.session_id, "reservation_name_retry", request_started_at)
+        return _res_response("collecting_reservation_name", "A nome di chi devo mettere la prenotazione?")
+
+    if conversation.state == "awaiting_reservation_confirmation":
+        _confirm_res = {"si", "sì", "ok", "va bene", "confermo", "certo", "esatto", "perfetto", "yes"}
+        _cancel_res = {"no", "annulla", "cancella", "stop"}
+        _is_confirm_res = any(w in message_lower for w in _confirm_res)
+        _is_cancel_res = any(w in message_lower for w in _cancel_res)
+
+        if _is_confirm_res:
+            res_data = json.loads(conversation.reservation_json or "{}")
+            # Salva su Base44
+            reservation_id = save_reservation_to_base44(
+                customer_name=conversation.customer_name or "Ospite",
+                customer_phone=conversation.customer_phone,
+                date=res_data.get("date", ""),
+                time=res_data.get("time", ""),
+                party_size=int(res_data.get("party_size") or 1),
+                session_id=request.session_id,
+            )
+            print(
+                f"[Reservation] Confermata session={request.session_id} "
+                f"id={reservation_id} date={res_data.get('date')} time={res_data.get('time')} "
+                f"party={res_data.get('party_size')} name={mask_name(conversation.customer_name or '')}"
+            )
+            # Invia SMS in background
+            threading.Thread(
+                target=send_reservation_sms,
+                args=(
+                    conversation.customer_name or "Ospite",
+                    conversation.customer_phone,
+                    res_data.get("date", ""),
+                    res_data.get("time", ""),
+                    int(res_data.get("party_size") or 1),
+                ),
+                daemon=True,
+            ).start()
+
+            conversation.state = "reservation_completed"
+            conversation.completed = True
+            date_it = _format_reservation_date_it(res_data.get("date", ""))
+            name_part = f" {conversation.customer_name}" if conversation.customer_name else ""
+            if _is_mobile_phone(conversation.customer_phone):
+                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. Ti mando un SMS di conferma."
+            else:
+                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. A presto!"
+            _log_chat_timing(request.session_id, "reservation_confirmed", request_started_at)
+            return _res_response("reservation_completed", resp_msg, valid=True)
+
+        elif _is_cancel_res:
+            conversation.state = "collecting_reservation_date"
+            conversation.reservation_json = "{}"
+            _log_chat_timing(request.session_id, "reservation_cancelled", request_started_at)
+            return _res_response(
+                "collecting_reservation_date",
+                "Prenotazione annullata. Per quale altro giorno vuole prenotare?",
+            )
+        else:
+            res_data = json.loads(conversation.reservation_json or "{}")
+            date_it = _format_reservation_date_it(res_data.get("date", ""))
+            time_str = res_data.get("time", "")
+            party_str = res_data.get("party_size", "")
+            name_str = conversation.customer_name or ""
+            msg = (
+                f"{name_str}, confermo per {date_it} alle {time_str}, "
+                f"{party_str} {'persona' if party_str == 1 else 'persone'}?"
+            )
+            _log_chat_timing(request.session_id, "reservation_confirm_retry", request_started_at)
+            return _res_response("awaiting_reservation_confirmation", msg)
+
+    if conversation.state == "reservation_completed":
+        _log_chat_timing(request.session_id, "reservation_completed_repeat", request_started_at)
+        return _res_response("reservation_completed", "La prenotazione è già stata confermata. A presto!", valid=True)
 
     # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
     # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.

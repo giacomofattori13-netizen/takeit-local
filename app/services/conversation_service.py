@@ -19,6 +19,7 @@ load_dotenv()
 
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
+BASE44_RESERVATION_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Reservation"
 
 MENU_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "menu_data.json")
@@ -1364,6 +1365,214 @@ def upsert_customer(
             print(f"[Customer] Creato: {mask_name(full_name)} | total_spend={payload['total_spend']}")
         except Exception as e:
             print(f"[Customer] Errore create: {type(e).__name__}: {e}")
+
+
+_RESERVATION_INTENT_PATTERNS = re.compile(
+    r"vorrei\s+prenotar|prenotar|prenot|ho\s+un\s+tavolo|posso\s+prenotar"
+    r"|un\s+tavolo|tavolo\s+per|posto\s+per|cena\s+per|pranzo\s+per"
+    r"|riservare?\s+un\s+tavolo|riservazione",
+    re.IGNORECASE,
+)
+
+
+def detect_reservation_intent(message: str) -> bool:
+    """Restituisce True se il messaggio indica una richiesta di prenotazione tavolo."""
+    return bool(_RESERVATION_INTENT_PATTERNS.search(message))
+
+
+def check_reservation_availability(date: str, time: str, party_size: int) -> tuple[bool, str | None]:
+    """
+    Controlla se c'è disponibilità per lo slot richiesto.
+    Ritorna (available, next_slot_suggestion).
+    Se max_covers non è configurato, assume sempre disponibile.
+    """
+    restaurant = load_restaurant()
+    max_covers = restaurant.get("max_covers")
+    slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
+
+    if not max_covers:
+        return True, None
+
+    max_covers = int(max_covers)
+    token = os.getenv("BASE44_TOKEN")
+    if not token:
+        return True, None
+
+    try:
+        response = httpx.get(
+            BASE44_RESERVATION_URL,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5,
+        )
+        response.raise_for_status()
+        data = response.json()
+        entities = data.get("entities", []) if isinstance(data, dict) else data
+        if not isinstance(entities, list):
+            return True, None
+    except Exception as e:
+        print(f"[Reservation] Errore fetch disponibilità: {type(e).__name__}: {e}")
+        return True, None
+
+    # Calcola lo slot di riferimento in minuti
+    try:
+        h, m = map(int, time.split(":"))
+        requested_start = h * 60 + m
+        requested_end = requested_start + slot_minutes
+    except Exception:
+        return True, None
+
+    # Conta i coperti già prenotati che si sovrappongono con lo slot richiesto
+    booked_covers = 0
+    active_statuses = {"confermata"}
+    for r in entities:
+        if r.get("date") != date or r.get("status") not in active_statuses:
+            continue
+        try:
+            rh, rm = map(int, (r.get("time") or "0:0").split(":"))
+            r_start = rh * 60 + rm
+            r_end = r_start + slot_minutes
+            if r_start < requested_end and r_end > requested_start:
+                booked_covers += int(r.get("party_size") or 0)
+        except Exception:
+            continue
+
+    if booked_covers + party_size <= max_covers:
+        return True, None
+
+    # Trova il prossimo slot disponibile (prova ogni slot_minutes avanti, fino a 3 tentativi)
+    for delta in range(1, 4):
+        next_start = requested_start + delta * slot_minutes
+        next_h, next_m = divmod(next_start, 60)
+        next_time = f"{next_h:02d}:{next_m:02d}"
+        next_end = next_start + slot_minutes
+
+        next_covers = 0
+        for r in entities:
+            if r.get("date") != date or r.get("status") not in active_statuses:
+                continue
+            try:
+                rh, rm = map(int, (r.get("time") or "0:0").split(":"))
+                r_start = rh * 60 + rm
+                r_end = r_start + slot_minutes
+                if r_start < next_end and r_end > next_start:
+                    next_covers += int(r.get("party_size") or 0)
+            except Exception:
+                continue
+
+        if next_covers + party_size <= max_covers:
+            return False, next_time
+
+    return False, None
+
+
+def save_reservation_to_base44(
+    customer_name: str,
+    customer_phone: str | None,
+    date: str,
+    time: str,
+    party_size: int,
+    session_id: str,
+    notes: str = "",
+) -> str | None:
+    """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore."""
+    api_key = os.getenv("BASE44_API_KEY")
+    if not api_key:
+        print("[Reservation] BASE44_API_KEY non configurato, skip salvataggio")
+        return None
+
+    payload = {
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "date": date,
+        "time": time,
+        "party_size": party_size,
+        "status": "confermata",
+        "source": "telefono",
+        "notes": notes,
+        "session_id": session_id,
+    }
+    print(
+        f"[Reservation] Salvo: customer={mask_name(customer_name)} "
+        f"phone={mask_phone(customer_phone)} date={date} time={time} party={party_size} session={session_id}"
+    )
+    try:
+        response = httpx.post(
+            BASE44_RESERVATION_URL,
+            params={"api_key": api_key},
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        reservation_id = response.json().get("id")
+        print(f"[Reservation] Salvata con id={reservation_id}")
+        return reservation_id
+    except Exception as e:
+        print(f"[Reservation] Errore salvataggio: {type(e).__name__}: {e}")
+        return None
+
+
+def send_reservation_sms(
+    customer_name: str,
+    customer_phone: str | None,
+    date: str,
+    time: str,
+    party_size: int,
+) -> str:
+    """Invia SMS di conferma prenotazione. Ritorna stringa di stato."""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not all([account_sid, auth_token]):
+        print("[ReservationSMS] Credenziali Twilio mancanti, skip")
+        return "skip:credenziali_mancanti"
+
+    phone = _normalize_phone(customer_phone)
+    if not phone:
+        print("[ReservationSMS] Numero non valido o fisso, skip")
+        return "skip:numero_non_valido"
+
+    raw_sms_from = os.getenv("TWILIO_NUMBER")
+    if not raw_sms_from:
+        print("[ReservationSMS] TWILIO_NUMBER non configurato, skip")
+        return "skip:TWILIO_NUMBER_mancante"
+
+    sms_from = raw_sms_from.removeprefix("whatsapp:")
+    pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
+    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+
+    # Formato data leggibile: 2026-05-21 → "21/05/2026"
+    try:
+        y, mo, d = date.split("-")
+        date_str = f"{d}/{mo}/{y}"
+    except Exception:
+        date_str = date
+
+    parts = [
+        f"{pizzeria_name} ✅",
+        f"Prenotazione confermata — {customer_name}, {date_str} alle {time}, {party_size} {'persona' if party_size == 1 else 'persone'}.",
+    ]
+    if pizzeria_phone:
+        parts.append(f"Per modifiche chiama il {pizzeria_phone}.")
+    body = "\n".join(parts)
+
+    print(f"[ReservationSMS] To={mask_phone(phone)} From={mask_phone(sms_from)}")
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    try:
+        resp = httpx.post(
+            url,
+            auth=(account_sid, auth_token),
+            data={"From": sms_from, "To": phone, "Body": body},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        print(f"[ReservationSMS] Inviato con successo a {mask_phone(phone)}")
+        return f"sms_inviato:{resp.status_code}"
+    except httpx.HTTPStatusError as e:
+        print(f"[ReservationSMS] Errore HTTP {e.response.status_code}")
+        return f"sms_errore:HTTP_{e.response.status_code}"
+    except Exception as e:
+        print(f"[ReservationSMS] Errore inatteso {type(e).__name__}: {e}")
+        return f"sms_errore:{type(e).__name__}"
 
 
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

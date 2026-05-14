@@ -39,6 +39,11 @@ STARTUP_COLUMN_MIGRATIONS: tuple[ColumnMigration, ...] = (
         "ALTER TABLE conversationsession ADD COLUMN no_input_count INTEGER DEFAULT 0",
     ),
     ColumnMigration(
+        "conversationsession",
+        "reservation_json",
+        "ALTER TABLE conversationsession ADD COLUMN reservation_json VARCHAR DEFAULT '{}'",
+    ),
+    ColumnMigration(
         "order",
         "conversation_session_id",
         'ALTER TABLE "order" ADD COLUMN conversation_session_id VARCHAR',
