@@ -27,7 +27,12 @@ from app.services.conversation_service import (
     is_agent_active,
     lookup_customer,
 )
-from app.routes.chat import _extract_local_customer_name, _extract_local_pickup_time
+from app.routes.chat import (
+    _extract_local_customer_name,
+    _extract_local_pickup_time,
+    _extract_party_size,
+    _reservation_confirmation_intent,
+)
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -106,8 +111,6 @@ _TRIVIAL_COLLECTING_RE = re.compile(
     r")\s*[!.,?]*$",
     re.IGNORECASE,
 )
-
-
 def _needs_filler(speech: str, state: str) -> bool:
     """True se riprodurre 'Un momento...' è appropriato per questo messaggio.
 
@@ -119,12 +122,19 @@ def _needs_filler(speech: str, state: str) -> bool:
     semplici tipo 'sì/no' o intenzioni generiche tipo 'voglio ordinare' dove
     il filler suonerebbe strano prima di 'Certo, dimmi pure!'.
 
+    Stati prenotazione con rete/Base44 → filler solo quando il testo può far
+    partire davvero disponibilità o conferma.
+
     Tutti gli altri stati → False (fast path Python, niente LLM pesante).
     """
     if state == "collecting_name":
         return _extract_local_customer_name(speech) is None
     if state == "collecting_pickup_time":
         return _extract_local_pickup_time(speech) is None
+    if state == "collecting_reservation_party":
+        return _extract_party_size(speech) is not None
+    if state == "awaiting_reservation_confirmation":
+        return _reservation_confirmation_intent(speech) == "confirm"
     if state != "collecting_items":
         return False
     normalized = speech.strip().rstrip(".,!?")

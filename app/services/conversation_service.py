@@ -60,6 +60,10 @@ SIZE_DOPPIO_SURCHARGE = 2.00
 CUSTOMER_LOOKUP_HTTP_TIMEOUT_DEFAULT_SECONDS = 2.0
 
 
+class ReservationAvailabilityError(RuntimeError):
+    """Availability non verificabile in modo affidabile."""
+
+
 def _positive_float_env(name: str, default: float) -> float:
     try:
         value = float(os.getenv(name, "").strip())
@@ -1381,10 +1385,12 @@ def detect_reservation_intent(message: str) -> bool:
     return bool(_RESERVATION_INTENT_PATTERNS.search(message))
 
 
-def _fetch_tables_from_base44() -> list[dict]:
+def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
     """Recupera tutti i tavoli configurati su Base44. Restituisce [] in caso di errore."""
     token = os.getenv("BASE44_TOKEN")
     if not token:
+        if required:
+            raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
     try:
         response = httpx.get(
@@ -1400,13 +1406,17 @@ def _fetch_tables_from_base44() -> list[dict]:
         return tables
     except Exception as e:
         print(f"[Table] Errore fetch tavoli: {type(e).__name__}: {e}")
+        if required:
+            raise ReservationAvailabilityError(f"fetch tavoli fallito: {type(e).__name__}") from e
         return []
 
 
-def _fetch_reservations_for_date(date: str) -> list[dict]:
+def _fetch_reservations_for_date(date: str, required: bool = False) -> list[dict]:
     """Recupera le prenotazioni per una data specifica."""
     token = os.getenv("BASE44_TOKEN")
     if not token:
+        if required:
+            raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
     try:
         response = httpx.get(
@@ -1422,6 +1432,8 @@ def _fetch_reservations_for_date(date: str) -> list[dict]:
         return [r for r in entities if r.get("date") == date and r.get("status") == "confermata"]
     except Exception as e:
         print(f"[Reservation] Errore fetch prenotazioni: {type(e).__name__}: {e}")
+        if required:
+            raise ReservationAvailabilityError(f"fetch prenotazioni fallito: {type(e).__name__}") from e
         return []
 
 
@@ -1435,12 +1447,90 @@ def _slot_overlaps(r_time_str: str, req_start: int, req_end: int, slot_minutes: 
         return False
 
 
+def _parse_minutes(time_str: str) -> int:
+    parts = time_str.strip().split(":")
+    hour = int(parts[0])
+    minute = int(parts[1]) if len(parts) > 1 else 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"orario non valido: {time_str}")
+    return hour * 60 + minute
+
+
+def _format_minutes(total_minutes: int) -> str:
+    total_minutes %= 24 * 60
+    hour, minute = divmod(total_minutes, 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _parse_opening_range(slot: str | None) -> tuple[int, int] | None:
+    if not slot or slot.strip().lower() == "closed":
+        return None
+    halves = slot.strip().split("-", 1)
+    if len(halves) != 2:
+        return None
+    try:
+        return _parse_minutes(halves[0]), _parse_minutes(halves[1])
+    except Exception:
+        return None
+
+
+def validate_reservation_time(date: str, time: str) -> tuple[bool, str | None]:
+    """Valida data/orario prenotazione contro apertura e tempo corrente."""
+    restaurant = load_restaurant()
+    opening_hours = restaurant.get("opening_hours")
+    if not opening_hours or not isinstance(opening_hours, dict):
+        return True, None
+
+    try:
+        reservation_date = datetime.date.fromisoformat(date)
+        requested_minutes = _parse_minutes(time)
+    except Exception:
+        return False, "Non ho capito bene giorno o orario della prenotazione. Può ripeterli?"
+
+    rome = ZoneInfo("Europe/Rome")
+    now = datetime.datetime.now(tz=rome)
+    today = now.date()
+    if reservation_date < today:
+        return False, "Mi dispiace, quella data è già passata. Per quale altro giorno vuole prenotare?"
+
+    weekday_idx = reservation_date.weekday()
+    weekday_it = _WEEKDAY_IT[weekday_idx]
+    day_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[weekday_idx], ""))
+    if not day_range:
+        return False, f"Mi dispiace, {weekday_it} siamo chiusi. Per quale altro giorno vuole prenotare?"
+
+    open_min, close_min = day_range
+    candidate_minutes = requested_minutes
+    display_close = close_min
+    if close_min <= open_min:
+        close_min += 24 * 60
+        if candidate_minutes < open_min:
+            candidate_minutes += 24 * 60
+
+    if candidate_minutes < open_min or candidate_minutes >= close_min:
+        return (
+            False,
+            f"Mi dispiace, {weekday_it} prendiamo prenotazioni dalle "
+            f"{_format_minutes(open_min)} alle {_format_minutes(display_close)}.",
+        )
+
+    if reservation_date == today:
+        now_minutes = now.hour * 60 + now.minute
+        if close_min > 24 * 60 and now_minutes < open_min:
+            now_minutes += 24 * 60
+        if candidate_minutes <= now_minutes:
+            return False, "Mi dispiace, quell'orario è già passato. A che ora vuole prenotare?"
+
+    return True, None
+
+
 def assign_table(
     date: str,
     time: str,
     party_size: int,
     all_reservations: list[dict] | None = None,
     slot_minutes: int = 90,
+    tables: list[dict] | None = None,
 ) -> dict | None:
     """
     Assegna il tavolo migliore disponibile per lo slot richiesto.
@@ -1452,7 +1542,8 @@ def assign_table(
 
     Ritorna {table_id, table_name, extended, combined_tables} oppure None.
     """
-    tables = _fetch_tables_from_base44()
+    if tables is None:
+        tables = _fetch_tables_from_base44()
     if not tables:
         print("[Table] Nessun tavolo configurato, skip assign_table")
         return None
@@ -1545,15 +1636,22 @@ def check_reservation_availability(
     restaurant = load_restaurant()
     slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
 
-    # Tenta assegnazione tavolo reale
-    all_reservations = _fetch_reservations_for_date(date)
-    table_info = assign_table(date, time, party_size, all_reservations, slot_minutes)
+    # Tenta assegnazione tavolo reale. Tavoli e prenotazioni vengono caricati una
+    # sola volta per turno: evita roundtrip Base44 ripetuti mentre il cliente è in linea.
+    all_reservations = _fetch_reservations_for_date(date, required=True)
+    tables = _fetch_tables_from_base44(required=True)
+    tables_configured = bool(tables)
+    table_info = assign_table(
+        date,
+        time,
+        party_size,
+        all_reservations,
+        slot_minutes,
+        tables=tables,
+    )
 
     if table_info is not None:
         return True, None, table_info
-
-    # Verifica se ci sono tavoli configurati (se sì, il fallback max_covers non si applica)
-    tables_configured = bool(_fetch_tables_from_base44())
 
     if not tables_configured:
         # Fallback: logica max_covers originale
@@ -1587,10 +1685,20 @@ def check_reservation_availability(
         next_start = req_start + delta * slot_minutes
         next_h, next_m = divmod(next_start, 60)
         next_time = f"{next_h:02d}:{next_m:02d}"
+        next_time_valid, _ = validate_reservation_time(date, next_time)
+        if not next_time_valid:
+            continue
         if tables_configured:
-            next_table = assign_table(date, next_time, party_size, all_reservations, slot_minutes)
+            next_table = assign_table(
+                date,
+                next_time,
+                party_size,
+                all_reservations,
+                slot_minutes,
+                tables=tables,
+            )
             if next_table is not None:
-                return False, next_time, None
+                return False, next_time, next_table
         else:
             max_covers = int(restaurant.get("max_covers") or 0)
             next_end = next_start + slot_minutes

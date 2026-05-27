@@ -49,8 +49,10 @@ from app.services.conversation_service import (
     resolve_pickup_time,
     lookup_customer,
     upsert_customer,
+    ReservationAvailabilityError,
     detect_reservation_intent,
     check_reservation_availability,
+    validate_reservation_time,
     save_reservation_to_base44,
     send_reservation_sms,
 )
@@ -512,6 +514,11 @@ _DONE_SIGNALS = {
     "okay è tutto", "è tutto qui", "per adesso è tutto", "fine",
 }
 
+_ORDINALS_IT = {
+    2: "seconda", 3: "terza", 4: "quarta", 5: "quinta",
+    6: "sesta", 7: "settima", 8: "ottava", 9: "nona", 10: "decima",
+}
+
 _NUMBER_WORDS = {
     "una": 1, "un": 1, "uno": 1,
     "due": 2, "tre": 3, "quattro": 4, "cinque": 5, "sei": 6, "sette": 7,
@@ -579,6 +586,28 @@ def is_done_signal(message: str) -> bool:
 def _normalize_for_match(text: str) -> str:
     normalized = unicodedata.normalize("NFD", text.lower())
     return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+_RESERVATION_CANCEL_RE = re.compile(
+    r"\b(?:"
+    r"no|annulla|annullare|cancella|cancellare|stop|"
+    r"non\s+(?:confermo|va\s+bene|e\s+giusto|e\s+corretto|ok|okay|certo|esatto|perfetto)"
+    r")\b",
+    re.IGNORECASE,
+)
+_RESERVATION_CONFIRM_RE = re.compile(
+    r"\b(?:si|sì|ok|okay|va\s+bene|confermo|certo|esatto|perfetto|yes)\b",
+    re.IGNORECASE,
+)
+
+
+def _reservation_confirmation_intent(message: str) -> str | None:
+    normalized = _normalize_for_match(message)
+    if _RESERVATION_CANCEL_RE.search(normalized):
+        return "cancel"
+    if _RESERVATION_CONFIRM_RE.search(normalized):
+        return "confirm"
+    return None
 
 
 def _contains_any_word(text: str, words: set[str]) -> bool:
@@ -794,6 +823,19 @@ def _format_reservation_date_it(date_str: str) -> str:
         return date_str
 
 
+def _apply_reservation_table_info(res_data: dict, table_info: dict | None) -> None:
+    """Aggiorna il riepilogo prenotazione con l'ultima assegnazione tavolo."""
+    if not table_info:
+        for key in ("table_id", "table_name", "combined_tables", "extended"):
+            res_data.pop(key, None)
+        return
+
+    res_data["table_id"] = table_info.get("table_id")
+    res_data["table_name"] = table_info.get("table_name")
+    res_data["combined_tables"] = table_info.get("combined_tables", [])
+    res_data["extended"] = table_info.get("extended", False)
+
+
 def _build_pickup_time_error(
     pickup_time: str,
     suggestion: str | None,
@@ -911,6 +953,23 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
                 pizzas=payload["pizza_names"],
                 total_amount=payload["total_amount"],
             )
+        return
+
+    if kind == "reservation_sms":
+        print(
+            f"[ReservationSMS] Tentativo invio outbox: phone={mask_phone(payload['customer_phone'])} "
+            f"name={mask_name(payload['customer_name'])}"
+        )
+        status = send_reservation_sms(
+            customer_name=payload["customer_name"],
+            customer_phone=payload["customer_phone"],
+            date=payload["date"],
+            time=payload["time"],
+            party_size=payload["party_size"],
+            table_name=payload.get("table_name"),
+        )
+        if status.startswith("sms_errore"):
+            raise RuntimeError(status)
         return
 
     raise ValueError(f"Side effect sconosciuto: {kind}")
@@ -1125,6 +1184,44 @@ def _enqueue_order_side_effects(
     print(f"[SideEffects] ordine #{order_number} accodato: {len(jobs)} job")
 
 
+def _enqueue_reservation_sms_side_effect(
+    *,
+    session: Session,
+    customer_name: str,
+    customer_phone: str | None,
+    date: str,
+    reservation_time: str,
+    party_size: int,
+    table_name: str | None,
+) -> None:
+    if not _is_mobile_phone(customer_phone):
+        return
+
+    now = time.time()
+    job = OrderSideEffect(
+        order_number=0,
+        kind="reservation_sms",
+        payload_json=json.dumps({
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "date": date,
+            "time": reservation_time,
+            "party_size": party_size,
+            "table_name": table_name,
+        }, ensure_ascii=False),
+        status="pending",
+        attempts=0,
+        next_attempt_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    _schedule_order_side_effect_job(job.id)
+    print(f"[ReservationSMS] job accodato reservation date={date} time={reservation_time} table={table_name!r}")
+
+
 def determine_state(
     merged_order: dict,
     missing_messages: list[str],
@@ -1179,6 +1276,7 @@ def build_assistant_response(
     pickup_time_error: str | None = None,
     removed_names: list[str] | None = None,
     not_found_names: list[str] | None = None,
+    intended_quantity: int | None = None,
 ) -> str:
     customer_name = merged_order.get("customer_name")
     pickup_time = merged_order.get("pickup_time")
@@ -1235,6 +1333,19 @@ def build_assistant_response(
         if not new_valid_items:
             # Il cliente ha dichiarato una quantità senza specificare le pizze
             return "Certo, dimmi pure!"
+        # Se c'è una quantità dichiarata e non ancora raggiunta, chiedi esplicitamente la prossima
+        if intended_quantity is not None:
+            items_count = sum(int(item.get("quantity", 1)) for item in merged_order.get("items", []))
+            remaining = intended_quantity - items_count
+            if remaining > 0:
+                next_num = items_count + 1
+                ordinal = _ORDINALS_IT.get(next_num)
+                if remaining == 1:
+                    if ordinal:
+                        return f"Perfetto! E la {ordinal} pizza?"
+                    return "Perfetto! E l'ultima pizza?"
+                else:
+                    return f"Perfetto! Ne mancano ancora {remaining}, dimmi pure."
         return random.choice(["Ok!", "Aggiunto!", "Perfetto!", "Certo!"])
 
     # Segnale "ho finito" senza items: chiedi nome e ora
@@ -1554,6 +1665,34 @@ def chat(request: ChatRequest, session: SessionDep):
         session.commit()
         session.refresh(conversation)
 
+    if conversation.completed and conversation.state == "reservation_completed":
+        res_data = json.loads(conversation.reservation_json or "{}")
+        response_message = "La prenotazione è già stata confermata. A presto!"
+        extracted_stub = {"intent": "reservation", "items": [], "customer_name": None, "pickup_time": None}
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps(extracted_stub, ensure_ascii=False),
+            merged_order_json=json.dumps(res_data, ensure_ascii=False),
+            response_message=response_message,
+            valid=True,
+            missing_items_json="[]",
+            state="reservation_completed",
+        ))
+        session.commit()
+        _log_chat_timing(request.session_id, "reservation_completed_repeat", request_started_at)
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order=extracted_stub,
+            merged_order=res_data,
+            valid=True,
+            missing_items=[],
+            response_message=response_message,
+            order_id=None,
+            state="reservation_completed",
+        )
+
     if conversation.completed:
         existing_items = json.loads(conversation.items_json)
         merged_order = {
@@ -1675,6 +1814,14 @@ def chat(request: ChatRequest, session: SessionDep):
         if local_time:
             res_time = resolve_pickup_time(local_time)
             res_data = json.loads(conversation.reservation_json or "{}")
+            is_valid_time, time_error = validate_reservation_time(
+                res_data.get("date", ""),
+                res_time,
+            )
+            if not is_valid_time:
+                conversation.state = "collecting_reservation_time"
+                _log_chat_timing(request.session_id, "reservation_time_invalid", request_started_at)
+                return _res_response("collecting_reservation_time", time_error or "Non posso prenotare per quell'orario. A che ora?")
             res_data["time"] = res_time
             conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
             conversation.state = "collecting_reservation_party"
@@ -1695,27 +1842,44 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
 
             # Controllo disponibilità e assegnazione tavolo
-            available, next_slot, table_info = check_reservation_availability(
-                res_data.get("date", ""),
-                res_data.get("time", ""),
-                party,
-            )
+            try:
+                available, next_slot, table_info = check_reservation_availability(
+                    res_data.get("date", ""),
+                    res_data.get("time", ""),
+                    party,
+                )
+            except ReservationAvailabilityError as exc:
+                print(f"[Reservation] Availability non verificabile: {exc}")
+                conversation.state = "collecting_reservation_party"
+                _log_chat_timing(request.session_id, "reservation_availability_error", request_started_at)
+                return _res_response(
+                    "collecting_reservation_party",
+                    "Mi dispiace, al momento non riesco a controllare la disponibilità dei tavoli. Vuole che riprovi tra un attimo?",
+                )
             if table_info:
-                res_data["table_id"] = table_info.get("table_id")
-                res_data["table_name"] = table_info.get("table_name")
-                res_data["combined_tables"] = table_info.get("combined_tables", [])
-                res_data["extended"] = table_info.get("extended", False)
+                _apply_reservation_table_info(res_data, table_info)
                 conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
                 print(f"[Reservation] Tavolo assegnato: {table_info.get('table_name')!r}")
             if not available:
                 if next_slot:
                     res_data["time"] = next_slot
+                    _apply_reservation_table_info(res_data, table_info)
                     conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
-                    conversation.state = "collecting_reservation_party"
-                    msg = (
-                        f"Mi dispiace, quello slot è esaurito. "
-                        f"Ho disponibilità alle {next_slot} — va bene?"
-                    )
+                    if not conversation.customer_name:
+                        conversation.state = "collecting_reservation_name"
+                        msg = (
+                            f"Mi dispiace, quello slot è esaurito. "
+                            f"Ho disponibilità alle {next_slot}. A nome di chi?"
+                        )
+                    else:
+                        conversation.state = "awaiting_reservation_confirmation"
+                        date_it = _format_reservation_date_it(res_data.get("date", ""))
+                        table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
+                        msg = (
+                            f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. "
+                            f"Riepilogo: {conversation.customer_name}, {date_it} alle {next_slot}, "
+                            f"{party} {'persona' if party == 1 else 'persone'}{table_part}. Confermo?"
+                        )
                     print(f"[Reservation] Slot esaurito, propongo {next_slot}")
                 else:
                     conversation.state = "collecting_reservation_date"
@@ -1773,13 +1937,65 @@ def chat(request: ChatRequest, session: SessionDep):
         return _res_response("collecting_reservation_name", "A nome di chi devo mettere la prenotazione?")
 
     if conversation.state == "awaiting_reservation_confirmation":
-        _confirm_res = {"si", "sì", "ok", "va bene", "confermo", "certo", "esatto", "perfetto", "yes"}
-        _cancel_res = {"no", "annulla", "cancella", "stop"}
-        _is_confirm_res = any(w in message_lower for w in _confirm_res)
-        _is_cancel_res = any(w in message_lower for w in _cancel_res)
+        reservation_intent = _reservation_confirmation_intent(request.message)
 
-        if _is_confirm_res:
+        if reservation_intent == "confirm":
             res_data = json.loads(conversation.reservation_json or "{}")
+            _res_date = res_data.get("date", "")
+            _res_time = res_data.get("time", "")
+            _res_party = int(res_data.get("party_size") or 1)
+
+            is_valid_time, time_error = validate_reservation_time(_res_date, _res_time)
+            if not is_valid_time:
+                conversation.state = "collecting_reservation_time"
+                _log_chat_timing(request.session_id, "reservation_confirm_time_invalid", request_started_at)
+                return _res_response(
+                    "collecting_reservation_time",
+                    time_error or "Non posso prenotare per quell'orario. A che ora?",
+                )
+
+            # Ricontrolla disponibilità al momento della conferma: il tavolo
+            # assegnato nel turno precedente potrebbe essere stato preso nel frattempo.
+            try:
+                available, next_slot, table_info = check_reservation_availability(
+                    _res_date,
+                    _res_time,
+                    _res_party,
+                )
+            except ReservationAvailabilityError as exc:
+                print(f"[Reservation] Availability non verificabile in conferma: {exc}")
+                conversation.state = "awaiting_reservation_confirmation"
+                _log_chat_timing(request.session_id, "reservation_confirm_availability_error", request_started_at)
+                return _res_response(
+                    "awaiting_reservation_confirmation",
+                    "Mi dispiace, al momento non riesco a ricontrollare la disponibilità dei tavoli. Vuole che riprovi tra un attimo?",
+                )
+            if not available:
+                if next_slot:
+                    res_data["time"] = next_slot
+                    _apply_reservation_table_info(res_data, table_info)
+                    conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+                    date_it = _format_reservation_date_it(_res_date)
+                    table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
+                    msg = (
+                        "Mi dispiace, nel frattempo quello slot è stato preso. "
+                        f"Ho disponibilità alle {next_slot}. Riepilogo: "
+                        f"{conversation.customer_name or 'Ospite'}, {date_it} alle {next_slot}, "
+                        f"{_res_party} {'persona' if _res_party == 1 else 'persone'}{table_part}. Confermo?"
+                    )
+                    _log_chat_timing(request.session_id, "reservation_recheck_moved", request_started_at)
+                    return _res_response("awaiting_reservation_confirmation", msg)
+
+                conversation.state = "collecting_reservation_date"
+                conversation.reservation_json = "{}"
+                _log_chat_timing(request.session_id, "reservation_recheck_unavailable", request_started_at)
+                return _res_response(
+                    "collecting_reservation_date",
+                    "Mi dispiace, nel frattempo quello slot è stato preso e non vedo alternative vicine. Per quale altro giorno vuole prenotare?",
+                )
+
+            _apply_reservation_table_info(res_data, table_info)
+            conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
             _res_table_id = res_data.get("table_id")
             _res_table_name = res_data.get("table_name")
             _res_combined = res_data.get("combined_tables") or []
@@ -1788,34 +2004,37 @@ def chat(request: ChatRequest, session: SessionDep):
             reservation_id = save_reservation_to_base44(
                 customer_name=conversation.customer_name or "Ospite",
                 customer_phone=conversation.customer_phone,
-                date=res_data.get("date", ""),
-                time=res_data.get("time", ""),
-                party_size=int(res_data.get("party_size") or 1),
+                date=_res_date,
+                time=_res_time,
+                party_size=_res_party,
                 session_id=request.session_id,
                 table_id=_res_table_id,
                 table_name=_res_table_name,
                 combined_tables=_res_combined,
                 extended=_res_extended,
             )
+            if not reservation_id:
+                conversation.state = "awaiting_reservation_confirmation"
+                _log_chat_timing(request.session_id, "reservation_save_failed", request_started_at)
+                return _res_response(
+                    "awaiting_reservation_confirmation",
+                    "Mi dispiace, al momento non riesco a registrare la prenotazione. Vuole che riprovi tra un attimo?",
+                )
             print(
                 f"[Reservation] Confermata session={request.session_id} "
                 f"id={reservation_id} date={res_data.get('date')} time={res_data.get('time')} "
                 f"party={res_data.get('party_size')} table={_res_table_name!r} "
                 f"name={mask_name(conversation.customer_name or '')}"
             )
-            # Invia SMS in background
-            threading.Thread(
-                target=send_reservation_sms,
-                kwargs={
-                    "customer_name": conversation.customer_name or "Ospite",
-                    "customer_phone": conversation.customer_phone,
-                    "date": res_data.get("date", ""),
-                    "time": res_data.get("time", ""),
-                    "party_size": int(res_data.get("party_size") or 1),
-                    "table_name": _res_table_name,
-                },
-                daemon=True,
-            ).start()
+            _enqueue_reservation_sms_side_effect(
+                session=session,
+                customer_name=conversation.customer_name or "Ospite",
+                customer_phone=conversation.customer_phone,
+                date=res_data.get("date", ""),
+                reservation_time=res_data.get("time", ""),
+                party_size=int(res_data.get("party_size") or 1),
+                table_name=_res_table_name,
+            )
 
             conversation.state = "reservation_completed"
             conversation.completed = True
@@ -1828,7 +2047,7 @@ def chat(request: ChatRequest, session: SessionDep):
             _log_chat_timing(request.session_id, "reservation_confirmed", request_started_at)
             return _res_response("reservation_completed", resp_msg, valid=True)
 
-        elif _is_cancel_res:
+        elif reservation_intent == "cancel":
             conversation.state = "collecting_reservation_date"
             conversation.reservation_json = "{}"
             _log_chat_timing(request.session_id, "reservation_cancelled", request_started_at)
@@ -2586,6 +2805,7 @@ def chat(request: ChatRequest, session: SessionDep):
         pickup_time_error=pickup_time_error,
         removed_names=removed_names,
         not_found_names=not_found_names,
+        intended_quantity=conversation.intended_quantity,
     )
 
     session.add(conversation)

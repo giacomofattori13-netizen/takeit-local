@@ -85,6 +85,13 @@ class VoiceLogicTests(unittest.TestCase):
         self.assertTrue(_needs_filler("aggiungi una margherita", "collecting_name"))
         self.assertTrue(_needs_filler("alle 8 e aggiungi una margherita", "collecting_pickup_time"))
 
+    def test_reservation_slow_states_use_filler_only_when_needed(self):
+        self.assertTrue(_needs_filler("si confermo", "awaiting_reservation_confirmation"))
+        self.assertFalse(_needs_filler("non confermo", "awaiting_reservation_confirmation"))
+        self.assertFalse(_needs_filler("no", "awaiting_reservation_confirmation"))
+        self.assertTrue(_needs_filler("siamo in quattro", "collecting_reservation_party"))
+        self.assertFalse(_needs_filler("non lo so", "collecting_reservation_party"))
+
     def test_audio_cache_get_drops_missing_files(self):
         _audio_cache_put("Ok!", "missing-audio.mp3")
 
