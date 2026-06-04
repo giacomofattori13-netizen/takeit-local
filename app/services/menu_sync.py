@@ -29,6 +29,7 @@ def sync_menu_to_db() -> int:
                 pizza_type=item["pizza_type"],
                 price=item.get("price", 0.0),
                 available=item.get("available", True),
+                sale_unit=item.get("sale_unit", "piece"),
             ))
         session.commit()
 

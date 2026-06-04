@@ -36,6 +36,7 @@ from app.services.conversation_service import (
     load_menu_from_base44,
     get_proposable_menu,
     get_sold_out_item_names,
+    format_weight_display,
     load_doughs,
     save_order_to_base44,
     send_whatsapp_confirmation,
@@ -258,6 +259,14 @@ def format_single_item_for_customer(item: dict) -> str:
     remove_ingredients = item.get("remove_ingredients", [])
     size = item.get("size", "normale")
 
+    if item.get("sale_unit") == "kg":
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}"
+        if add_ingredients:
+            line += " con " + ", ".join(add_ingredients)
+        if remove_ingredients:
+            line += " senza " + ", ".join(remove_ingredients)
+        return line
+
     is_plain_margherita = (
         pizza_name == "Margherita"
         and not add_ingredients
@@ -372,6 +381,14 @@ def format_single_item(item: dict) -> str:
     add_ingredients = item.get("add_ingredients", [])
     remove_ingredients = item.get("remove_ingredients", [])
     size = item.get("size", "normale")
+
+    if item.get("sale_unit") == "kg":
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}"
+        if add_ingredients:
+            line += " con " + ", ".join(add_ingredients)
+        if remove_ingredients:
+            line += " senza " + ", ".join(remove_ingredients)
+        return line
 
     if quantity == 1:
         if pizza_name in ("Personalizzata", "Pizza personalizzata"):
@@ -872,6 +889,7 @@ def enrich_items_with_pricing(
     for item in items:
         if item["pizza_name"] == "Personalizzata":
             base_price = base_personalizzata
+            item_sale_unit = "piece"
         else:
             menu_item = session.exec(
                 select(MenuItem).where(
@@ -884,25 +902,33 @@ def enrich_items_with_pricing(
                     select(MenuItem).where(MenuItem.name == item["pizza_name"])
                 ).first()
             base_price = round(menu_item.price, 2) if menu_item else 0.0
+            item_sale_unit = getattr(menu_item, "sale_unit", "piece") if menu_item else "piece"
 
-        is_sg_pizza = "(SG)" in item.get("pizza_name", "")
-        dough_code = item.get("dough_type", "classica")
-        dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
-        size = item.get("size", "normale")
-        if size == "mini":
-            base_price = round(max(0.0, base_price - SIZE_MINI_DISCOUNT), 2)
-        elif size == "doppio":
-            dough_surcharge = round(dough_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
+        quantity = float(item.get("quantity") or 1)
 
-        extras_price = round(
-            dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE,
-            2,
-        )
-        quantity = int(item.get("quantity") or 1)
-        total_price = round((base_price + extras_price) * quantity, 2)
+        if item_sale_unit == "kg":
+            # Al peso: prezzo = prezzo/kg × quantità in kg, nessun supplemento
+            extras_price = 0.0
+            total_price = round(base_price * quantity, 2)
+        else:
+            is_sg_pizza = "(SG)" in item.get("pizza_name", "")
+            dough_code = item.get("dough_type", "classica")
+            dough_surcharge = 0.0 if is_sg_pizza else get_dough_surcharge(dough_code)
+            size = item.get("size", "normale")
+            if size == "mini":
+                base_price = round(max(0.0, base_price - SIZE_MINI_DISCOUNT), 2)
+            elif size == "doppio":
+                dough_surcharge = round(dough_surcharge + SIZE_DOPPIO_SURCHARGE, 2)
+            extras_price = round(
+                dough_surcharge + len(item.get("add_ingredients", [])) * INGREDIENT_EXTRA_PRICE,
+                2,
+            )
+            total_price = round((base_price + extras_price) * quantity, 2)
+
         enriched_items.append({
             **item,
             "quantity": quantity,
+            "sale_unit": item_sale_unit,
             "base_price": base_price,
             "extras_price": extras_price,
             "total_price": total_price,
@@ -1568,15 +1594,21 @@ def _persist_order_once(
         raise
 
     for item in merged_order["items"]:
+        # sale_unit: read from item dict (set during extraction) or fallback to DB
+        _item_sale_unit = item.get("sale_unit")
+        if not _item_sale_unit:
+            _mi = session.exec(select(MenuItem).where(MenuItem.name == item["pizza_name"])).first()
+            _item_sale_unit = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
         session.add(OrderItem(
             order_id=order.id,
             pizza_name=item["pizza_name"],
             pizza_type=item["pizza_type"],
-            quantity=item["quantity"],
+            quantity=float(item.get("quantity") or 1),
             add_ingredients_json=json.dumps(item.get("add_ingredients", []), ensure_ascii=False),
             remove_ingredients_json=json.dumps(item.get("remove_ingredients", []), ensure_ascii=False),
             dough_type=item.get("dough_type", "classica"),
             size=item.get("size", "normale"),
+            sale_unit=_item_sale_unit,
         ))
     session.commit()
 
@@ -2587,6 +2619,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 "price": item.price,
                 "available": item.available,
                 "ingredients": [],
+                "sale_unit": item.sale_unit,
             }
             for item in db_menu_items
         ]
@@ -2643,6 +2676,14 @@ def chat(request: ChatRequest, session: SessionDep):
     for item in new_items:
         item.setdefault("add_ingredients", [])
         item.setdefault("remove_ingredients", [])
+        # Lookup sale_unit from DB so it's available throughout the conversation
+        if item.get("pizza_name") and item["pizza_name"] != "Personalizzata":
+            _mi = session.exec(
+                select(MenuItem).where(MenuItem.name == item["pizza_name"])
+            ).first()
+            item["sale_unit"] = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
+        else:
+            item["sale_unit"] = "piece"
     intent = extracted.get("intent", "unknown")
 
     # 2. Aggiorna orario di ritiro (con validazione orari)
@@ -2764,6 +2805,16 @@ def chat(request: ChatRequest, session: SessionDep):
                 msg = _build_sold_out_item_message(session, item["pizza_name"], _sold_out_names)
                 missing_messages.append(msg)
                 invalid_items.append(item)
+            elif menu_item.sale_unit == "kg" and float(item.get("quantity", 1)) == 0:
+                missing_messages.append(
+                    f"Quanta {item['pizza_name'].lower()} desidera? "
+                    "(ad esempio: '200 grammi', 'mezzo chilo')"
+                )
+                invalid_items.append(item)
+            elif menu_item.sale_unit == "kg":
+                # Voci al peso: nessun controllo impasto/size
+                item["sale_unit"] = "kg"
+                valid_items.append(item)
             else:
                 dough_code = item.get("dough_type", "classica")
                 if is_dough_available(dough_code):

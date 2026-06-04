@@ -58,6 +58,16 @@ STARTUP_COLUMN_MIGRATIONS: tuple[ColumnMigration, ...] = (
         "size",
         "ALTER TABLE orderitem ADD COLUMN size VARCHAR DEFAULT 'normale'",
     ),
+    ColumnMigration(
+        "menuitem",
+        "sale_unit",
+        "ALTER TABLE menuitem ADD COLUMN sale_unit VARCHAR DEFAULT 'piece'",
+    ),
+    ColumnMigration(
+        "orderitem",
+        "sale_unit",
+        "ALTER TABLE orderitem ADD COLUMN sale_unit VARCHAR DEFAULT 'piece'",
+    ),
 )
 
 ORDER_IDEMPOTENCY_INDEX_NAME = "ix_order_conversation_session_id_unique"

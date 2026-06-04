@@ -9,6 +9,7 @@ class MenuItem(SQLModel, table=True):
     pizza_type: str
     price: float
     available: bool = True
+    sale_unit: str = Field(default="piece")
 
 
 class Order(SQLModel, table=True):
@@ -24,11 +25,12 @@ class OrderItem(SQLModel, table=True):
     order_id: int = Field(foreign_key="order.id")
     pizza_name: str
     pizza_type: str
-    quantity: int
+    quantity: float = Field(default=1.0)
     add_ingredients_json: str = "[]"
     remove_ingredients_json: str = "[]"
     dough_type: str = "classica"
     size: str = "normale"
+    sale_unit: str = Field(default="piece")
 
 
 class OrderSideEffect(SQLModel, table=True):

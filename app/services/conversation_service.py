@@ -260,6 +260,7 @@ def load_menu_from_base44() -> list[dict]:
                 "price": item.get("price", 0.0),
                 "available": item.get("available", True),
                 "ingredients": item.get("ingredients", []),
+                "sale_unit": item.get("sale_unit", "piece"),
             }
             for item in raw
             if item.get("available", True)
@@ -553,6 +554,20 @@ def _normalize_phone(raw: str | None) -> str | None:
     return phone
 
 
+def format_weight_display(kg: float) -> str:
+    """Convert a kg float to a compact Italian display string.
+
+    0.1 → "100g", 0.5 → "500g", 1.0 → "1 kg", 1.5 → "1.5 kg"
+    """
+    grams = round(kg * 1000)
+    if grams <= 0:
+        return "0g"
+    if grams < 1000:
+        return f"{grams}g"
+    kg_val = grams / 1000
+    return f"{kg_val:g} kg"
+
+
 def _build_pizza_lines(items: list[dict]) -> list[str]:
     """Costruisce le righe descrittive delle pizze per i messaggi di conferma.
 
@@ -561,11 +576,19 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
             # integrale          (solo se impasto != classica)
             + patatine fritte    (solo se presenti)
             - mozzarella         (solo se presenti)
+
+        - 500g Porchetta         (per items al kg)
     """
     lines = []
     for item in items:
         qty = item.get("quantity", 1)
         name = item.get("pizza_name", "")
+        sale_unit = item.get("sale_unit", "piece")
+
+        if sale_unit == "kg":
+            lines.append(f"- {format_weight_display(float(qty))} {name}")
+            continue
+
         dough = item.get("dough_type", "classica")
         add_ings = item.get("add_ingredients", [])
         rem_ings = item.get("remove_ingredients", [])
@@ -1963,7 +1986,16 @@ Rules:
 - If the user asks which doughs are available or their prices, answer using the DOUGH TYPES list.
 - Never propose a "(SG)" pizza as an alternative when the user asked for a specific dough type.
 - Reject (set dough_type to "classica") any dough not present in DOUGH TYPES.
-- quantity must be an integer > 0.
+- QUANTITÀ E UNITÀ DI VENDITA:
+  * Voci SENZA "[al kg]": quantity è un intero ≥ 1 (numero di pezzi/trance).
+    "due trance" → quantity=2, "una" → quantity=1.
+  * Voci con "[al kg, €X/kg]": quantity è il peso in kg (numero decimale).
+    Conversioni: "un etto"→0.1, "due etti"→0.2, "tre etti"→0.3, "quattro etti"→0.4,
+    "cinque etti"→0.5, "mezzo chilo"→0.5, "un chilo"→1.0, "un chilo e mezzo"→1.5,
+    "due chili"→2.0, "100 grammi"→0.1, "200 grammi"→0.2, "500 grammi"→0.5.
+    Se il peso NON è specificato dal cliente per una voce al kg, usa quantity=0
+    (il backend chiederà al cliente quanta ne vuole).
+- quantity deve essere ≥ 0.
 - Always use the exact pizza name as it appears in the MENU.
 - If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.
 - Never drop an explicitly requested pizza just because it is not present in the MENU.
@@ -2053,7 +2085,10 @@ def _build_slim_system_prompt(
     Omette ingredienti e le ~140 righe di regole impasto/size — ~10x più corto
     del prompt completo, risparmiando 100-200ms di latenza OpenAI su input tokens.
     """
-    menu_lines = [f'- {item["name"]}' for item in menu_items]
+    menu_lines = [
+        f'- {item["name"]}{"  [al kg]" if item.get("sale_unit") == "kg" else ""}'
+        for item in menu_items
+    ]
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
 
     dough_codes = [d["code"] for d in (dough_items or [])]
@@ -2125,8 +2160,13 @@ def _get_system_prompt(
 
     menu_lines = []
     for item in menu_items:
-        ingredients = item.get("ingredients") or []
-        ings_str = f' [{", ".join(ingredients)}]' if ingredients else ""
+        sale_unit = item.get("sale_unit", "piece")
+        price = item.get("price", 0.0)
+        if sale_unit == "kg":
+            ings_str = f" [al kg, €{price:.2f}/kg]"
+        else:
+            ingredients = item.get("ingredients") or []
+            ings_str = f' [{", ".join(ingredients)}]' if ingredients else ""
         menu_lines.append(f'- {item["name"]}{ings_str}')
     menu_text = "\n".join(menu_lines) if menu_lines else "No menu items available."
 
@@ -2187,7 +2227,9 @@ class _ExtractedItem(BaseModel):
 
     pizza_name: str = ""
     dough_type: str = "classica"
-    quantity: int = Field(default=1, ge=1)
+    # float supports both piece counts (1, 2, …) and kg weights (0.1, 0.5, …).
+    # 0.0 is a sentinel meaning "kg item, weight not yet specified".
+    quantity: float = Field(default=1.0, ge=0.0)
     size: str = "normale"
     add_ingredients: list[str] = Field(default_factory=list)
     remove_ingredients: list[str] = Field(default_factory=list)
@@ -2199,12 +2241,12 @@ class _ExtractedItem(BaseModel):
 
     @field_validator("quantity", mode="before")
     @classmethod
-    def _coerce_quantity(cls, value: Any) -> int:
+    def _coerce_quantity(cls, value: Any) -> float:
         try:
-            quantity = int(value)
+            quantity = float(value)
         except (TypeError, ValueError):
-            return 1
-        return max(quantity, 1)
+            return 1.0
+        return max(quantity, 0.0)
 
     @field_validator("add_ingredients", "remove_ingredients", mode="before")
     @classmethod
