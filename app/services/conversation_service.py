@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -142,6 +143,53 @@ def reset_restaurant_cache() -> None:
     _restaurant_cache = None
     _restaurant_cache_ts = 0.0
     _restaurant_refresh_inflight = False
+
+
+def get_proposable_menu(menu_items: list[dict] | None = None) -> list[dict]:
+    """Returns menu items the agent can proactively offer.
+
+    An item is proposable iff: available != False AND no ingredient appears in
+    restaurant.sold_out_ingredients (case-insensitive, trimmed comparison).
+    """
+    if menu_items is None:
+        menu_items = load_menu_from_base44()
+
+    restaurant = load_restaurant()
+    sold_out_raw = restaurant.get("sold_out_ingredients") or []
+    if not sold_out_raw:
+        return menu_items
+
+    sold_out_set = {s.lower().strip() for s in sold_out_raw if isinstance(s, str) and s.strip()}
+    proposable = []
+    for item in menu_items:
+        item_ings = {ing.lower().strip() for ing in item.get("ingredients", []) if ing}
+        if item_ings & sold_out_set:
+            continue
+        proposable.append(item)
+
+    hidden = len(menu_items) - len(proposable)
+    if hidden:
+        print(f"[Menu] {hidden} voci nascoste per ingredienti finiti: {sold_out_set}")
+    return proposable
+
+
+def get_sold_out_item_names(menu_items: list[dict] | None = None) -> set[str]:
+    """Returns lowercase names of items hidden due to sold_out_ingredients."""
+    if menu_items is None:
+        menu_items = load_menu_from_base44()
+
+    restaurant = load_restaurant()
+    sold_out_raw = restaurant.get("sold_out_ingredients") or []
+    if not sold_out_raw:
+        return set()
+
+    sold_out_set = {s.lower().strip() for s in sold_out_raw if isinstance(s, str) and s.strip()}
+    hidden: set[str] = set()
+    for item in menu_items:
+        item_ings = {ing.lower().strip() for ing in item.get("ingredients", []) if ing}
+        if item_ings & sold_out_set:
+            hidden.add(item["name"].lower())
+    return hidden
 
 
 def reset_customer_lookup_cache() -> None:
@@ -910,20 +958,6 @@ def build_closed_message() -> str:
     if not opening_hours or not isinstance(opening_hours, dict):
         return "Siamo temporaneamente chiusi. Richiameremo appena possibile. Grazie!"
 
-    def _parse_range(slot: str) -> tuple[int, int] | None:
-        if not slot or slot.strip().lower() == "closed":
-            return None
-        halves = slot.strip().split("-", 1)
-        if len(halves) != 2:
-            return None
-        try:
-            def _pt(t: str) -> int:
-                p = t.strip().split(":")
-                return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
-            return _pt(halves[0]), _pt(halves[1])
-        except Exception:
-            return None
-
     def _fmt(minutes: int) -> str:
         """Converte minuti dall'inizio della giornata in stringa parlata: 'le 19' o 'le 19:30'."""
         h, m = divmod(minutes, 60)
@@ -934,12 +968,12 @@ def build_closed_message() -> str:
         for i in range(offset_start, 7):
             day_idx = (today_idx + i) % 7
             slot = opening_hours.get(_WEEKDAY_NAMES[day_idx], "")
-            r = _parse_range(slot)
+            r = _parse_opening_range(slot)
             if r:
                 return day_idx, r[0]
         return None, None
 
-    today_range = _parse_range(opening_hours.get(_WEEKDAY_NAMES[today_idx], ""))
+    today_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[today_idx], ""))
 
     # Caso 1 — giorno di chiusura settimanale
     if today_range is None:
@@ -1066,37 +1100,21 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None, str | None
     if not opening_hours or not isinstance(opening_hours, dict):
         return True, None, None
 
-    def parse_time(t: str) -> int:
-        p = t.strip().split(":")
-        return int(p[0]) * 60 + (int(p[1]) if len(p) > 1 else 0)
-
-    def parse_range(slot: str) -> tuple[int, int] | None:
-        if not slot or slot.strip().lower() == "closed":
-            return None
-        halves = slot.strip().split("-", 1)
-        if len(halves) != 2:
-            return None
-        try:
-            return parse_time(halves[0]), parse_time(halves[1])
-        except Exception:
-            return None
-
     try:
-        parts = pickup_time.strip().split(":")
-        pickup_minutes = int(parts[0]) * 60 + (int(parts[1]) if len(parts) > 1 else 0)
+        pickup_minutes = _parse_minutes(pickup_time)
     except (ValueError, IndexError):
         return True, None, None
 
     today_name = _WEEKDAY_NAMES[datetime.date.today().weekday()]
     today_slot = opening_hours.get(today_name, "")
-    today_range = parse_range(today_slot)
+    today_range = _parse_opening_range(today_slot)
 
     if today_range is None:
         # Oggi chiusi — cerca il prossimo giorno aperto
         for i in range(1, 7):
             next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
             next_slot = opening_hours.get(next_day, "")
-            next_range = parse_range(next_slot)
+            next_range = _parse_opening_range(next_slot)
             if next_range:
                 h, m = divmod(next_range[0], 60)
                 print(f"[Hours] Oggi ({today_name}) chiusi, prossima apertura: {next_day} {h:02d}:{m:02d}")
@@ -1636,10 +1654,13 @@ def check_reservation_availability(
     restaurant = load_restaurant()
     slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
 
-    # Tenta assegnazione tavolo reale. Tavoli e prenotazioni vengono caricati una
-    # sola volta per turno: evita roundtrip Base44 ripetuti mentre il cliente è in linea.
-    all_reservations = _fetch_reservations_for_date(date, required=True)
-    tables = _fetch_tables_from_base44(required=True)
+    # Tavoli e prenotazioni sono indipendenti: li carichiamo in parallelo per dimezzare
+    # la latenza Base44 (worst-case 5s → ~5s invece di ~10s su errore di rete lento).
+    with ThreadPoolExecutor(max_workers=2) as _pool:
+        _f_reservations = _pool.submit(_fetch_reservations_for_date, date, required=True)
+        _f_tables = _pool.submit(_fetch_tables_from_base44, required=True)
+        all_reservations = _f_reservations.result()   # ri-lancia ReservationAvailabilityError se avvenuto
+        tables = _f_tables.result()                   # idem
     tables_configured = bool(tables)
     table_info = assign_table(
         date,
@@ -1653,18 +1674,19 @@ def check_reservation_availability(
     if table_info is not None:
         return True, None, table_info
 
+    # Parse richiesto una sola volta; usato sia nel fallback max_covers che nella scansione next-slot.
+    try:
+        req_start = _parse_minutes(time)
+    except Exception:
+        return False, None, None
+    req_end = req_start + slot_minutes
+
     if not tables_configured:
         # Fallback: logica max_covers originale
         max_covers = restaurant.get("max_covers")
         if not max_covers:
             return True, None, None
         max_covers = int(max_covers)
-        try:
-            h, m = map(int, time.split(":"))
-            req_start = h * 60 + m
-            req_end = req_start + slot_minutes
-        except Exception:
-            return True, None, None
 
         booked = sum(
             int(r.get("party_size") or 0)
@@ -1675,12 +1697,6 @@ def check_reservation_availability(
             return True, None, None
 
     # Nessuna disponibilità nello slot richiesto: cerca i prossimi slot
-    try:
-        h, m = map(int, time.split(":"))
-        req_start = h * 60 + m
-    except Exception:
-        return False, None, None
-
     for delta in range(1, 4):
         next_start = req_start + delta * slot_minutes
         next_h, next_m = divmod(next_start, 60)

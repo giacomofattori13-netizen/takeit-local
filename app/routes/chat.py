@@ -34,6 +34,8 @@ from app.services.conversation_service import (
     build_closed_message,
     extract_order_from_text,
     load_menu_from_base44,
+    get_proposable_menu,
+    get_sold_out_item_names,
     load_doughs,
     save_order_to_base44,
     send_whatsapp_confirmation,
@@ -246,29 +248,6 @@ def apply_intent_to_items(
         return cancel_order_items()
 
     return existing_items
-
-def format_single_item(item: dict) -> str:
-    quantity = item["quantity"]
-    pizza_name = item["pizza_name"]
-    pizza_type = item["pizza_type"]
-    add_ingredients = item.get("add_ingredients", [])
-    remove_ingredients = item.get("remove_ingredients", [])
-
-    if quantity == 1:
-        line = f"una {pizza_name.lower()}"
-    else:
-        line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
-
-    if pizza_type == "Senza glutine":
-        line += " senza glutine"
-
-    if add_ingredients:
-        line += " con " + ", ".join(add_ingredients)
-
-    if remove_ingredients:
-        line += " senza " + ", ".join(remove_ingredients)
-
-    return line
 
 def format_single_item_for_customer(item: dict) -> str:
     quantity = item["quantity"]
@@ -836,6 +815,19 @@ def _apply_reservation_table_info(res_data: dict, table_info: dict | None) -> No
     res_data["extended"] = table_info.get("extended", False)
 
 
+def _format_reservation_summary(
+    name: str,
+    date_it: str,
+    time_str: str,
+    party: int,
+    table_name: str | None,
+) -> str:
+    """Produce 'Nome, giorno data alle HH:MM, N persona/persone[, Tavolo X]'."""
+    table_part = f", {table_name}" if table_name else ""
+    persons = "persona" if party == 1 else "persone"
+    return f"{name}, {date_it} alle {time_str}, {party} {persons}{table_part}"
+
+
 def _build_pickup_time_error(
     pickup_time: str,
     suggestion: str | None,
@@ -1220,6 +1212,38 @@ def _enqueue_reservation_sms_side_effect(
     session.refresh(job)
     _schedule_order_side_effect_job(job.id)
     print(f"[ReservationSMS] job accodato reservation date={date} time={reservation_time} table={table_name!r}")
+
+
+def _build_sold_out_item_message(
+    session: Session,
+    pizza_name: str,
+    sold_out_names: set[str],
+) -> str:
+    """Return 'finita' message with best proposable alternative in the same category."""
+    item_db = session.exec(select(MenuItem).where(MenuItem.name == pizza_name)).first()
+    category = item_db.category if item_db else None
+
+    alternatives: list[str] = []
+    if category:
+        candidates = session.exec(
+            select(MenuItem).where(
+                MenuItem.available == True,  # noqa: E712
+                MenuItem.category == category,
+            )
+        ).all()
+        seen: set[str] = set()
+        for c in candidates:
+            if c.name.lower() == pizza_name.lower():
+                continue
+            if c.name.lower() in sold_out_names:
+                continue
+            if c.name not in seen:
+                seen.add(c.name)
+                alternatives.append(c.name)
+
+    if alternatives:
+        return f"{pizza_name} è temporaneamente esaurita. Posso proporle {alternatives[0]}?"
+    return f"{pizza_name} è temporaneamente esaurita."
 
 
 def determine_state(
@@ -1742,15 +1766,6 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # ── FLUSSO PRENOTAZIONE ───────────────────────────────────────────────────
     # Rilevamento nel primo turno (collecting_items + carrello vuoto)
-    _res_states = {
-        "collecting_reservation_date",
-        "collecting_reservation_time",
-        "collecting_reservation_party",
-        "collecting_reservation_name",
-        "awaiting_reservation_confirmation",
-        "reservation_completed",
-    }
-
     def _res_response(state: str, resp: str, valid: bool = False) -> ChatResponse:
         stub = {"intent": "reservation", "items": [], "customer_name": None, "pickup_time": None}
         res_data = json.loads(conversation.reservation_json or "{}")
@@ -1874,12 +1889,11 @@ def chat(request: ChatRequest, session: SessionDep):
                     else:
                         conversation.state = "awaiting_reservation_confirmation"
                         date_it = _format_reservation_date_it(res_data.get("date", ""))
-                        table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
-                        msg = (
-                            f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. "
-                            f"Riepilogo: {conversation.customer_name}, {date_it} alle {next_slot}, "
-                            f"{party} {'persona' if party == 1 else 'persone'}{table_part}. Confermo?"
+                        summary = _format_reservation_summary(
+                            conversation.customer_name, date_it, next_slot,
+                            party, res_data.get("table_name"),
                         )
+                        msg = f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. Riepilogo: {summary}. Confermo?"
                     print(f"[Reservation] Slot esaurito, propongo {next_slot}")
                 else:
                     conversation.state = "collecting_reservation_date"
@@ -1906,14 +1920,14 @@ def chat(request: ChatRequest, session: SessionDep):
         if conversation.state == "awaiting_reservation_confirmation":
             res_data = json.loads(conversation.reservation_json or "{}")
             date_it = _format_reservation_date_it(res_data.get("date", ""))
-            time_str = res_data.get("time", "")
-            party_str = res_data.get("party_size", "")
-            name_str = conversation.customer_name or ""
-            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
-            msg = (
-                f"Riepilogo: {name_str}, {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}. Confermo?"
+            summary = _format_reservation_summary(
+                conversation.customer_name or "",
+                date_it,
+                res_data.get("time", ""),
+                int(res_data.get("party_size") or 1),
+                res_data.get("table_name"),
             )
+            msg = f"Riepilogo: {summary}. Confermo?"
             return _res_response("awaiting_reservation_confirmation", msg)
 
     if conversation.state == "collecting_reservation_name":
@@ -1923,13 +1937,14 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.state = "awaiting_reservation_confirmation"
             res_data = json.loads(conversation.reservation_json or "{}")
             date_it = _format_reservation_date_it(res_data.get("date", ""))
-            time_str = res_data.get("time", "")
-            party_str = res_data.get("party_size", "")
-            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
-            msg = (
-                f"Riepilogo: {local_name}, {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}. Confermo?"
+            summary = _format_reservation_summary(
+                local_name,
+                date_it,
+                res_data.get("time", ""),
+                int(res_data.get("party_size") or 1),
+                res_data.get("table_name"),
             )
+            msg = f"Riepilogo: {summary}. Confermo?"
             print(f"[Reservation] Nome: {mask_name(local_name)}")
             _log_chat_timing(request.session_id, "reservation_name", request_started_at)
             return _res_response("awaiting_reservation_confirmation", msg)
@@ -1976,12 +1991,13 @@ def chat(request: ChatRequest, session: SessionDep):
                     _apply_reservation_table_info(res_data, table_info)
                     conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
                     date_it = _format_reservation_date_it(_res_date)
-                    table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
+                    summary = _format_reservation_summary(
+                        conversation.customer_name or "Ospite", date_it, next_slot,
+                        _res_party, res_data.get("table_name"),
+                    )
                     msg = (
-                        "Mi dispiace, nel frattempo quello slot è stato preso. "
-                        f"Ho disponibilità alle {next_slot}. Riepilogo: "
-                        f"{conversation.customer_name or 'Ospite'}, {date_it} alle {next_slot}, "
-                        f"{_res_party} {'persona' if _res_party == 1 else 'persone'}{table_part}. Confermo?"
+                        f"Mi dispiace, nel frattempo quello slot è stato preso. "
+                        f"Ho disponibilità alle {next_slot}. Riepilogo: {summary}. Confermo?"
                     )
                     _log_chat_timing(request.session_id, "reservation_recheck_moved", request_started_at)
                     return _res_response("awaiting_reservation_confirmation", msg)
@@ -2058,13 +2074,12 @@ def chat(request: ChatRequest, session: SessionDep):
         else:
             res_data = json.loads(conversation.reservation_json or "{}")
             date_it = _format_reservation_date_it(res_data.get("date", ""))
-            time_str = res_data.get("time", "")
-            party_str = res_data.get("party_size", "")
-            name_str = conversation.customer_name or ""
-            table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
+            _party = int(res_data.get("party_size") or 1)
+            _table_part = f", {res_data['table_name']}" if res_data.get("table_name") else ""
             msg = (
-                f"{name_str}, confermo per {date_it} alle {time_str}, "
-                f"{party_str} {'persona' if party_str == 1 else 'persone'}{table_part}?"
+                f"{conversation.customer_name or ''}, confermo per "
+                f"{date_it} alle {res_data.get('time', '')}, "
+                f"{_party} {'persona' if _party == 1 else 'persone'}{_table_part}?"
             )
             _log_chat_timing(request.session_id, "reservation_confirm_retry", request_started_at)
             return _res_response("awaiting_reservation_confirmation", msg)
@@ -2527,9 +2542,10 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # Da qui in poi serve davvero l'LLM: carichiamo menu/dough solo dopo tutti
     # i fast path locali, così i turni semplici non pagano latenza di rete/cache.
-    menu_items_for_llm = load_menu_from_base44()
+    # get_proposable_menu() filtra available=True + no ingredienti finiti.
+    menu_items_for_llm = get_proposable_menu()
     first_names = [item["name"] for item in menu_items_for_llm[:3]]
-    print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci. Prime 3: {first_names}")
+    print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci proposabili. Prime 3: {first_names}")
 
     if not menu_items_for_llm:
         print("[Chat] Fallback al DB locale")
@@ -2690,6 +2706,9 @@ def chat(request: ChatRequest, session: SessionDep):
     if pickup_time_error:
         missing_messages.append(pickup_time_error)
 
+    # Precarica nomi items nascosti per ingredienti finiti (una sola chiamata per turno)
+    _sold_out_names = get_sold_out_item_names()
+
     for item in merged_items:
         # Pizza libera: sempre valida, usa prezzo Margherita come base
         if item["pizza_name"] == "Personalizzata":
@@ -2712,12 +2731,18 @@ def chat(request: ChatRequest, session: SessionDep):
             if menu_item:
                 item["pizza_type"] = menu_item.pizza_type
         if menu_item and menu_item.available:
-            dough_code = item.get("dough_type", "classica")
-            if is_dough_available(dough_code):
-                valid_items.append(item)
-            else:
+            # Verifica ingredienti finiti (sold_out_ingredients dal ristorante)
+            if item["pizza_name"].lower() in _sold_out_names:
+                msg = _build_sold_out_item_message(session, item["pizza_name"], _sold_out_names)
+                missing_messages.append(msg)
                 invalid_items.append(item)
-                missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
+            else:
+                dough_code = item.get("dough_type", "classica")
+                if is_dough_available(dough_code):
+                    valid_items.append(item)
+                else:
+                    invalid_items.append(item)
+                    missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
         else:
             msg, _ = build_missing_item_message(session, item)
             missing_messages.append(msg)
