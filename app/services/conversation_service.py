@@ -871,6 +871,18 @@ def is_agent_active() -> bool:
     return result
 
 
+def is_reservations_enabled() -> bool:
+    """Restituisce True se le prenotazioni tavolo sono abilitate (default True).
+    Quando False il ristorante è in modalità asporto puro: nessun flusso prenotazione."""
+    restaurant = load_restaurant()
+    value = restaurant.get("reservations_enabled", True)
+    if isinstance(value, str):
+        value = value.lower() not in ("false", "0", "no")
+    result = bool(value)
+    print(f"[Reservation] reservations_enabled={result!r} (raw={restaurant.get('reservations_enabled')!r})")
+    return result
+
+
 def fetch_and_save_restaurant() -> dict:
     """Alias usato all'avvio in main.py: prova un refresh Base44 breve, poi fallback locale."""
     fresh = _refresh_restaurant_cache_blocking()

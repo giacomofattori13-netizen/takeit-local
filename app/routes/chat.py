@@ -42,6 +42,7 @@ from app.services.conversation_service import (
     get_dough_surcharge,
     is_dough_available,
     is_agent_active,
+    is_reservations_enabled,
     INGREDIENT_EXTRA_PRICE,
     SIZE_MINI_DISCOUNT,
     SIZE_DOPPIO_SURCHARGE,
@@ -1793,9 +1794,36 @@ def chat(request: ChatRequest, session: SessionDep):
             state=state,
         )
 
+    # Quando le prenotazioni sono disabilitate (modalità asporto puro):
+    # - ignora qualsiasi intent di prenotazione e riporta al flusso ordine
+    # - reindirizza eventuali stati di prenotazione rimasti aperti
+    _reservations_on = is_reservations_enabled()
+    _reservation_states = {
+        "collecting_reservation_date",
+        "collecting_reservation_time",
+        "collecting_reservation_party",
+        "collecting_reservation_name",
+        "awaiting_reservation_confirmation",
+    }
+    if not _reservations_on:
+        if conversation.state in _reservation_states:
+            conversation.state = "collecting_items"
+            conversation.reservation_json = "{}"
+            session.add(conversation)
+            session.commit()
+            print("[Reservation] reservations_enabled=False: stato prenotazione resettato")
+        if detect_reservation_intent(request.message):
+            print("[Reservation] reservations_enabled=False: intent prenotazione ignorato")
+            _log_chat_timing(request.session_id, "reservation_disabled", request_started_at)
+            return _res_response(
+                "collecting_items",
+                "Mi dispiace, al momento accettiamo solo ordini da asporto. Cosa desidera ordinare?",
+            )
+
     # Trigger: messaggio di prenotazione nel primo turno
     if (
-        conversation.state == "collecting_items"
+        _reservations_on
+        and conversation.state == "collecting_items"
         and not json.loads(conversation.items_json)
         and detect_reservation_intent(request.message)
     ):
