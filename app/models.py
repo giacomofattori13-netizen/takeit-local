@@ -32,6 +32,7 @@ class OrderItem(SQLModel, table=True):
     dough_type: str = "classica"
     size: str = "normale"
     sale_unit: str = Field(default="piece")
+    temperature: Optional[str] = None
 
 
 class OrderSideEffect(SQLModel, table=True):
@@ -63,6 +64,7 @@ class ConversationSession(SQLModel, table=True):
     no_input_count: int = 0
     reservation_json: str = "{}"
     restaurant_id: Optional[str] = None
+    kg_temperature: Optional[str] = None
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

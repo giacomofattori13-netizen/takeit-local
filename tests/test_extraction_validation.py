@@ -41,6 +41,7 @@ class ExtractionValidationTests(unittest.TestCase):
             "size": "normale",
             "add_ingredients": ["patatine"],
             "remove_ingredients": ["olive"],
+            "temperature": "",
         }])
 
     def test_invalid_dough_falls_back_to_classica(self):

@@ -37,6 +37,7 @@ from app.services.conversation_service import (
     get_proposable_menu,
     get_sold_out_item_names,
     format_weight_display,
+    load_restaurant,
     load_doughs,
     save_order_to_base44,
     send_whatsapp_confirmation,
@@ -260,7 +261,9 @@ def format_single_item_for_customer(item: dict) -> str:
     size = item.get("size", "normale")
 
     if item.get("sale_unit") == "kg":
-        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}"
+        temperature = item.get("temperature") or "fredda"
+        temp_str = " (calda)" if temperature == "calda" else " (fredda)"
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{temp_str}"
         if add_ingredients:
             line += " con " + ", ".join(add_ingredients)
         if remove_ingredients:
@@ -383,7 +386,9 @@ def format_single_item(item: dict) -> str:
     size = item.get("size", "normale")
 
     if item.get("sale_unit") == "kg":
-        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}"
+        temperature = item.get("temperature") or "fredda"
+        temp_str = " (calda)" if temperature == "calda" else " (fredda)"
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{temp_str}"
         if add_ingredients:
             line += " con " + ", ".join(add_ingredients)
         if remove_ingredients:
@@ -878,12 +883,20 @@ def _log_chat_timing(
 def enrich_items_with_pricing(
     session: Session,
     items: list[dict[str, Any]],
+    restaurant_id: str = "",
 ) -> tuple[list[dict[str, Any]], float]:
     """Aggiunge base/extras/total price agli item usando una sola logica condivisa."""
     margherita = session.exec(
         select(MenuItem).where(MenuItem.name == "Margherita")
     ).first()
     base_personalizzata = round(margherita.price, 2) if margherita else 0.0
+
+    # Tariffe al kg dal Restaurant (se configurate)
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
+    _price_cold_raw = restaurant.get("price_per_kg_cold")
+    _price_hot_raw = restaurant.get("price_per_kg_hot")
+    price_per_kg_cold: float | None = float(_price_cold_raw) if _price_cold_raw else None
+    price_per_kg_hot: float | None = float(_price_hot_raw) if _price_hot_raw else None
 
     enriched_items: list[dict[str, Any]] = []
     for item in items:
@@ -907,9 +920,17 @@ def enrich_items_with_pricing(
         quantity = float(item.get("quantity") or 1)
 
         if item_sale_unit == "kg":
-            # Al peso: prezzo = prezzo/kg × quantità in kg, nessun supplemento
+            # Al peso: usa tariffa Restaurant se disponibile, altrimenti MenuItem.price
+            temperature = item.get("temperature") or "fredda"
+            if temperature == "calda" and price_per_kg_hot is not None:
+                effective_price = round(price_per_kg_hot, 2)
+            elif price_per_kg_cold is not None:
+                effective_price = round(price_per_kg_cold, 2)
+            else:
+                effective_price = base_price  # fallback: MenuItem.price
             extras_price = 0.0
-            total_price = round(base_price * quantity, 2)
+            total_price = round(effective_price * quantity, 2)
+            base_price = effective_price
         else:
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
             dough_code = item.get("dough_type", "classica")
@@ -1373,6 +1394,12 @@ def build_assistant_response(
     # Awaiting confirmation — nessun riepilogo, solo chiedi conferma
     if state == "awaiting_confirmation":
         name_part = f" {customer_name}" if customer_name else ""
+        has_kg = any(i.get("sale_unit") == "kg" for i in merged_order.get("items", []))
+        if has_kg:
+            return (
+                f"Perfetto{name_part}, confermo alle {pickup_time}? "
+                "Il prezzo esatto dipende dal peso al taglio."
+            )
         return f"Perfetto{name_part}, confermo alle {pickup_time}?"
 
     # Collecting pickup time (ha già il nome, manca solo l’ora)
@@ -1613,6 +1640,7 @@ def _persist_order_once(
             dough_type=item.get("dough_type", "classica"),
             size=item.get("size", "normale"),
             sale_unit=_item_sale_unit,
+            temperature=item.get("temperature") or None,
         ))
     session.commit()
 
@@ -1685,6 +1713,16 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
         completed=conversation.completed,
         response_message=greeting,
     )
+
+def _extract_temperature(message: str) -> str | None:
+    """Return 'calda' or 'fredda' from a bare temperature response, or None."""
+    m = message.lower()
+    if re.search(r'\bcald[aeo]\b|scaldat|mangiare\s+subito', m):
+        return "calda"
+    if re.search(r'\bfredd[aeo]\b|portar?\s+via|asporto', m):
+        return "fredda"
+    return None
+
 
 @router.post("/", response_model=ChatResponse)
 def chat(request: ChatRequest, session: SessionDep):
@@ -2179,7 +2217,7 @@ def chat(request: ChatRequest, session: SessionDep):
         if _is_confirm and not conversation.completed:
             order, order_created = _persist_order_once(session, conversation, merged_order)
 
-            enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
+            enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
 
             if order_created:
                 pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
@@ -2699,6 +2737,27 @@ def chat(request: ChatRequest, session: SessionDep):
             item["sale_unit"] = "piece"
     intent = extracted.get("intent", "unknown")
 
+    # Gestione temperatura per item al kg
+    # set_kg_temperature: il cliente risponde alla domanda temperatura
+    if intent == "set_kg_temperature" and not new_items:
+        new_temp = _extract_temperature(request.message) or "fredda"
+        conversation.kg_temperature = new_temp
+        # Aggiorna retroattivamente gli item già nel carrello
+        for ei in existing_items:
+            if ei.get("sale_unit") == "kg" and not ei.get("_explicit_temperature"):
+                ei["temperature"] = new_temp
+        print(f"[KgTemp] Temperatura impostata: {new_temp!r}")
+
+    # Applica temperatura agli item kg appena estratti
+    for item in new_items:
+        if item.get("sale_unit") == "kg":
+            # LLM potrebbe aver estratto temperatura esplicita
+            item_temp = item.get("temperature") or ""
+            if item_temp:
+                item["_explicit_temperature"] = True  # non sovrascrivere con session default
+            else:
+                item["temperature"] = conversation.kg_temperature or "fredda"
+
     # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
     if extracted.get("pickup_time"):
@@ -2895,7 +2954,7 @@ def chat(request: ChatRequest, session: SessionDep):
         order_id = order.id
         order_saved = True
 
-        enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"])
+        enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
 
         if order_created:
             pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
@@ -2925,6 +2984,23 @@ def chat(request: ChatRequest, session: SessionDep):
         not_found_names=not_found_names,
         intended_quantity=conversation.intended_quantity,
     )
+
+    # Chiedi temperatura UNA volta quando compare il primo item al kg nell'ordine
+    has_kg_items = any(i.get("sale_unit") == "kg" for i in merged_order.get("items", []))
+    if (
+        has_kg_items
+        and conversation.kg_temperature is None
+        and intent != "set_kg_temperature"
+        and not missing_messages
+        and not pickup_time_error
+    ):
+        # Pre-imposta il default fredda per non chiedere di nuovo
+        conversation.kg_temperature = "fredda"
+        temp_question = "Le pizze le vuole fredde da portar via o calde da mangiare subito?"
+        if response_message and not response_message.endswith("?"):
+            response_message = response_message.rstrip(".") + ". " + temp_question
+        else:
+            response_message = (response_message + " " + temp_question).strip()
 
     session.add(conversation)
     session.commit()

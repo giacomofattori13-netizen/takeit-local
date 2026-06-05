@@ -633,7 +633,9 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
         sale_unit = item.get("sale_unit", "piece")
 
         if sale_unit == "kg":
-            lines.append(f"- {format_weight_display(float(qty))} {name}")
+            temperature = item.get("temperature") or "fredda"
+            temp_str = " (calda)" if temperature == "calda" else " (fredda)"
+            lines.append(f"- {format_weight_display(float(qty))} {name}{temp_str}")
             continue
 
         dough = item.get("dough_type", "classica")
@@ -2048,7 +2050,8 @@ Return ONLY valid JSON with this exact structure:
       "quantity": number,
       "size": string,
       "add_ingredients": [string],
-      "remove_ingredients": [string]
+      "remove_ingredients": [string],
+      "temperature": "fredda" | "calda" | ""
     }}
   ]
 }}
@@ -2062,6 +2065,7 @@ Allowed intent values:
 - "replace_items"
 - "cancel_order"
 - "clear_cart"
+- "set_kg_temperature"
 - "unknown"
 
 Rules:
@@ -2156,7 +2160,16 @@ Intent rules:
 - Use "replace_items" when the user wants to replace previous pizzas with new ones.
 - Use "cancel_order" when the user wants to cancel the whole order including name and time (annulla l'ordine, voglio annullare).
 - Use "clear_cart" when the user wants to reset only the pizzas and start over, keeping name and pickup time (cancella tutto e ricominciamo, ricominciamo da capo, azzera le pizze, voglio ricominciare).
+- Use "set_kg_temperature" when the user is answering a temperature question (fredda/calda/da portar via/da mangiare) with NO new pizza items. Return items=[].
 - Use "unknown" if the message is unclear.
+
+TEMPERATURA PER PIZZE AL KG:
+- Le voci segnate "[al kg]" nel menu possono essere servite fredde (da asporto) o calde (scaldate subito).
+- Se il cliente specifica la temperatura per una voce al kg, usa temperature="fredda" o temperature="calda".
+- Se NON specificata, usa temperature="" (il backend usa il default della sessione).
+- Se il cliente dice "fredde"/"fredda"/"da portar via"/"da asporto" → temperature="fredda".
+- Se dice "calde"/"calda"/"scaldata"/"da mangiare subito" → temperature="calda".
+- Se risponde SOLO con una preferenza temperatura senza pizze (es. "calde per favore") → intent="set_kg_temperature", items=[].
 
 Remove_items rules:
 - Put the pizza to remove in items[] with pizza_name set to the exact name mentioned.
@@ -2323,6 +2336,7 @@ _ALLOWED_INTENTS = {
     "replace_items",
     "cancel_order",
     "clear_cart",
+    "set_kg_temperature",
     "unknown",
 }
 _ALLOWED_SIZES = {"normale", "mini", "doppio"}
@@ -2339,11 +2353,25 @@ class _ExtractedItem(BaseModel):
     size: str = "normale"
     add_ingredients: list[str] = Field(default_factory=list)
     remove_ingredients: list[str] = Field(default_factory=list)
+    # For kg items: "fredda"|"calda"|"" (empty = use session default)
+    temperature: str = ""
 
     @field_validator("pizza_name", "dough_type", "size", mode="before")
     @classmethod
     def _coerce_string(cls, value: Any) -> str:
         return "" if value is None else str(value).strip()
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _coerce_temperature(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        t = str(value).lower().strip()
+        if re.search(r"cald", t):
+            return "calda"
+        if re.search(r"fredd", t):
+            return "fredda"
+        return ""
 
     @field_validator("quantity", mode="before")
     @classmethod
