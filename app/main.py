@@ -37,64 +37,84 @@ app = FastAPI(title="TakeIt Local Core")
 
 # ── Daily reset ───────────────────────────────────────────────────────────────
 
+def _is_daily_mode(restaurant: dict) -> bool:
+    """Returns True if the restaurant uses daily menu (reservations_enabled=False).
+    Only these restaurants are eligible for the daily reset.
+    """
+    value = restaurant.get("reservations_enabled", True)
+    if isinstance(value, str):
+        value = value.lower() not in ("false", "0", "no")
+    return not bool(value)
+
+
 def _perform_daily_reset() -> None:
-    """Clear sold_out_ingredients and re-enable all MenuItem.available=True."""
-    from app.services.base44_client import get_restaurant, update_restaurant, get_menu_items, update_menu_item
+    """Reset sold_out_ingredients and MenuItem.available ONLY for restaurants
+    in 'daily menu / al taglio' mode (reservations_enabled=False).
+    Restaurants with reservations_enabled=True (e.g. Corte del Sole) are never touched.
+    """
+    from app.services.base44_client import get_all_restaurants, update_restaurant, get_menu_items, update_menu_item
     from app.models import MenuItem as DBMenuItem
     from sqlmodel import Session, select
 
     print("[DailyReset] Inizio reset giornaliero")
 
-    # 1. Svuota sold_out_ingredients in Base44
-    restaurant = get_restaurant()
-    if restaurant:
-        rid = restaurant.get("id")
+    restaurants = get_all_restaurants()
+    if not restaurants:
+        print("[DailyReset] Nessun ristorante trovato su Base44, skip")
+        return
+
+    eligible = [r for r in restaurants if _is_daily_mode(r)]
+    skipped  = len(restaurants) - len(eligible)
+    print(
+        f"[DailyReset] {len(restaurants)} ristoranti totali → "
+        f"{len(eligible)} idonei al reset, {skipped} saltati (reservations_enabled=True)"
+    )
+
+    if not eligible:
+        print("[DailyReset] Nessun ristorante idoneo, nulla da fare")
+        return
+
+    for restaurant in eligible:
+        rid = restaurant.get("id", "")
+        name = restaurant.get("name") or rid
+        print(f"[DailyReset] Reset ristorante: {name!r} (id={rid!r})")
+
+        # 1. Svuota sold_out_ingredients
         sold_out = restaurant.get("sold_out_ingredients") or []
         if sold_out:
             update_restaurant({"sold_out_ingredients": []}, restaurant_id=rid)
-            print(f"[DailyReset] sold_out_ingredients resettati: {sold_out}")
+            print(f"[DailyReset]   sold_out resettati: {sold_out}")
         else:
-            print("[DailyReset] Nessun ingrediente finito da resettare")
-    else:
-        print("[DailyReset] Ristorante non trovato su Base44, skip sold_out reset")
+            print("[DailyReset]   Nessun ingrediente finito")
 
-    # 2. Riabilita tutti i MenuItem su Base44
-    b44_items = get_menu_items()
-    disabled = [i for i in b44_items if not i.get("available", True)]
-    for item in disabled:
-        update_menu_item(str(item["id"]), {"available": True})
-    if disabled:
-        print(f"[DailyReset] {len(disabled)} MenuItem riabilitati su Base44")
+        # 2. Riabilita MenuItem su Base44 (solo quelli di questo ristorante)
+        b44_items = get_menu_items(restaurant_id=rid)
+        disabled = [i for i in b44_items if not i.get("available", True)]
+        for item in disabled:
+            update_menu_item(str(item["id"]), {"available": True})
+        if disabled:
+            print(f"[DailyReset]   {len(disabled)} MenuItem riabilitati su Base44")
 
-    # 3. Aggiorna DB locale
-    with Session(engine) as db:
-        db_items = db.exec(select(DBMenuItem)).all()
-        changed = 0
-        for di in db_items:
-            if not di.available:
-                di.available = True
-                db.add(di)
-                changed += 1
-        db.commit()
-        if changed:
-            print(f"[DailyReset] {changed} voci DB riabilitate")
+        # 3. Aggiorna DB locale (righe con questo restaurant_id)
+        with Session(engine) as db:
+            db_items = db.exec(
+                select(DBMenuItem).where(DBMenuItem.restaurant_id == rid)
+            ).all()
+            changed = 0
+            for di in db_items:
+                if not di.available:
+                    di.available = True
+                    db.add(di)
+                    changed += 1
+            db.commit()
+            if changed:
+                print(f"[DailyReset]   {changed} voci DB riabilitate")
 
-    # 4. Aggiorna menu_data.json
-    try:
-        with open(MENU_JSON_PATH, encoding="utf-8") as f:
-            menu_json = json.load(f)
-        for item in menu_json:
-            item["available"] = True
-        with open(MENU_JSON_PATH, "w", encoding="utf-8") as f:
-            json.dump(menu_json, f, ensure_ascii=False, indent=2)
-        print("[DailyReset] menu_data.json aggiornato")
-    except Exception as e:
-        print(f"[DailyReset] Errore menu_data.json: {type(e).__name__}: {e}")
-
-    # 5. Reset cache
-    reset_restaurant_cache()
-    fetch_and_save_restaurant()  # forza refresh sincrono da Base44
-    reset_menu_cache()
+        # 4. Reset cache per questo ristorante
+        reset_restaurant_cache(restaurant_id=rid)
+        fetch_and_save_restaurant(restaurant_id=rid)
+        reset_menu_cache(restaurant_id=rid)
+        print(f"[DailyReset]   Cache invalidata per restaurant_id={rid!r}")
 
     print("[DailyReset] Reset completato")
 
