@@ -194,6 +194,49 @@ def update_menu_item(item_id: str, patch: dict, timeout: float = 10.0) -> dict |
         return None
 
 
+def create_call_log(data: dict, timeout: float = 8.0) -> dict | None:
+    """Create a CallLog entity on Base44."""
+    api_key = os.getenv("BASE44_API_KEY")
+    if not api_key:
+        return None
+    try:
+        resp = httpx.post(
+            f"{_BASE}/CallLog",
+            params=_rw_params(),
+            json=data,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        print(f"[Base44] create_call_log ok id={result.get('id')!r}")
+        return result
+    except Exception as e:
+        print(f"[Base44] create_call_log error: {type(e).__name__}: {e}")
+        return None
+
+
+def update_call_log(log_id: str, patch: dict, timeout: float = 8.0) -> dict | None:
+    """Update a CallLog entity on Base44."""
+    api_key = os.getenv("BASE44_API_KEY")
+    if not api_key:
+        return None
+    try:
+        resp = httpx.put(
+            f"{_BASE}/CallLog/{log_id}",
+            params=_rw_params(),
+            json=patch,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        print(f"[Base44] update_call_log id={log_id!r} outcome={patch.get('outcome')!r}")
+        return resp.json()
+    except Exception as e:
+        print(f"[Base44] update_call_log id={log_id!r} error: {type(e).__name__}: {e}")
+        return None
+
+
 def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:
     """Create an OwnerCommand entity on Base44."""
     api_key = os.getenv("BASE44_API_KEY")

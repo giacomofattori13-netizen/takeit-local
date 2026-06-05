@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import datetime
 import hashlib
 import hmac
 import json
@@ -36,6 +37,95 @@ from app.routes.chat import (
 )
 
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+# ── CallLog tracking ─────────────────────────────────────────────────────────
+# session_id → (call_log_id, started_at_epoch)  — in-memory, intentionally ephemeral
+_call_logs: dict[str, tuple[str, float]] = {}
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+async def _call_log_create_instant(
+    *,
+    restaurant_id: str,
+    caller_phone: str | None,
+    outcome: str,
+    summary: str = "",
+) -> None:
+    """Fire-and-forget: create a completed CallLog in a single step (no update needed)."""
+    now = _now_iso()
+    data: dict = {
+        "restaurant_id": restaurant_id or None,
+        "started_at": now,
+        "ended_at": now,
+        "duration_seconds": 0,
+        "caller_phone": caller_phone,
+        "outcome": outcome,
+    }
+    if summary:
+        data["summary"] = summary
+    try:
+        from app.services.base44_client import create_call_log
+        await asyncio.to_thread(create_call_log, data)
+    except Exception as exc:
+        print(f"[CallLog] Errore create_instant outcome={outcome!r}: {type(exc).__name__}: {exc}")
+
+
+async def _call_log_create(
+    session_id: str,
+    restaurant_id: str,
+    caller_phone: str | None,
+) -> None:
+    """Fire-and-forget: create a CallLog with outcome=abbandonata as safety default."""
+    started_epoch = time.time()
+    data = {
+        "restaurant_id": restaurant_id or None,
+        "started_at": _now_iso(),
+        "caller_phone": caller_phone,
+        "outcome": "abbandonata",
+    }
+    try:
+        from app.services.base44_client import create_call_log
+        result = await asyncio.to_thread(create_call_log, data)
+        if result and result.get("id"):
+            _call_logs[session_id] = (str(result["id"]), started_epoch)
+            print(f"[CallLog] Creato id={result['id']!r} session={session_id!r}")
+        else:
+            print(f"[CallLog] Creazione fallita (nessun id) session={session_id!r}")
+    except Exception as exc:
+        print(f"[CallLog] Errore creazione session={session_id!r}: {type(exc).__name__}: {exc}")
+
+
+async def _call_log_update(
+    session_id: str,
+    outcome: str,
+    *,
+    order_id: int | None = None,
+    summary: str = "",
+) -> None:
+    """Fire-and-forget: finalise a CallLog with the real outcome."""
+    entry = _call_logs.pop(session_id, None)
+    if not entry:
+        return
+    log_id, started_epoch = entry
+    ended_epoch = time.time()
+    patch: dict = {
+        "ended_at": _now_iso(),
+        "duration_seconds": max(0, int(ended_epoch - started_epoch)),
+        "outcome": outcome,
+    }
+    if order_id is not None:
+        patch["order_id"] = str(order_id)
+    if summary:
+        patch["summary"] = summary
+    try:
+        from app.services.base44_client import update_call_log
+        await asyncio.to_thread(update_call_log, log_id, patch)
+    except Exception as exc:
+        print(f"[CallLog] Errore aggiornamento id={log_id!r}: {type(exc).__name__}: {exc}")
+
 
 # Directory temporanea per i file MP3 generati da ElevenLabs
 AUDIO_DIR = Path("/tmp/takeit_audio")
@@ -913,7 +1003,15 @@ async def voice_process(request: Request, session_id: str = Query(...)):
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
-    if result.state != "completed":
+    if result.state == "completed":
+        _has_order = result.order_id is not None
+        asyncio.create_task(_call_log_update(
+            session_id,
+            "ordine" if _has_order else "nessun_ordine",
+            order_id=result.order_id,
+            summary=f"Ordine #{result.order_id} confermato" if _has_order else "Chiamata terminata senza ordine",
+        ))
+    else:
         asyncio.create_task(_prefetch_openai_connection())
     return Response(content=twiml, media_type="application/xml")
 
@@ -938,6 +1036,13 @@ async def voice_incoming(
     # Controlla agent_active prima di qualsiasi altra operazione
     if not is_agent_active(restaurant_id=restaurant_id):
         print("[Voice] agent_active=False → chiusura chiamata")
+        # CallLog fuori_orario — fire-and-forget
+        asyncio.create_task(_call_log_create_instant(
+            restaurant_id=restaurant_id,
+            caller_phone=caller_phone,
+            outcome="fuori_orario",
+            summary="Chiamata fuori orario di apertura",
+        ))
         closed_audio = await _audio_element_async(build_closed_message(restaurant_id=restaurant_id))
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -973,6 +1078,9 @@ async def voice_incoming(
     session.add(conversation)
     session.commit()
     print(f"[Voice] Sessione creata: {session_id}")
+
+    # CallLog: crea con outcome=abbandonata di default (verrà aggiornato a fine chiamata)
+    asyncio.create_task(_call_log_create(session_id, restaurant_id, caller_phone))
 
     greeting = get_agent_greeting(restaurant_id=restaurant_id)
 
@@ -1089,6 +1197,10 @@ async def voice_gather(
                 _conv.no_input_count = 0
                 session.add(_conv)
                 session.commit()
+            asyncio.create_task(_call_log_update(
+                session_id, "nessun_ordine",
+                summary="Chiamata terminata: nessun input ricevuto",
+            ))
             return Response(content=twiml, media_type="application/xml")
 
         # Prima volta: chiedi di ripetere e aggiorna il contatore
@@ -1236,7 +1348,15 @@ async def voice_gather(
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
-    if result.state != "completed":
+    if result.state == "completed":
+        _has_order = result.order_id is not None
+        asyncio.create_task(_call_log_update(
+            session_id,
+            "ordine" if _has_order else "nessun_ordine",
+            order_id=result.order_id,
+            summary=f"Ordine #{result.order_id} confermato" if _has_order else "Chiamata terminata senza ordine",
+        ))
+    else:
         asyncio.create_task(_prefetch_openai_connection())
     record_latency(
         "voice",
