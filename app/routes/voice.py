@@ -26,6 +26,7 @@ from app.services.conversation_service import (
     get_agent_greeting,
     is_agent_active,
     lookup_customer,
+    resolve_restaurant_from_phone,
 )
 from app.routes.chat import (
     _extract_local_customer_name,
@@ -921,6 +922,7 @@ async def voice_process(request: Request, session_id: str = Query(...)):
 async def voice_incoming(
     request: Request,
     From: str = Form(default=""),
+    To: str = Form(default=""),
     session: Session = Depends(get_session),
 ):
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
@@ -929,10 +931,14 @@ async def voice_incoming(
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {mask_phone(caller_phone)}")
 
+    # Risolvi il ristorante dal numero chiamato (To)
+    _restaurant, restaurant_id = await asyncio.to_thread(resolve_restaurant_from_phone, To)
+    print(f"[Voice] To={To!r} → restaurant_id={restaurant_id!r}")
+
     # Controlla agent_active prima di qualsiasi altra operazione
-    if not is_agent_active():
+    if not is_agent_active(restaurant_id=restaurant_id):
         print("[Voice] agent_active=False → chiusura chiamata")
-        closed_audio = await _audio_element_async(build_closed_message())
+        closed_audio = await _audio_element_async(build_closed_message(restaurant_id=restaurant_id))
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"
@@ -962,12 +968,13 @@ async def voice_incoming(
         items_json="[]",
         state="collecting_items",
         completed=False,
+        restaurant_id=restaurant_id or None,
     )
     session.add(conversation)
     session.commit()
     print(f"[Voice] Sessione creata: {session_id}")
 
-    greeting = get_agent_greeting()
+    greeting = get_agent_greeting(restaurant_id=restaurant_id)
 
     # Attendi il lookup (si sovrappone alle operazioni DB sopra)
     customer = await _resolve_customer_lookup_task(

@@ -33,18 +33,18 @@ RESTAURANT_JSON_PATH = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "restaurant_data.json")
 )
 
-_menu_cache: list[dict] = []
+_menu_cache: dict[str, list[dict]] = {}           # "" = default JSON file; restaurant_id = per-restaurant
 _dough_cache: list[dict] = []
 _dough_refresh_inflight = False
 _dough_refresh_lock = threading.Lock()
-_restaurant_cache: dict | None = None
-_restaurant_cache_ts: float = 0.0  # epoch seconds dell'ultimo fetch riuscito
-_restaurant_refresh_inflight = False
+_restaurant_cache: dict[str, dict] = {}            # "" = default; restaurant_id = per-restaurant
+_restaurant_cache_ts: dict[str, float] = {}        # "" = default
+_restaurant_refresh_inflight: set[str] = set()     # restaurant_id keys being refreshed
 _restaurant_refresh_lock = threading.Lock()
 _customer_lookup_cache: dict[str, tuple[float, dict | None, float]] = {}
 _customer_lookup_cache_lock = threading.Lock()
-_system_prompt_cache: str | None = None
-_system_prompt_slim_cache: dict[str, str] = {}  # state → slim prompt
+_system_prompt_cache: dict[str, str | None] = {}   # "" = default; restaurant_id = per-restaurant
+_system_prompt_slim_cache: dict[str, dict[str, str]] = {}  # "" = default; restaurant_id → {state: prompt}
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
 RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
@@ -123,38 +123,49 @@ def _restaurant_refresh_timeout_seconds() -> float:
     )
 
 
-def reset_menu_cache() -> None:
+def reset_menu_cache(restaurant_id: str | None = None) -> None:
     global _menu_cache, _system_prompt_cache, _system_prompt_slim_cache
-    _menu_cache = []
-    _system_prompt_cache = None
-    _system_prompt_slim_cache = {}
+    if restaurant_id is None:
+        _menu_cache.clear()
+        _system_prompt_cache.clear()
+        _system_prompt_slim_cache.clear()
+    else:
+        _menu_cache.pop(restaurant_id, None)
+        _system_prompt_cache.pop(restaurant_id, None)
+        _system_prompt_slim_cache.pop(restaurant_id, None)
 
 
 def reset_dough_cache() -> None:
-    global _dough_cache, _dough_refresh_inflight, _system_prompt_cache, _system_prompt_slim_cache
+    global _dough_cache, _dough_refresh_inflight
     _dough_cache = []
     _dough_refresh_inflight = False
-    _system_prompt_cache = None
-    _system_prompt_slim_cache = {}
+    _system_prompt_cache.clear()
+    _system_prompt_slim_cache.clear()
 
 
-def reset_restaurant_cache() -> None:
+def reset_restaurant_cache(restaurant_id: str | None = None) -> None:
     global _restaurant_cache, _restaurant_cache_ts, _restaurant_refresh_inflight
-    _restaurant_cache = None
-    _restaurant_cache_ts = 0.0
-    _restaurant_refresh_inflight = False
+    with _restaurant_refresh_lock:
+        if restaurant_id is None:
+            _restaurant_cache.clear()
+            _restaurant_cache_ts.clear()
+            _restaurant_refresh_inflight.clear()
+        else:
+            _restaurant_cache.pop(restaurant_id, None)
+            _restaurant_cache_ts.pop(restaurant_id, None)
+            _restaurant_refresh_inflight.discard(restaurant_id)
 
 
-def get_proposable_menu(menu_items: list[dict] | None = None) -> list[dict]:
+def get_proposable_menu(menu_items: list[dict] | None = None, restaurant_id: str = "") -> list[dict]:
     """Returns menu items the agent can proactively offer.
 
     An item is proposable iff: available != False AND no ingredient appears in
     restaurant.sold_out_ingredients (case-insensitive, trimmed comparison).
     """
     if menu_items is None:
-        menu_items = load_menu_from_base44()
+        menu_items = load_menu_from_base44(restaurant_id=restaurant_id)
 
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     sold_out_raw = restaurant.get("sold_out_ingredients") or []
     if not sold_out_raw:
         return menu_items
@@ -173,12 +184,12 @@ def get_proposable_menu(menu_items: list[dict] | None = None) -> list[dict]:
     return proposable
 
 
-def get_sold_out_item_names(menu_items: list[dict] | None = None) -> set[str]:
+def get_sold_out_item_names(menu_items: list[dict] | None = None, restaurant_id: str = "") -> set[str]:
     """Returns lowercase names of items hidden due to sold_out_ingredients."""
     if menu_items is None:
-        menu_items = load_menu_from_base44()
+        menu_items = load_menu_from_base44(restaurant_id=restaurant_id)
 
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     sold_out_raw = restaurant.get("sold_out_ingredients") or []
     if not sold_out_raw:
         return set()
@@ -232,17 +243,50 @@ _PIZZA_TYPE_TO_DOUGH: dict[str, str] = {
 }
 
 
-def load_menu_from_base44() -> list[dict]:
+def load_menu_from_base44(restaurant_id: str = "") -> list[dict]:
     """
-    Carica il menu dal file statico app/menu_data.json (generato da Base44).
-    Il file viene letto una sola volta e tenuto in memoria per l'intera durata
-    del processo — nessun token JWT, nessuna chiamata di rete.
-    Per aggiornare il menu: sostituire menu_data.json e riavviare il server.
+    Carica il menu.
+    - restaurant_id=="" → legge app/menu_data.json (comportamento legacy)
+    - restaurant_id!="" → fetcha da Base44 filtrando per restaurant_id;
+                          fallback al file JSON se Base44 non ritorna nulla.
     """
     global _menu_cache
 
-    if _menu_cache:
-        return _menu_cache
+    if restaurant_id in _menu_cache:
+        return _menu_cache[restaurant_id]
+
+    if restaurant_id:
+        # Fetch dal Base44 per questo ristorante specifico
+        try:
+            from app.services.base44_client import get_menu_items as _b44_get_menu_items
+            raw_items = _b44_get_menu_items(restaurant_id=restaurant_id)
+            if raw_items:
+                menu = [
+                    {
+                        "name": item["name"],
+                        "category": item.get("category", ""),
+                        "dough_type": item.get("dough_type", "classica"),
+                        "pizza_type": _DOUGH_TO_PIZZA_TYPE.get(
+                            item.get("dough_type", "classica"), "Normale"
+                        ),
+                        "price": item.get("price", 0.0),
+                        "available": item.get("available", True),
+                        "ingredients": item.get("ingredients", []),
+                        "sale_unit": item.get("sale_unit", "piece"),
+                        "restaurant_id": item.get("restaurant_id"),
+                    }
+                    for item in raw_items
+                    if item.get("available", True)
+                ]
+                _menu_cache[restaurant_id] = menu
+                first_names = [item["name"] for item in menu[:3]]
+                print(f"[Menu] Caricato da Base44: {len(menu)} voci (restaurant_id={restaurant_id!r})")
+                print(f"[Menu] Prime 3 voci: {first_names}")
+                return menu
+            print(f"[Menu] Base44 non ha restituito voci per restaurant_id={restaurant_id!r}, fallback a file")
+        except Exception as e:
+            print(f"[Menu] Errore fetch Base44 per restaurant_id={restaurant_id!r}: {type(e).__name__}: {e}")
+        # fallback al file
 
     menu_path = os.path.normpath(MENU_JSON_PATH)
     try:
@@ -266,7 +310,7 @@ def load_menu_from_base44() -> list[dict]:
             if item.get("available", True)
         ]
 
-        _menu_cache = menu
+        _menu_cache[restaurant_id] = menu
         first_names = [item["name"] for item in menu[:3]]
         print(f"[Menu] Caricato da file: {len(menu)} voci ({menu_path})")
         print(f"[Menu] Prime 3 voci: {first_names}")
@@ -468,6 +512,7 @@ def save_order_to_base44(
     order_number: int,
     ai_confidence: float,
     items: list[dict],
+    restaurant_id: str = "",
 ) -> None:
     """
     Invia l'ordine a Base44.
@@ -514,6 +559,8 @@ def save_order_to_base44(
         "review_reason": review_reason,
         "items": base44_items,
     }
+    if restaurant_id:
+        payload["restaurant_id"] = restaurant_id
 
     print(
         f"[Base44] Payload ordine=#{order_number} customer={mask_name(customer_name)} "
@@ -804,87 +851,100 @@ def _load_restaurant_from_file() -> dict:
     return {}
 
 
-def _cache_restaurant_data(data: dict, source: str) -> dict:
+def _cache_restaurant_data(data: dict, source: str, restaurant_id: str = "") -> dict:
     global _restaurant_cache, _restaurant_cache_ts
-    _restaurant_cache = data
-    _restaurant_cache_ts = time.monotonic()
-    print(f"[Restaurant] Cache aggiornata da {source}. Campi: {list(_restaurant_cache.keys())}")
-    print(f"[Restaurant] agent_greeting: {_restaurant_cache.get('agent_greeting')!r}")
-    return _restaurant_cache
+    _restaurant_cache[restaurant_id] = data
+    _restaurant_cache_ts[restaurant_id] = time.monotonic()
+    print(f"[Restaurant] Cache aggiornata da {source} (restaurant_id={restaurant_id!r}). Campi: {list(data.keys())}")
+    print(f"[Restaurant] agent_greeting: {data.get('agent_greeting')!r}")
+    return _restaurant_cache[restaurant_id]
 
 
-def _refresh_restaurant_cache_blocking() -> dict | None:
+def _fetch_restaurant_from_base44_for(restaurant_id: str = "", timeout_seconds: float | None = None) -> dict | None:
+    """Fetches the right Restaurant from Base44 depending on restaurant_id."""
+    if restaurant_id:
+        from app.services.base44_client import get_restaurant_by_id as _b44_get_by_id
+        return _b44_get_by_id(restaurant_id, timeout=timeout_seconds or _restaurant_refresh_timeout_seconds())
+    return _fetch_restaurant_from_base44(timeout_seconds=timeout_seconds)
+
+
+def _refresh_restaurant_cache_blocking(restaurant_id: str = "") -> dict | None:
     started = time.perf_counter()
-    fresh = _fetch_restaurant_from_base44()
+    fresh = _fetch_restaurant_from_base44_for(restaurant_id)
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     if fresh is not None:
         record_latency("restaurant", "refresh", elapsed_ms, result="success")
-        return _cache_restaurant_data(fresh, "Base44")
+        return _cache_restaurant_data(fresh, "Base44", restaurant_id)
 
     record_latency("restaurant", "refresh", elapsed_ms, result="failed")
     return None
 
 
-def _restaurant_refresh_worker(reason: str) -> None:
-    global _restaurant_refresh_inflight
+def _restaurant_refresh_worker(reason: str, restaurant_id: str = "") -> None:
     try:
-        print(f"[Restaurant] Refresh Base44 in background ({reason})")
-        _refresh_restaurant_cache_blocking()
+        print(f"[Restaurant] Refresh Base44 in background ({reason}) restaurant_id={restaurant_id!r}")
+        _refresh_restaurant_cache_blocking(restaurant_id)
     finally:
         with _restaurant_refresh_lock:
-            _restaurant_refresh_inflight = False
+            _restaurant_refresh_inflight.discard(restaurant_id)
 
 
-def _start_restaurant_refresh_background(reason: str) -> bool:
-    global _restaurant_refresh_inflight
+def _start_restaurant_refresh_background(reason: str, restaurant_id: str = "") -> bool:
     with _restaurant_refresh_lock:
-        if _restaurant_refresh_inflight:
+        if restaurant_id in _restaurant_refresh_inflight:
             return False
-        _restaurant_refresh_inflight = True
+        _restaurant_refresh_inflight.add(restaurant_id)
 
     thread = threading.Thread(
         target=_restaurant_refresh_worker,
-        args=(reason,),
-        name="restaurant-refresh",
+        args=(reason, restaurant_id),
+        name=f"restaurant-refresh-{restaurant_id or 'default'}",
         daemon=True,
     )
     thread.start()
     return True
 
 
-def load_restaurant() -> dict:
+def load_restaurant(restaurant_id: str = "") -> dict:
     """Restituisce i dati ristorante senza bloccare il turno cliente su Base44.
 
     Usa stale-while-revalidate: cache/file locale rispondono subito; Base44 aggiorna
     in background quando il TTL scade o al primo cold load.
     """
     now = time.monotonic()
+    cached = _restaurant_cache.get(restaurant_id)
+    cached_ts = _restaurant_cache_ts.get(restaurant_id, 0.0)
 
-    if _restaurant_cache and (now - _restaurant_cache_ts) < RESTAURANT_CACHE_TTL:
-        return _restaurant_cache
-
-    if _restaurant_cache:
-        age = int(now - _restaurant_cache_ts)
-        print(f"[Restaurant] Uso cache stale (età {age}s), refresh in background")
-        _start_restaurant_refresh_background("cache_stale")
-        return _restaurant_cache
-
-    local = _load_restaurant_from_file()
-    if local:
-        cached = _cache_restaurant_data(local, "file")
-        _start_restaurant_refresh_background("cold_file_fallback")
+    if cached and (now - cached_ts) < RESTAURANT_CACHE_TTL:
         return cached
 
-    _start_restaurant_refresh_background("cold_empty")
-    print("[Restaurant] Nessun dato immediato disponibile: né cache, né file")
+    if cached:
+        age = int(now - cached_ts)
+        print(f"[Restaurant] Uso cache stale (età {age}s), refresh in background (restaurant_id={restaurant_id!r})")
+        _start_restaurant_refresh_background("cache_stale", restaurant_id)
+        return cached
+
+    # For non-default restaurants, don't use the local file fallback (it's only for Corte del Sole)
+    if not restaurant_id:
+        local = _load_restaurant_from_file()
+        if local:
+            cached = _cache_restaurant_data(local, "file", restaurant_id)
+            _start_restaurant_refresh_background("cold_file_fallback", restaurant_id)
+            return cached
+
+    _start_restaurant_refresh_background("cold_empty", restaurant_id)
+    if restaurant_id:
+        print(f"[Restaurant] Nessun dato immediato per restaurant_id={restaurant_id!r}: avvio refresh")
+    else:
+        print("[Restaurant] Nessun dato immediato disponibile: né cache, né file")
     return {}
 
 
-def is_agent_active() -> bool:
+def is_agent_active(restaurant_id: str = "") -> bool:
     """Restituisce True se l'agente è attivo (agent_active != False).
     In caso di dati mancanti o errori, assume attivo per sicurezza."""
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     active = restaurant.get("agent_active", True)
     # Base44 può restituire bool o stringa
     if isinstance(active, str):
@@ -894,10 +954,10 @@ def is_agent_active() -> bool:
     return result
 
 
-def is_reservations_enabled() -> bool:
+def is_reservations_enabled(restaurant_id: str = "") -> bool:
     """Restituisce True se le prenotazioni tavolo sono abilitate (default True).
     Quando False il ristorante è in modalità asporto puro: nessun flusso prenotazione."""
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     value = restaurant.get("reservations_enabled", True)
     if isinstance(value, str):
         value = value.lower() not in ("false", "0", "no")
@@ -906,12 +966,53 @@ def is_reservations_enabled() -> bool:
     return result
 
 
-def fetch_and_save_restaurant() -> dict:
+def fetch_and_save_restaurant(restaurant_id: str = "") -> dict:
     """Alias usato all'avvio in main.py: prova un refresh Base44 breve, poi fallback locale."""
-    fresh = _refresh_restaurant_cache_blocking()
+    fresh = _refresh_restaurant_cache_blocking(restaurant_id)
     if fresh:
         return fresh
-    return load_restaurant()
+    return load_restaurant(restaurant_id=restaurant_id)
+
+
+def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str]:
+    """Find the Restaurant whose agent_phone matches to_number (the Twilio To field).
+
+    Returns (restaurant_dict, restaurant_id_str).
+    Falls back to DEFAULT_RESTAURANT_ID env, then empty-string default.
+    Never raises — always returns a usable pair.
+    """
+    from app.services.base44_client import get_restaurant_by_phone as _b44_by_phone
+
+    to_clean = to_number.strip()
+
+    # 1. Match by agent_phone
+    if to_clean:
+        try:
+            matched = _b44_by_phone(to_clean)
+        except Exception as exc:
+            print(f"[Restaurant] Errore risoluzione per To={to_clean!r}: {type(exc).__name__}: {exc}")
+            matched = None
+
+        if matched:
+            rid = matched.get("id", "")
+            print(f"[Restaurant] Risolto restaurant_id={rid!r} da numero To={to_clean!r}")
+            _cache_restaurant_data(matched, "phone_lookup", rid)
+            return matched, rid
+
+    print(f"[Restaurant] Nessun match per To={to_clean!r}")
+
+    # 2. Fallback: DEFAULT_RESTAURANT_ID env
+    default_id = os.getenv("DEFAULT_RESTAURANT_ID", "").strip()
+    if default_id:
+        restaurant = load_restaurant(restaurant_id=default_id)
+        if restaurant:
+            print(f"[Restaurant] Fallback a DEFAULT_RESTAURANT_ID={default_id!r}")
+            return restaurant, default_id
+        print(f"[Restaurant] DEFAULT_RESTAURANT_ID={default_id!r} non trovato in cache/Base44")
+
+    # 3. Last resort: empty-string default (existing global behaviour)
+    print("[Restaurant] Warning: nessun ristorante risolto, uso comportamento globale")
+    return load_restaurant(""), ""
 
 
 _GREETING_PATTERN = re.compile(r"buon pomeriggio|buonasera|buongiorno", re.IGNORECASE)
@@ -936,14 +1037,14 @@ def _apply_time_greeting(text: str) -> str:
     return f"{greeting.capitalize()}, {text}"
 
 
-def get_agent_greeting() -> str:
+def get_agent_greeting(restaurant_id: str = "") -> str:
     """Restituisce il saluto dell'agente con saluto temporale corretto.
     Priorità: 1) Restaurant.agent_greeting da Base44
                2) env var AGENT_GREETING
                3) stringa hardcoded di emergenza
     """
     # 1. Base44
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     greeting = restaurant.get("agent_greeting")
     if greeting and isinstance(greeting, str) and greeting.strip():
         result = _apply_time_greeting(greeting.strip())
@@ -963,9 +1064,9 @@ def get_agent_greeting() -> str:
     return result
 
 
-def get_opening_hours() -> dict | str | None:
+def get_opening_hours(restaurant_id: str = "") -> dict | str | None:
     """Restituisce gli orari di apertura da Restaurant.opening_hours in Base44."""
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     return restaurant.get("opening_hours")
 
 
@@ -973,7 +1074,7 @@ _WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "satur
 _WEEKDAY_IT   = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"]
 
 
-def build_closed_message() -> str:
+def build_closed_message(restaurant_id: str = "") -> str:
     """Genera un messaggio di chiusura dinamico in base agli orari di apertura.
 
     Casi:
@@ -989,7 +1090,7 @@ def build_closed_message() -> str:
     now_total = now.hour * 60 + now.minute
     today_idx = now.weekday()  # 0 = lunedì
 
-    opening_hours = get_opening_hours()
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
     if not opening_hours or not isinstance(opening_hours, dict):
         return "Siamo temporaneamente chiusi. Richiameremo appena possibile. Grazie!"
 
@@ -1114,7 +1215,7 @@ def resolve_pickup_time(raw: str) -> str:
     return result
 
 
-def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None, str | None]:
+def validate_pickup_time(pickup_time: str, restaurant_id: str = "") -> tuple[bool, str | None, str | None]:
     """
     Controlla se pickup_time rientra negli orari di apertura del giorno corrente
     ed è nel futuro rispetto all'orario attuale (timezone Europe/Rome).
@@ -1131,7 +1232,7 @@ def validate_pickup_time(pickup_time: str) -> tuple[bool, str | None, str | None
     now = datetime.datetime.now(tz=rome)
     now_total = now.hour * 60 + now.minute
 
-    opening_hours = get_opening_hours()
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
     if not opening_hours or not isinstance(opening_hours, dict):
         return True, None, None
 
@@ -1527,9 +1628,9 @@ def _parse_opening_range(slot: str | None) -> tuple[int, int] | None:
         return None
 
 
-def validate_reservation_time(date: str, time: str) -> tuple[bool, str | None]:
+def validate_reservation_time(date: str, time: str, restaurant_id: str = "") -> tuple[bool, str | None]:
     """Valida data/orario prenotazione contro apertura e tempo corrente."""
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     opening_hours = restaurant.get("opening_hours")
     if not opening_hours or not isinstance(opening_hours, dict):
         return True, None
@@ -1677,7 +1778,7 @@ def assign_table(
 
 
 def check_reservation_availability(
-    date: str, time: str, party_size: int
+    date: str, time: str, party_size: int, restaurant_id: str = ""
 ) -> tuple[bool, str | None, dict | None]:
     """
     Controlla disponibilità per lo slot richiesto tramite assegnazione tavolo reale.
@@ -1686,7 +1787,7 @@ def check_reservation_availability(
     Ritorna (available, next_slot_suggestion, table_info).
     table_info è {table_id, table_name, extended, combined_tables} oppure None.
     """
-    restaurant = load_restaurant()
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
     slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
 
     # Tavoli e prenotazioni sono indipendenti: li carichiamo in parallelo per dimezzare
@@ -1776,6 +1877,7 @@ def save_reservation_to_base44(
     table_name: str | None = None,
     combined_tables: list[str] | None = None,
     extended: bool = False,
+    restaurant_id: str = "",
 ) -> str | None:
     """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore."""
     api_key = os.getenv("BASE44_API_KEY")
@@ -1798,6 +1900,8 @@ def save_reservation_to_base44(
         "combined_tables": combined_tables or [],
         "extended": extended,
     }
+    if restaurant_id:
+        payload["restaurant_id"] = restaurant_id
     print(
         f"[Reservation] Salvo: customer={mask_name(customer_name)} "
         f"phone={mask_phone(customer_phone)} date={date} time={time} party={party_size} "
@@ -2142,21 +2246,24 @@ def _get_system_prompt(
     menu_items: list[dict],
     dough_items: list[dict] | None,
     state: str = "collecting_items",
+    restaurant_id: str = "",
 ) -> str:
-    global _system_prompt_cache, _system_prompt_slim_cache
-
-    # Stati leggeri: prompt compatto (~700 chars) invece del monolite (~10 000 chars)
+    # Stati leggeri: prompt compatto keyed by (restaurant_id, state)
     if state in ("collecting_name", "collecting_pickup_time"):
-        if state in _system_prompt_slim_cache:
-            return _system_prompt_slim_cache[state]
+        slim_key = restaurant_id
+        slim_by_state = _system_prompt_slim_cache.get(slim_key, {})
+        if state in slim_by_state:
+            return slim_by_state[state]
         prompt = _build_slim_system_prompt(menu_items, dough_items, state)
-        _system_prompt_slim_cache[state] = prompt
-        print(f"[LLM] Slim prompt per stato={state!r} ({len(prompt)} chars)")
+        slim_by_state[state] = prompt
+        _system_prompt_slim_cache[slim_key] = slim_by_state
+        print(f"[LLM] Slim prompt per stato={state!r} restaurant_id={restaurant_id!r} ({len(prompt)} chars)")
         return prompt
 
-    # collecting_items (e qualsiasi altro stato): prompt completo in cache globale
-    if _system_prompt_cache is not None:
-        return _system_prompt_cache
+    # collecting_items: prompt completo, cache per restaurant_id
+    cached_full = _system_prompt_cache.get(restaurant_id)
+    if cached_full is not None:
+        return cached_full
 
     menu_lines = []
     for item in menu_items:
@@ -2177,23 +2284,22 @@ def _get_system_prompt(
         dough_lines.append(f'- {d["name"]} (code: {d["code"]}) | supplemento: {surcharge_text}')
     dough_text = "\n".join(dough_lines)
 
-    _system_prompt_cache = build_system_prompt(menu_text, dough_text)
-    print(f"[LLM] System prompt completo costruito e messo in cache ({len(_system_prompt_cache)} chars)")
-    return _system_prompt_cache
+    full_prompt = build_system_prompt(menu_text, dough_text)
+    _system_prompt_cache[restaurant_id] = full_prompt
+    print(f"[LLM] System prompt completo costruito (restaurant_id={restaurant_id!r}, {len(full_prompt)} chars)")
+    return full_prompt
 
 
-def prewarm_system_prompt() -> None:
-    """Costruisce e cachea il system prompt all'avvio del server.
-    Deve essere chiamata dopo fetch_and_save_doughs() e sync_menu_to_db()
-    così _menu_cache e _dough_cache sono già popolati."""
-    menu_items = load_menu_from_base44()
+def prewarm_system_prompt(restaurant_id: str = "") -> None:
+    """Costruisce e cachea il system prompt all'avvio del server."""
+    menu_items = load_menu_from_base44(restaurant_id=restaurant_id)
     dough_items = load_doughs()
     if not menu_items:
         print("[LLM] Prewarm system prompt: menu vuoto, skip")
         return
-    _get_system_prompt(menu_items, dough_items, state="collecting_items")
-    _get_system_prompt(menu_items, dough_items, state="collecting_name")
-    _get_system_prompt(menu_items, dough_items, state="collecting_pickup_time")
+    _get_system_prompt(menu_items, dough_items, state="collecting_items", restaurant_id=restaurant_id)
+    _get_system_prompt(menu_items, dough_items, state="collecting_name", restaurant_id=restaurant_id)
+    _get_system_prompt(menu_items, dough_items, state="collecting_pickup_time", restaurant_id=restaurant_id)
 
 
 # Alias fonetici: parole comuni trascritte male dal riconoscimento vocale → termine corretto.
@@ -2396,8 +2502,9 @@ def extract_order_from_text(
     state: str = "collecting_items",
     existing_items: list[dict] | None = None,
     customer_name: str | None = None,
+    restaurant_id: str = "",
 ) -> dict:
-    system_prompt = _get_system_prompt(menu_items, dough_items, state)
+    system_prompt = _get_system_prompt(menu_items, dough_items, state, restaurant_id=restaurant_id)
 
     normalized = _apply_aliases(message)
     if normalized != message:

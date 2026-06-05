@@ -3,6 +3,7 @@
 Processes commands from the owner's phone number (OWNER_PHONE env var).
 Actions: sold_out / back (ingredient), item_off / item_on (whole dish).
 """
+import asyncio
 import json
 import os
 import re
@@ -73,15 +74,23 @@ def _interpret_command(command_text: str) -> dict:
 
 # ── Action handlers ───────────────────────────────────────────────────────────
 
-def _apply_sold_out(ingredient: str) -> str:
-    from app.services.base44_client import get_restaurant, update_restaurant
+def _get_restaurant_for_action(restaurant_id: str) -> dict | None:
+    """Fetch the restaurant dict for the given id, using cache or Base44."""
+    from app.services.base44_client import get_restaurant, get_restaurant_by_id
+    if restaurant_id:
+        return get_restaurant_by_id(restaurant_id) or get_restaurant()
+    return get_restaurant()
+
+
+def _apply_sold_out(ingredient: str, restaurant_id: str = "") -> str:
+    from app.services.base44_client import update_restaurant
     from app.services.conversation_service import (
         fetch_and_save_restaurant,
         reset_menu_cache,
         load_menu_from_base44,
     )
 
-    restaurant = get_restaurant()
+    restaurant = _get_restaurant_for_action(restaurant_id)
     if not restaurant:
         return "Errore: impossibile leggere dati ristorante."
 
@@ -95,23 +104,23 @@ def _apply_sold_out(ingredient: str) -> str:
     if not ok:
         return f"Errore aggiornamento Base44 per '{ingredient}'."
 
-    menu = load_menu_from_base44()
+    menu = load_menu_from_base44(restaurant_id=restaurant_id)
     affected = sum(
         1 for item in menu
         if ingredient in {ing.lower().strip() for ing in item.get("ingredients", [])}
     )
 
-    fetch_and_save_restaurant()
-    reset_menu_cache()
+    fetch_and_save_restaurant(restaurant_id=restaurant_id)
+    reset_menu_cache(restaurant_id=restaurant_id)
 
     return f"'{ingredient}' segnato come finito: nascoste {affected} voci di menù."
 
 
-def _apply_back(ingredient: str) -> str:
-    from app.services.base44_client import get_restaurant, update_restaurant
+def _apply_back(ingredient: str, restaurant_id: str = "") -> str:
+    from app.services.base44_client import update_restaurant
     from app.services.conversation_service import fetch_and_save_restaurant, reset_menu_cache
 
-    restaurant = get_restaurant()
+    restaurant = _get_restaurant_for_action(restaurant_id)
     if not restaurant:
         return "Errore: impossibile leggere dati ristorante."
 
@@ -125,21 +134,21 @@ def _apply_back(ingredient: str) -> str:
     if not ok:
         return f"Errore rimozione '{ingredient}' dai finiti."
 
-    fetch_and_save_restaurant()
-    reset_menu_cache()
+    fetch_and_save_restaurant(restaurant_id=restaurant_id)
+    reset_menu_cache(restaurant_id=restaurant_id)
 
     return f"'{ingredient}' di nuovo disponibile."
 
 
-def _apply_item_off(item_name: str) -> str:
-    return _toggle_item(item_name, available=False)
+def _apply_item_off(item_name: str, restaurant_id: str = "") -> str:
+    return _toggle_item(item_name, available=False, restaurant_id=restaurant_id)
 
 
-def _apply_item_on(item_name: str) -> str:
-    return _toggle_item(item_name, available=True)
+def _apply_item_on(item_name: str, restaurant_id: str = "") -> str:
+    return _toggle_item(item_name, available=True, restaurant_id=restaurant_id)
 
 
-def _toggle_item(item_name: str, *, available: bool) -> str:
+def _toggle_item(item_name: str, *, available: bool, restaurant_id: str = "") -> str:
     """Set available flag on all matching items in Base44, DB, and menu_data.json."""
     from app.services.base44_client import get_menu_items, update_menu_item
     from app.services.conversation_service import MENU_JSON_PATH, reset_menu_cache
@@ -147,7 +156,7 @@ def _toggle_item(item_name: str, *, available: bool) -> str:
     from app.models import MenuItem as DBMenuItem
     from sqlmodel import Session, select
 
-    b44_items = get_menu_items()
+    b44_items = get_menu_items(restaurant_id=restaurant_id or None)
     matches = [i for i in b44_items if i.get("name", "").lower().strip() == item_name]
 
     if not matches:
@@ -182,7 +191,7 @@ def _toggle_item(item_name: str, *, available: bool) -> str:
     except Exception as e:
         print(f"[SMS] Errore menu_data.json: {type(e).__name__}: {e}")
 
-    reset_menu_cache()
+    reset_menu_cache(restaurant_id=restaurant_id)
 
     verb = "rimosso dal" if not available else "rimesso nel"
     return f"'{item_name}' {verb} menù ({len(matches)} varianti)."
@@ -218,6 +227,7 @@ def _send_reply(to: str, body: str) -> None:
 async def sms_incoming(
     request: Request,
     From: str = Form(default=""),
+    To: str = Form(default=""),
     Body: str = Form(default=""),
 ):
     """Twilio SMS webhook. Processes owner commands."""
@@ -234,6 +244,11 @@ async def sms_incoming(
     if not command_text:
         return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
+    # Risolvi il ristorante dal numero chiamato (To)
+    from app.services.conversation_service import resolve_restaurant_from_phone as _resolve
+    _restaurant, restaurant_id = await asyncio.to_thread(_resolve, To)
+    print(f"[SMS] To={To!r} → restaurant_id={restaurant_id!r}")
+
     print(f"[SMS] Comando titolare: {command_text!r}")
 
     from app.services.base44_client import create_owner_command, update_owner_command
@@ -243,6 +258,7 @@ async def sms_incoming(
         "command_text": command_text,
         "source": "sms",
         "status": "pending",
+        **({"restaurant_id": restaurant_id} if restaurant_id else {}),
     })
     cmd_id = cmd.get("id") if cmd else None
 
@@ -257,13 +273,13 @@ async def sms_incoming(
     status = "executed"
     try:
         if act == "sold_out" and ingredient:
-            result_message = _apply_sold_out(ingredient)
+            result_message = _apply_sold_out(ingredient, restaurant_id=restaurant_id)
         elif act == "back" and ingredient:
-            result_message = _apply_back(ingredient)
+            result_message = _apply_back(ingredient, restaurant_id=restaurant_id)
         elif act == "item_off" and item_name:
-            result_message = _apply_item_off(item_name)
+            result_message = _apply_item_off(item_name, restaurant_id=restaurant_id)
         elif act == "item_on" and item_name:
-            result_message = _apply_item_on(item_name)
+            result_message = _apply_item_on(item_name, restaurant_id=restaurant_id)
         else:
             result_message = (
                 "Comando non riconosciuto. Esempi: "

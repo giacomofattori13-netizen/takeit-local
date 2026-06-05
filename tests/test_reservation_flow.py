@@ -22,7 +22,7 @@ class ReservationFlowTests(unittest.TestCase):
         original_sms = chat_module.send_reservation_sms
         sms_calls = []
 
-        chat_module.is_agent_active = lambda: True
+        chat_module.is_agent_active = lambda restaurant_id="": True
         chat_module.validate_reservation_time = lambda *args, **kwargs: (True, None)
         chat_module.check_reservation_availability = lambda *args, **kwargs: (
             True,
@@ -86,7 +86,7 @@ class ReservationFlowTests(unittest.TestCase):
         original_tables = service_module._fetch_tables_from_base44
         table_fetches = []
 
-        service_module.load_restaurant = lambda: {"reservation_slot_minutes": 90}
+        service_module.load_restaurant = lambda restaurant_id="": {"reservation_slot_minutes": 90}
         service_module._fetch_reservations_for_date = lambda date, **kwargs: [
             {"date": date, "time": "20:00", "table_id": "t1", "status": "confermata"}
         ]
@@ -122,7 +122,7 @@ class ReservationFlowTests(unittest.TestCase):
         original_reservations = service_module._fetch_reservations_for_date
         original_tables = service_module._fetch_tables_from_base44
 
-        service_module.load_restaurant = lambda: {
+        service_module.load_restaurant = lambda restaurant_id="": {
             "reservation_slot_minutes": 90,
             "opening_hours": {
                 "monday": "18:00-23:00",
@@ -174,7 +174,7 @@ class ReservationFlowTests(unittest.TestCase):
         engine = create_engine("sqlite://")
         SQLModel.metadata.create_all(engine)
         original_is_agent_active = chat_module.is_agent_active
-        chat_module.is_agent_active = lambda: True
+        chat_module.is_agent_active = lambda restaurant_id="": True
         try:
             with Session(engine) as session:
                 session.add(ConversationSession(
@@ -206,7 +206,7 @@ class ReservationFlowTests(unittest.TestCase):
         original_is_agent_active = chat_module.is_agent_active
         original_check = chat_module.check_reservation_availability
 
-        chat_module.is_agent_active = lambda: True
+        chat_module.is_agent_active = lambda restaurant_id="": True
 
         def unavailable(*args, **kwargs):
             raise service_module.ReservationAvailabilityError("Base44 down")
@@ -240,7 +240,7 @@ class ReservationFlowTests(unittest.TestCase):
 
     def test_closed_day_reservation_time_is_rejected(self):
         original_restaurant = service_module.load_restaurant
-        service_module.load_restaurant = lambda: {
+        service_module.load_restaurant = lambda restaurant_id="": {
             "opening_hours": {
                 "monday": "closed",
                 "tuesday": "18:00-23:00",
@@ -272,7 +272,7 @@ class ReservationFlowTests(unittest.TestCase):
         original_save = chat_module.save_reservation_to_base44
         original_schedule = chat_module._schedule_order_side_effect_job
 
-        chat_module.is_agent_active = lambda: True
+        chat_module.is_agent_active = lambda restaurant_id="": True
         chat_module.validate_reservation_time = lambda *args, **kwargs: (True, None)
         chat_module.check_reservation_availability = lambda *args, **kwargs: (
             True,

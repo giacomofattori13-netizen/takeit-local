@@ -1153,18 +1153,22 @@ def _enqueue_order_side_effects(
     items: list[dict[str, Any]],
     total_amount: float,
     pizza_names: list[str],
+    restaurant_id: str = "",
 ) -> None:
     now = time.time()
     item_payload = copy.deepcopy(items)
+    b44_order_payload: dict[str, Any] = {
+        "customer_name": customer_name,
+        "customer_phone": customer_phone,
+        "pickup_time": pickup_time,
+        "order_number": order_number,
+        "ai_confidence": ai_confidence,
+        "items": item_payload,
+    }
+    if restaurant_id:
+        b44_order_payload["restaurant_id"] = restaurant_id
     job_specs = [
-        ("base44_order", {
-            "customer_name": customer_name,
-            "customer_phone": customer_phone,
-            "pickup_time": pickup_time,
-            "order_number": order_number,
-            "ai_confidence": ai_confidence,
-            "items": item_payload,
-        }),
+        ("base44_order", b44_order_payload),
         ("whatsapp_confirmation", {
             "customer_name": customer_name,
             "customer_phone": customer_phone,
@@ -1686,24 +1690,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 def chat(request: ChatRequest, session: SessionDep):
     request_started_at = time.perf_counter()
 
-    if not is_agent_active():
-        print("[Chat] agent_active=False → rifiuto messaggio")
-        _log_chat_timing(request.session_id, "agent_closed", request_started_at)
-        return ChatResponse(
-            session_id=request.session_id,
-            user_message=request.message,
-            extracted_order={},
-            merged_order={},
-            valid=False,
-            missing_items=[],
-            response_message=build_closed_message(),
-            order_id=None,
-            state="closed",
-        )
-
-    message_lower = unicodedata.normalize("NFC", request.message.lower())
-
-    # Carica la sessione prima della chiamata LLM per poter passare lo stato corrente al prompt
+    # Carica la sessione prima di qualsiasi controllo
     session_statement = select(ConversationSession).where(
         ConversationSession.session_id == request.session_id
     )
@@ -1721,6 +1708,26 @@ def chat(request: ChatRequest, session: SessionDep):
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
+
+    # Restaurant scope for this session (resolved at call time in voice_incoming)
+    restaurant_id: str = conversation.restaurant_id or ""
+
+    if not is_agent_active(restaurant_id=restaurant_id):
+        print("[Chat] agent_active=False → rifiuto messaggio")
+        _log_chat_timing(request.session_id, "agent_closed", request_started_at)
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={},
+            merged_order={},
+            valid=False,
+            missing_items=[],
+            response_message=build_closed_message(restaurant_id=restaurant_id),
+            order_id=None,
+            state="closed",
+        )
+
+    message_lower = unicodedata.normalize("NFC", request.message.lower())
 
     if conversation.completed and conversation.state == "reservation_completed":
         res_data = json.loads(conversation.reservation_json or "{}")
@@ -1829,7 +1836,7 @@ def chat(request: ChatRequest, session: SessionDep):
     # Quando le prenotazioni sono disabilitate (modalità asporto puro):
     # - ignora qualsiasi intent di prenotazione e riporta al flusso ordine
     # - reindirizza eventuali stati di prenotazione rimasti aperti
-    _reservations_on = is_reservations_enabled()
+    _reservations_on = is_reservations_enabled(restaurant_id=restaurant_id)
     _reservation_states = {
         "collecting_reservation_date",
         "collecting_reservation_time",
@@ -1892,6 +1899,7 @@ def chat(request: ChatRequest, session: SessionDep):
             is_valid_time, time_error = validate_reservation_time(
                 res_data.get("date", ""),
                 res_time,
+                restaurant_id=restaurant_id,
             )
             if not is_valid_time:
                 conversation.state = "collecting_reservation_time"
@@ -1922,6 +1930,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     res_data.get("date", ""),
                     res_data.get("time", ""),
                     party,
+                    restaurant_id=restaurant_id,
                 )
             except ReservationAvailabilityError as exc:
                 print(f"[Reservation] Availability non verificabile: {exc}")
@@ -2020,7 +2029,7 @@ def chat(request: ChatRequest, session: SessionDep):
             _res_time = res_data.get("time", "")
             _res_party = int(res_data.get("party_size") or 1)
 
-            is_valid_time, time_error = validate_reservation_time(_res_date, _res_time)
+            is_valid_time, time_error = validate_reservation_time(_res_date, _res_time, restaurant_id=restaurant_id)
             if not is_valid_time:
                 conversation.state = "collecting_reservation_time"
                 _log_chat_timing(request.session_id, "reservation_confirm_time_invalid", request_started_at)
@@ -2036,6 +2045,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     _res_date,
                     _res_time,
                     _res_party,
+                    restaurant_id=restaurant_id,
                 )
             except ReservationAvailabilityError as exc:
                 print(f"[Reservation] Availability non verificabile in conferma: {exc}")
@@ -2088,6 +2098,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 table_name=_res_table_name,
                 combined_tables=_res_combined,
                 extended=_res_extended,
+                restaurant_id=restaurant_id,
             )
             if not reservation_id:
                 conversation.state = "awaiting_reservation_confirmation"
@@ -2182,6 +2193,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     items=enriched_items,
                     total_amount=order_total,
                     pizza_names=pizza_names,
+                    restaurant_id=restaurant_id,
                 )
 
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
@@ -2603,7 +2615,7 @@ def chat(request: ChatRequest, session: SessionDep):
     # Da qui in poi serve davvero l'LLM: carichiamo menu/dough solo dopo tutti
     # i fast path locali, così i turni semplici non pagano latenza di rete/cache.
     # get_proposable_menu() filtra available=True + no ingredienti finiti.
-    menu_items_for_llm = get_proposable_menu()
+    menu_items_for_llm = get_proposable_menu(restaurant_id=restaurant_id)
     first_names = [item["name"] for item in menu_items_for_llm[:3]]
     print(f"[Chat] menu_items_for_llm: {len(menu_items_for_llm)} voci proposabili. Prime 3: {first_names}")
 
@@ -2637,6 +2649,7 @@ def chat(request: ChatRequest, session: SessionDep):
         state=conversation.state,
         existing_items=existing_items_ctx,
         customer_name=conversation.customer_name,
+        restaurant_id=restaurant_id,
     )
 
     # LLM timeout fallback: rispondi "Ok!" e lascia il turno successivo riprocessare
@@ -2690,7 +2703,7 @@ def chat(request: ChatRequest, session: SessionDep):
     pickup_time_error = None
     if extracted.get("pickup_time"):
         pt = resolve_pickup_time(extracted["pickup_time"])
-        is_valid, suggestion, closing_time = validate_pickup_time(pt)
+        is_valid, suggestion, closing_time = validate_pickup_time(pt, restaurant_id=restaurant_id)
         if not is_valid:
             pickup_time_error = _build_pickup_time_error(pt, suggestion, closing_time)
         else:
@@ -2776,7 +2789,7 @@ def chat(request: ChatRequest, session: SessionDep):
         missing_messages.append(pickup_time_error)
 
     # Precarica nomi items nascosti per ingredienti finiti (una sola chiamata per turno)
-    _sold_out_names = get_sold_out_item_names()
+    _sold_out_names = get_sold_out_item_names(restaurant_id=restaurant_id)
 
     for item in merged_items:
         # Pizza libera: sempre valida, usa prezzo Margherita come base
@@ -2896,6 +2909,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 items=enriched_items,
                 total_amount=order_total,
                 pizza_names=pizza_names,
+                restaurant_id=restaurant_id,
             )
 
     response_message = build_assistant_response(

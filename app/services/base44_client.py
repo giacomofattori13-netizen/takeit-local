@@ -4,6 +4,7 @@ Uses BASE44_API_KEY (env) for write operations and BASE44_TOKEN for reads.
 App ID: 69c54bc5c44250d7da397903
 """
 import os
+import re
 
 import httpx
 
@@ -25,8 +26,8 @@ def _parse_entities(data) -> list[dict]:
     return entities if isinstance(entities, list) else []
 
 
-def get_menu_items(timeout: float = 10.0) -> list[dict]:
-    """Fetch all MenuItem entities from Base44."""
+def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> list[dict]:
+    """Fetch MenuItem entities from Base44, optionally filtered by restaurant_id."""
     if not os.getenv("BASE44_TOKEN"):
         print("[Base44] get_menu_items: BASE44_TOKEN mancante")
         return []
@@ -34,11 +35,92 @@ def get_menu_items(timeout: float = 10.0) -> list[dict]:
         resp = httpx.get(f"{_BASE}/MenuItem", headers=_ro_headers(), timeout=timeout)
         resp.raise_for_status()
         items = _parse_entities(resp.json())
-        print(f"[Base44] get_menu_items: {len(items)} voci")
+        if restaurant_id:
+            items = [item for item in items if item.get("restaurant_id") == restaurant_id]
+            print(f"[Base44] get_menu_items: {len(items)} voci (restaurant_id={restaurant_id!r})")
+        else:
+            print(f"[Base44] get_menu_items: {len(items)} voci")
         return items
     except Exception as e:
         print(f"[Base44] get_menu_items error: {type(e).__name__}: {e}")
         return []
+
+
+def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
+    """Fetch all Restaurant entities from Base44."""
+    if not os.getenv("BASE44_TOKEN"):
+        print("[Base44] get_all_restaurants: BASE44_TOKEN mancante")
+        return []
+    try:
+        resp = httpx.get(f"{_BASE}/Restaurant", headers=_ro_headers(), timeout=timeout)
+        resp.raise_for_status()
+        restaurants = _parse_entities(resp.json())
+        print(f"[Base44] get_all_restaurants: {len(restaurants)} ristoranti")
+        return restaurants
+    except Exception as e:
+        print(f"[Base44] get_all_restaurants error: {type(e).__name__}: {e}")
+        return []
+
+
+def _strip_phone(s: str) -> str:
+    """Remove formatting chars from phone string."""
+    return re.sub(r"[\s\-\(\)]", "", s or "")
+
+
+def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
+    """Find a Restaurant whose agent_phone matches the given phone number.
+
+    Normalizes both sides by stripping whitespace/dashes/parens before comparing.
+    Uses suffix matching on stripped digits to handle E.164 vs local format differences.
+    """
+    if not os.getenv("BASE44_TOKEN"):
+        print("[Base44] get_restaurant_by_phone: BASE44_TOKEN mancante")
+        return None
+    try:
+        restaurants = get_all_restaurants(timeout=timeout)
+        needle = _strip_phone(phone)
+        # Compare stripped suffix (last 9+ chars) to handle +39 prefix mismatches
+        needle_suffix = needle[-9:] if len(needle) >= 9 else needle
+        for r in restaurants:
+            r_phone = _strip_phone(r.get("agent_phone") or "")
+            r_suffix = r_phone[-9:] if len(r_phone) >= 9 else r_phone
+            if r_suffix and needle_suffix and r_suffix == needle_suffix:
+                print(f"[Base44] get_restaurant_by_phone: trovato id={r.get('id')!r} per {phone!r}")
+                return r
+        print(f"[Base44] get_restaurant_by_phone: nessun match per {phone!r}")
+        return None
+    except Exception as e:
+        print(f"[Base44] get_restaurant_by_phone error: {type(e).__name__}: {e}")
+        return None
+
+
+def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | None:
+    """Fetch a specific Restaurant entity by ID from Base44."""
+    if not os.getenv("BASE44_TOKEN"):
+        print("[Base44] get_restaurant_by_id: BASE44_TOKEN mancante")
+        return None
+    try:
+        resp = httpx.get(
+            f"{_BASE}/Restaurant/{restaurant_id}",
+            headers=_ro_headers(),
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # Base44 may return the entity directly or wrapped
+        if isinstance(data, dict) and "entities" in data:
+            entities = data["entities"]
+            restaurant = entities[0] if isinstance(entities, list) and entities else None
+        elif isinstance(data, dict):
+            restaurant = data
+        else:
+            restaurant = None
+        if restaurant:
+            print(f"[Base44] get_restaurant_by_id ok id={restaurant.get('id')!r}")
+        return restaurant
+    except Exception as e:
+        print(f"[Base44] get_restaurant_by_id id={restaurant_id!r} error: {type(e).__name__}: {e}")
+        return None
 
 
 def get_restaurant(timeout: float = 10.0) -> dict | None:

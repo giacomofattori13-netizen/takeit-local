@@ -14,8 +14,8 @@ class RestaurantCacheTests(unittest.TestCase):
 
     def test_stale_cache_returns_immediately_and_schedules_refresh(self):
         cached = {"agent_active": True, "agent_greeting": "Ciao"}
-        service._restaurant_cache = cached
-        service._restaurant_cache_ts = time.monotonic() - service.RESTAURANT_CACHE_TTL - 1
+        service._restaurant_cache[""] = cached
+        service._restaurant_cache_ts[""] = time.monotonic() - service.RESTAURANT_CACHE_TTL - 1
         scheduled: list[str] = []
 
         with (
@@ -27,7 +27,7 @@ class RestaurantCacheTests(unittest.TestCase):
             patch.object(
                 service,
                 "_start_restaurant_refresh_background",
-                side_effect=lambda reason: scheduled.append(reason) or True,
+                side_effect=lambda reason, restaurant_id="": scheduled.append(reason) or True,
             ),
         ):
             result = service.load_restaurant()
@@ -49,7 +49,7 @@ class RestaurantCacheTests(unittest.TestCase):
             patch.object(
                 service,
                 "_start_restaurant_refresh_background",
-                side_effect=lambda reason: scheduled.append(reason) or True,
+                side_effect=lambda reason, restaurant_id="": scheduled.append(reason) or True,
             ),
         ):
             result = service.load_restaurant()
@@ -64,7 +64,7 @@ class RestaurantCacheTests(unittest.TestCase):
             result = service.fetch_and_save_restaurant()
 
         self.assertEqual(result, fresh)
-        self.assertIs(service._restaurant_cache, fresh)
+        self.assertIs(service._restaurant_cache[""], fresh)
 
 
 if __name__ == "__main__":
