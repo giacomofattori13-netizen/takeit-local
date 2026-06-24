@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TakeIt · Consegne smart — Bovolone</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  :root{
+    --bg:#F6F4EF; --panel:#FFFFFF; --panel2:#F1EEE7; --line:#E2DDD3;
+    --ink:#1C2128; --muted:#6B7280; --faint:#9AA1AB; --accent:#E8552D;
+    --r1:#E8552D; --r2:#3FA7D6; --r3:#69B34C; --r4:#F2B53A; --r5:#B06FE0; --r6:#E86A9E; --r7:#4DB6A4; --r8:#D98C3F;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:var(--font-ui);-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1240px;margin:0 auto;padding:18px;}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px;}
+  .brand .eyebrow{font-family:var(--font-mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);}
+  .brand h1{margin:2px 0 2px;font-size:22px;font-weight:700;letter-spacing:-.01em;}
+  .brand .sub{font-size:13px;color:var(--muted);}
+  .stats{display:flex;gap:20px;flex-wrap:wrap;margin:0 0 14px;padding:11px 16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;}
+  .stat .n{font-family:var(--font-mono);font-size:19px;font-weight:600;}
+  .stat .n .accent{color:var(--accent);}
+  .stat .l{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;}
+  .grid{display:grid;grid-template-columns:1.4fr 1fr;gap:16px;}
+  @media(max-width:900px){.grid{grid-template-columns:1fr;}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;}
+  .card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);}
+  .card-head h2{margin:0;font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;}
+  .card-head .hint{font-size:12px;color:var(--muted);}
+  #map{height:460px;width:100%;background:#EFEDE7;}
+  .leaflet-container{background:#EFEDE7;}
+  .panel-body{padding:14px 16px;}
+  /* input */
+  .form{display:grid;grid-template-columns:1fr 70px;gap:8px;}
+  .form input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--ink);
+    padding:10px 12px;font-size:14px;font-family:var(--font-ui);}
+  .form input:focus{outline:2px solid var(--accent);outline-offset:1px;}
+  .form .add{grid-column:1 / -1;background:var(--accent);color:#fff;border:0;border-radius:9px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;}
+  .form .add:disabled{opacity:.5;cursor:default;}
+  .status{font-size:12.5px;color:var(--muted);margin-top:8px;min-height:18px;}
+  .status.err{color:#E8552D;}
+  .slider-row{display:flex;align-items:center;gap:10px;margin-top:14px;font-size:12.5px;color:var(--muted);}
+  .slider-row input[type=range]{flex:1;accent-color:var(--accent);}
+  .slider-row b{color:var(--ink);font-family:var(--font-mono);}
+  .seed{margin-top:10px;background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:8px 12px;font-size:12.5px;cursor:pointer;}
+  .seed:hover{color:var(--ink);border-color:var(--faint);}
+  /* runs */
+  .runs{max-height:300px;overflow:auto;margin-top:14px;}
+  .run{border:1px solid var(--line);border-radius:11px;margin-bottom:8px;overflow:hidden;}
+  .run-top{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--panel2);}
+  .run-chip{width:10px;height:24px;border-radius:3px;}
+  .run-id{font-weight:700;font-size:14px;}
+  .run-meta{margin-left:auto;display:flex;gap:12px;align-items:center;}
+  .run-meta .slot{font-family:var(--font-mono);font-size:13px;}
+  .run-meta .rider{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+  .run-meta .pz{font-family:var(--font-mono);font-size:12px;color:var(--accent);}
+  .stops{list-style:none;margin:0;padding:5px 12px 9px;}
+  .stops li{display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px;}
+  .stops li:last-child{border-bottom:0;}
+  .stops .addr{font-family:var(--font-mono);font-size:12.5px;}
+  .stops .pzc{font-family:var(--font-mono);font-size:12px;color:var(--faint);margin-left:auto;}
+  .stops .del{background:none;border:0;color:var(--faint);cursor:pointer;font-size:15px;padding:0 2px;}
+  .stops .del:hover{color:var(--accent);}
+  .pending{margin-top:12px;padding:10px 12px;border:1px dashed var(--accent);border-radius:9px;font-size:12.5px;color:var(--ink);}
+  .pending .pa{font-family:var(--font-mono);}
+  .pending button{margin-left:8px;background:var(--accent);color:#fff;border:0;border-radius:6px;padding:4px 9px;font-size:12px;cursor:pointer;}
+  .empty{color:var(--faint);font-size:13px;padding:18px 4px;text-align:center;}
+  footer{margin-top:16px;font-size:11.5px;color:var(--faint);line-height:1.6;}
+  .marker-num{display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;
+    color:#fff;font-family:var(--font-mono);font-weight:700;font-size:12px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);}
+  .shop-marker{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:7px;
+    background:#13161B;color:#fff;font-size:14px;border:2px solid var(--accent);box-shadow:0 1px 6px rgba(0,0,0,.6);}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <span class="eyebrow">TakeIt · consegne smart</span>
+      <h1>Raggruppa per vicinanza — Bovolone</h1>
+      <span class="sub">Digita l'indirizzo dell'ordine: finisce sulla mappa e si unisce da solo agli ordini vicini.</span>
+    </div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-head"><h2>Mappa di Bovolone</h2><span class="hint">ogni colore è un giro · 📍 = forno</span></div>
+      <div id="map"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Nuovo ordine</h2><span class="hint" id="rune">0 giri</span></div>
+      <div class="panel-body">
+        <div class="form">
+          <input id="addr" type="text" placeholder="Via e civico — es. Via Trieste 12" autocomplete="off" />
+          <input id="pizze" type="number" min="1" value="3" aria-label="numero pizze" />
+          <button class="add" id="add">Aggiungi ordine</button>
+        </div>
+        <div class="status" id="status">Scrivi un indirizzo e premi Aggiungi.</div>
+
+        <div class="slider-row">
+          <span>Raggio "vicini":</span>
+          <input type="range" id="radius" min="200" max="1500" step="100" value="600" />
+          <b id="radius-val">600 m</b>
+        </div>
+        <div class="slider-row">
+          <span>Max indirizzi per giro:</span>
+          <input type="range" id="maxstops" min="2" max="5" step="1" value="3" />
+          <b id="maxstops-val">3</b>
+        </div>
+
+        <button class="seed" id="seed">Carica 8 ordini d'esempio (centro Bovolone)</button>
+
+        <div id="pending-wrap"></div>
+        <div class="runs" id="runs"><div class="empty">Nessun ordine ancora.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <footer id="foot">
+    Geocoding via OpenStreetMap/Nominatim (gratis, 1 richiesta/sec). Per il prodotto vero, con ordini in raffica al picco,
+    servirà un geocoder a pagamento. I civici di campagna possono non essere trovati: in quel caso l'ordine resta "da piazzare" e lo posizioni con un tap.
+  </footer>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const BOVOLONE={lat:45.2581, lng:11.1300};
+const COLORS=['#E8552D','#3FA7D6','#69B34C','#F2B53A','#B06FE0','#E86A9E','#4DB6A4','#D98C3F'];
+let orders=[];            // {id, label, lat, lng, pizze}
+let pending=null;         // order awaiting manual placement
+let placingMode=false;
+let radiusM=600, maxStops=3, idc=1;
+
+const map=L.map('map',{zoomControl:true}).setView([BOVOLONE.lat,BOVOLONE.lng],15);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',{
+  attribution:'© OpenStreetMap © CARTO', subdomains:'abcd', maxZoom:19
+}).addTo(map);
+
+const shopIcon=L.divIcon({className:'',html:'<div class="shop-marker">🔥</div>',iconSize:[30,30],iconAnchor:[15,15]});
+L.marker([BOVOLONE.lat,BOVOLONE.lng],{icon:shopIcon,zIndexOffset:1000}).addTo(map).bindTooltip('Forno');
+let markers=[], routes=[];
+
+// ---------- geo helpers ----------
+function haversine(a,b){
+  const R=6371000,toR=x=>x*Math.PI/180;
+  const dLat=toR(b.lat-a.lat),dLng=toR(b.lng-a.lng);
+  const s=Math.sin(dLat/2)**2+Math.cos(toR(a.lat))*Math.cos(toR(b.lat))*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+function centroid(arr){return {lat:arr.reduce((s,o)=>s+o.lat,0)/arr.length, lng:arr.reduce((s,o)=>s+o.lng,0)/arr.length};}
+
+// greedy proximity grouping with radius + max stops
+function group(){
+  let pool=[...orders];
+  const runs=[];
+  while(pool.length){
+    const seed=pool.shift();
+    const run=[seed];
+    let progress=true;
+    while(run.length<maxStops && progress){
+      progress=false;
+      const c=centroid(run);
+      let best=null,bd=Infinity;
+      for(const o of pool){const d=haversine(c,o); if(d<=radiusM && d<bd){bd=d;best=o;}}
+      if(best){run.push(best); pool=pool.filter(x=>x!==best); progress=true;}
+    }
+    runs.push(run);
+  }
+  // schedule: order by insertion order of first member, slots from 19:15, rotate 3 riders
+  return runs.map((r,i)=>({
+    stops:r, color:COLORS[i%COLORS.length], idx:i,
+    slot:fmt(toMin('19:15')+i*15), rider:(i%3)+1,
+    pizze:r.reduce((s,o)=>s+o.pizze,0)
+  }));
+}
+const toMin=t=>{const[h,m]=t.split(':').map(Number);return h*60+m;};
+const fmt=m=>String(Math.floor(m/60)%24).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+
+// ---------- render ----------
+function render(){
+  markers.forEach(m=>map.removeLayer(m)); markers=[];
+  routes.forEach(r=>map.removeLayer(r)); routes=[];
+  const runs=group();
+
+  runs.forEach(run=>{
+    // route line forno -> stops (nearest-first from shop)
+    const stops=[...run.stops].sort((a,b)=>haversine(BOVOLONE,a)-haversine(BOVOLONE,b));
+    const latlngs=[[BOVOLONE.lat,BOVOLONE.lng],...stops.map(o=>[o.lat,o.lng])];
+    const line=L.polyline(latlngs,{color:run.color,weight:3,opacity:.6,dashArray:'4 5'}).addTo(map);
+    routes.push(line);
+    run.stops.forEach(o=>{
+      const icon=L.divIcon({className:'',html:`<div class="marker-num" style="background:${run.color}">${run.idx+1}</div>`,iconSize:[24,24],iconAnchor:[12,12]});
+      const mk=L.marker([o.lat,o.lng],{icon}).addTo(map).bindTooltip(`${o.label} · ${o.pizze} pz`);
+      markers.push(mk);
+    });
+  });
+
+  // stats
+  const pizze=orders.reduce((s,o)=>s+o.pizze,0);
+  document.getElementById('stats').innerHTML=`
+    <div class="stat"><div class="n">${orders.length}</div><div class="l">ordini</div></div>
+    <div class="stat"><div class="n"><span class="accent">${runs.length}</span></div><div class="l">giri</div></div>
+    <div class="stat"><div class="n">${pizze}</div><div class="l">pizze</div></div>
+    <div class="stat"><div class="n">${runs.length?Math.ceil(runs.length/3):0}</div><div class="l">tornate (3 rider)</div></div>`;
+  document.getElementById('rune').textContent=`${runs.length} giri`;
+
+  // runs list
+  const rc=document.getElementById('runs');
+  if(!orders.length){rc.innerHTML='<div class="empty">Nessun ordine ancora.</div>';}
+  else{
+    rc.innerHTML=runs.map(run=>`
+      <div class="run">
+        <div class="run-top">
+          <span class="run-chip" style="background:${run.color}"></span>
+          <span class="run-id">Giro ${run.idx+1}</span>
+          <span class="run-meta"><span class="pz">${run.pizze} pz</span><span class="slot">${run.slot}</span><span class="rider">Rider ${run.rider}</span></span>
+        </div>
+        <ul class="stops">
+          ${run.stops.map(o=>`<li><span class="addr">${o.label}</span><span class="pzc">${o.pizze} pz</span><button class="del" data-del="${o.id}" title="rimuovi">✕</button></li>`).join('')}
+        </ul>
+      </div>`).join('');
+    rc.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{orders=orders.filter(o=>o.id!=b.dataset.del); render();});
+  }
+}
+
+// ---------- pending (manual placement) ----------
+function renderPending(){
+  const w=document.getElementById('pending-wrap');
+  if(!pending){w.innerHTML='';return;}
+  w.innerHTML=`<div class="pending">Non ho trovato <span class="pa">"${pending.label}"</span>. <button id="place">Piazzalo sulla mappa</button> (poi clicca il punto)</div>`;
+  document.getElementById('place').onclick=()=>{placingMode=true; setStatus('Clicca sulla mappa dove si trova l\'indirizzo…');};
+}
+map.on('click',e=>{
+  if(!placingMode||!pending)return;
+  pending.lat=e.latlng.lat; pending.lng=e.latlng.lng;
+  orders.push(pending); pending=null; placingMode=false;
+  renderPending(); setStatus('Aggiunto a mano. ✓'); render();
+});
+
+// ---------- add / geocode ----------
+const setStatus=(t,err=false)=>{const s=document.getElementById('status');s.textContent=t;s.classList.toggle('err',err);};
+async function geocode(q){
+  const url=`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&q=${encodeURIComponent(q+', Bovolone, Verona')}`;
+  const r=await fetch(url,{headers:{'Accept':'application/json'}});
+  if(!r.ok) throw new Error('rete');
+  const d=await r.json();
+  if(!d.length) return null;
+  return {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon)};
+}
+let busy=false;
+async function addOrder(){
+  if(busy)return;
+  const addr=document.getElementById('addr').value.trim();
+  const pizze=Math.max(1,parseInt(document.getElementById('pizze').value)||1);
+  if(!addr){setStatus('Scrivi un indirizzo.',true);return;}
+  busy=true; document.getElementById('add').disabled=true; setStatus('Cerco l\'indirizzo…');
+  try{
+    const pt=await geocode(addr);
+    if(pt){orders.push({id:idc++,label:addr,lat:pt.lat,lng:pt.lng,pizze}); setStatus('Aggiunto. ✓'); render();}
+    else{pending={id:idc++,label:addr,pizze}; setStatus('Indirizzo non trovato — piazzalo a mano sotto.',true); renderPending();}
+    document.getElementById('addr').value='';
+  }catch(err){setStatus('Errore di rete sul geocoder. Riprova tra un secondo.',true);}
+  busy=false; document.getElementById('add').disabled=false;
+}
+document.getElementById('add').onclick=addOrder;
+document.getElementById('addr').addEventListener('keydown',e=>{if(e.key==='Enter')addOrder();});
+
+// controls
+document.getElementById('radius').oninput=e=>{radiusM=+e.target.value;document.getElementById('radius-val').textContent=radiusM+' m';render();};
+document.getElementById('maxstops').oninput=e=>{maxStops=+e.target.value;document.getElementById('maxstops-val').textContent=maxStops;render();};
+
+// seed (sequential to respect 1 req/sec)
+const SEED=[
+  ['Via Cavour 7',2],['Via Roma 22',3],['Via San Pierino 8',2],['Via Madonna 24',4],
+  ['Via Crosare 30',3],['Via Trieste 2',2],['Via Baldoni 15',5],['Piazza Costituzione 1',3]
+];
+document.getElementById('seed').onclick=async()=>{
+  const b=document.getElementById('seed'); b.disabled=true;
+  for(const [a,p] of SEED){
+    document.getElementById('addr').value=a; document.getElementById('pizze').value=p;
+    await addOrder(); await new Promise(r=>setTimeout(r,1100)); // respect Nominatim rate limit
+  }
+  b.disabled=false;
+};
+
+render();
+</script>
+</body>
+</html>
