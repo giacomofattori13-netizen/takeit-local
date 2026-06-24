@@ -125,7 +125,7 @@
           <b id="maxstops-val">3</b>
         </div>
 
-        <button class="seed" id="seed">Carica 8 ordini d'esempio (centro Bovolone)</button>
+        <button class="seed" id="seed">Carica ordini d'esempio (centro Bovolone)</button>
 
         <div id="pending-wrap"></div>
         <div class="runs" id="runs"><div class="empty">Nessun ordine ancora.</div></div>
@@ -296,18 +296,20 @@ document.getElementById('addr').addEventListener('keydown',e=>{if(e.key==='Enter
 document.getElementById('radius').oninput=e=>{radiusM=+e.target.value;document.getElementById('radius-val').textContent=radiusM+' m';render();};
 document.getElementById('maxstops').oninput=e=>{maxStops=+e.target.value;document.getElementById('maxstops-val').textContent=maxStops;render();};
 
-// seed (sequential to respect 1 req/sec)
+// seed pre-geocoded — no network calls, instant load
 const SEED=[
-  ['Via Cavour 7',2,'Centro'],['Via Roma 22',3,'Centro'],['Via San Pierino 8',2,'San Pietro'],['Via Madonna 24',4,'Madonna'],
-  ['Via Crosare 30',3,'Bellevere'],['Via Trieste 2',2,'Centro'],['Via Baldoni 15',5,'Villafontana'],['Piazza Costituzione 1',3,'Centro']
+  {label:'Via Cavour 7',       lat:45.25587, lng:11.12089, pizze:3},
+  {label:'Via Roma 22',        lat:45.25969, lng:11.11801, pizze:2},
+  {label:'Via Trieste 2',      lat:45.25923, lng:11.12064, pizze:4},
+  {label:'Via Crosare 30',     lat:45.25314, lng:11.11362, pizze:2},
+  {label:'Piazza Scipioni 1',  lat:45.25721, lng:11.11773, pizze:5},
+  {label:'Via Garibaldi 10',   lat:45.25717, lng:11.12139, pizze:3},
+  {label:'Via Benedetto Croce 1', lat:45.25861, lng:11.11652, pizze:2},
+  {label:'Via San Biagio 12',  lat:45.25962, lng:11.12047, pizze:4},
 ];
-document.getElementById('seed').onclick=async()=>{
-  const b=document.getElementById('seed'); b.disabled=true;
-  for(const [a,p,z] of SEED){
-    document.getElementById('addr').value=a; document.getElementById('pizze').value=p; document.getElementById('zona').value=z;
-    await addOrder(); await new Promise(r=>setTimeout(r,1100)); // respect Nominatim rate limit
-  }
-  b.disabled=false;
+document.getElementById('seed').onclick=()=>{
+  SEED.forEach(s=>orders.push({id:idc++, label:s.label, lat:s.lat, lng:s.lng, pizze:s.pizze}));
+  render();
 };
 
 render();
