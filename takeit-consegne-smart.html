@@ -38,6 +38,8 @@
   .form input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--ink);
     padding:10px 12px;font-size:14px;font-family:var(--font-ui);}
   .form input:focus{outline:2px solid var(--accent);outline-offset:1px;}
+  .form select{grid-column:1 / -1;width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--ink);padding:10px 12px;font-size:14px;font-family:var(--font-ui);appearance:none;cursor:pointer;}
+  .form select:focus{outline:2px solid var(--accent);outline-offset:1px;}
   .form .add{grid-column:1 / -1;background:var(--accent);color:#fff;border:0;border-radius:9px;padding:11px;font-size:14px;font-weight:600;cursor:pointer;}
   .form .add:disabled{opacity:.5;cursor:default;}
   .status{font-size:12.5px;color:var(--muted);margin-top:8px;min-height:18px;}
@@ -99,6 +101,15 @@
         <div class="form">
           <input id="addr" type="text" placeholder="Via e civico — es. Via Trieste 12" autocomplete="off" />
           <input id="pizze" type="number" min="1" value="3" aria-label="numero pizze" />
+          <select id="zona" aria-label="Zona / frazione">
+            <option value="Centro">Centro</option>
+            <option value="Villafontana">Villafontana</option>
+            <option value="Bellevere">Bellevere</option>
+            <option value="Le Campagne">Le Campagne</option>
+            <option value="Malpasso">Malpasso</option>
+            <option value="San Pietro">San Pietro</option>
+            <option value="Madonna">Madonna</option>
+          </select>
           <button class="add" id="add">Aggiungi ordine</button>
         </div>
         <div class="status" id="status">Scrivi un indirizzo e premi Aggiungi.</div>
@@ -245,8 +256,9 @@ map.on('click',e=>{
 
 // ---------- add / geocode ----------
 const setStatus=(t,err=false)=>{const s=document.getElementById('status');s.textContent=t;s.classList.toggle('err',err);};
-async function geocode(q){
-  const url=`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&q=${encodeURIComponent(q+', Bovolone, Verona')}`;
+async function geocode(q,zona){
+  const suffix=zona==='Centro'?'Bovolone, Verona':`${zona}, Bovolone, Verona`;
+  const url=`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&viewbox=11.05,45.31,11.20,45.21&bounded=1&q=${encodeURIComponent(q+', '+suffix)}`;
   const r=await fetch(url,{headers:{'Accept':'application/json'}});
   if(!r.ok) throw new Error('rete');
   const d=await r.json();
@@ -258,12 +270,14 @@ async function addOrder(){
   if(busy)return;
   const addr=document.getElementById('addr').value.trim();
   const pizze=Math.max(1,parseInt(document.getElementById('pizze').value)||1);
+  const zona=document.getElementById('zona').value;
+  const labelZona=zona!=='Centro'?` · ${zona}`:'';
   if(!addr){setStatus('Scrivi un indirizzo.',true);return;}
   busy=true; document.getElementById('add').disabled=true; setStatus('Cerco l\'indirizzo…');
   try{
-    const pt=await geocode(addr);
-    if(pt){orders.push({id:idc++,label:addr,lat:pt.lat,lng:pt.lng,pizze}); setStatus('Aggiunto. ✓'); render();}
-    else{pending={id:idc++,label:addr,pizze}; setStatus('Indirizzo non trovato — piazzalo a mano sotto.',true); renderPending();}
+    const pt=await geocode(addr,zona);
+    if(pt){orders.push({id:idc++,label:addr+labelZona,lat:pt.lat,lng:pt.lng,pizze}); setStatus('Aggiunto. ✓'); render();}
+    else{pending={id:idc++,label:addr+labelZona,pizze}; setStatus('Indirizzo non trovato — piazzalo a mano sotto.',true); renderPending();}
     document.getElementById('addr').value='';
   }catch(err){setStatus('Errore di rete sul geocoder. Riprova tra un secondo.',true);}
   busy=false; document.getElementById('add').disabled=false;
@@ -277,13 +291,13 @@ document.getElementById('maxstops').oninput=e=>{maxStops=+e.target.value;documen
 
 // seed (sequential to respect 1 req/sec)
 const SEED=[
-  ['Via Cavour 7',2],['Via Roma 22',3],['Via San Pierino 8',2],['Via Madonna 24',4],
-  ['Via Crosare 30',3],['Via Trieste 2',2],['Via Baldoni 15',5],['Piazza Costituzione 1',3]
+  ['Via Cavour 7',2,'Centro'],['Via Roma 22',3,'Centro'],['Via San Pierino 8',2,'San Pietro'],['Via Madonna 24',4,'Madonna'],
+  ['Via Crosare 30',3,'Bellevere'],['Via Trieste 2',2,'Centro'],['Via Baldoni 15',5,'Villafontana'],['Piazza Costituzione 1',3,'Centro']
 ];
 document.getElementById('seed').onclick=async()=>{
   const b=document.getElementById('seed'); b.disabled=true;
-  for(const [a,p] of SEED){
-    document.getElementById('addr').value=a; document.getElementById('pizze').value=p;
+  for(const [a,p,z] of SEED){
+    document.getElementById('addr').value=a; document.getElementById('pizze').value=p; document.getElementById('zona').value=z;
     await addOrder(); await new Promise(r=>setTimeout(r,1100)); // respect Nominatim rate limit
   }
   b.disabled=false;
