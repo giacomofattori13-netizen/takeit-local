@@ -256,14 +256,21 @@ map.on('click',e=>{
 
 // ---------- add / geocode ----------
 const setStatus=(t,err=false)=>{const s=document.getElementById('status');s.textContent=t;s.classList.toggle('err',err);};
-async function geocode(q,zona){
-  const suffix=zona==='Centro'?'Bovolone, Verona':`${zona}, Bovolone, Verona`;
-  const url=`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&viewbox=11.05,45.31,11.20,45.21&bounded=1&q=${encodeURIComponent(q+', '+suffix)}`;
+async function nominatim(query){
+  const url=`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=it&viewbox=11.05,45.31,11.20,45.21&q=${encodeURIComponent(query)}`;
   const r=await fetch(url,{headers:{'Accept':'application/json'}});
   if(!r.ok) throw new Error('rete');
   const d=await r.json();
   if(!d.length) return null;
   return {lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon)};
+}
+async function geocode(q,zona){
+  if(zona!=='Centro'){
+    const pt=await nominatim(`${q}, ${zona}, Bovolone, Verona`);
+    if(pt) return pt;
+    await new Promise(r=>setTimeout(r,1100));
+  }
+  return nominatim(`${q}, Bovolone, Verona`);
 }
 let busy=false;
 async function addOrder(){
