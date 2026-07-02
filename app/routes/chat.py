@@ -263,7 +263,9 @@ def format_single_item_for_customer(item: dict) -> str:
     if item.get("sale_unit") == "kg":
         temperature = item.get("temperature") or "fredda"
         temp_str = " (calda)" if temperature == "calda" else " (fredda)"
-        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{temp_str}"
+        kg_size = item.get("size", "normale")
+        size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else ""
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{size_str}{temp_str}"
         if add_ingredients:
             line += " con " + ", ".join(add_ingredients)
         if remove_ingredients:
@@ -388,7 +390,9 @@ def format_single_item(item: dict) -> str:
     if item.get("sale_unit") == "kg":
         temperature = item.get("temperature") or "fredda"
         temp_str = " (calda)" if temperature == "calda" else " (fredda)"
-        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{temp_str}"
+        kg_size = item.get("size", "normale")
+        size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else ""
+        line = f"{format_weight_display(float(quantity))} di {pizza_name.lower()}{size_str}{temp_str}"
         if add_ingredients:
             line += " con " + ", ".join(add_ingredients)
         if remove_ingredients:
@@ -1358,6 +1362,10 @@ def build_assistant_response(
     pickup_time = merged_order.get("pickup_time")
     items_text = format_items_for_customer(merged_order["items"])
 
+    # Prezzo al peso: deflect senza mostrare cifre
+    if intent == "ask_kg_price":
+        return "Il prezzo è al peso, glielo diciamo al ritiro quando pesiamo i tranci."
+
     # Pickup time closed-hours error — ritorna solo il messaggio di errore,
     # senza accodare missing_messages (che già contiene pickup_time_error).
     if pickup_time_error:
@@ -1721,6 +1729,19 @@ def _extract_temperature(message: str) -> str | None:
         return "calda"
     if re.search(r'\bfredd[aeo]\b|portar?\s+via|asporto', m):
         return "fredda"
+    return None
+
+
+def _extract_kg_size(message: str) -> str | None:
+    """Return 'piena' or 'mezza' from a bare slice-size response, or None."""
+    m = message.lower()
+    if re.search(r'\bpien[ao]\b|\binter[ao]\b|\bgrande\b', m):
+        return "piena"
+    if re.search(r'\bmezz[ao]\s+(?:tranci[oo]|porzion[ei])\b|\bmezza\s+(?:pizza|fett[ao])\b|\bmetà\b', m):
+        return "mezza"
+    # risposta secca "mezza" senza altri contesti numerici (evita "mezza" come orario)
+    if re.fullmatch(r'\s*mezz[ao]\s*', m):
+        return "mezza"
     return None
 
 
@@ -2748,6 +2769,14 @@ def chat(request: ChatRequest, session: SessionDep):
                 ei["temperature"] = new_temp
         print(f"[KgTemp] Temperatura impostata: {new_temp!r}")
 
+    # set_kg_size: il cliente risponde alla domanda piena/mezza
+    if intent == "set_kg_size" and not new_items:
+        new_kg_size = _extract_kg_size(request.message) or "piena"
+        for ei in existing_items:
+            if ei.get("sale_unit") == "kg" and ei.get("size", "normale") == "normale":
+                ei["size"] = new_kg_size
+        print(f"[KgSize] Dimensione impostata: {new_kg_size!r}")
+
     # Applica temperatura agli item kg appena estratti
     for item in new_items:
         if item.get("sale_unit") == "kg":
@@ -3001,6 +3030,23 @@ def chat(request: ChatRequest, session: SessionDep):
             response_message = response_message.rstrip(".") + ". " + temp_question
         else:
             response_message = (response_message + " " + temp_question).strip()
+
+    # Chiedi piena o mezza quando un item al kg non ha ancora la dimensione specificata
+    has_kg_no_size = any(
+        i.get("sale_unit") == "kg" and i.get("size", "normale") == "normale"
+        for i in merged_order.get("items", [])
+    )
+    if (
+        has_kg_no_size
+        and intent not in ("set_kg_size", "set_kg_temperature")
+        and not missing_messages
+        and not pickup_time_error
+    ):
+        size_question = "Trancio pieno (15×20) o mezza porzione (7,5×10)?"
+        if response_message and not response_message.endswith("?"):
+            response_message = response_message.rstrip(".") + ". " + size_question
+        else:
+            response_message = (response_message + " " + size_question).strip()
 
     session.add(conversation)
     session.commit()

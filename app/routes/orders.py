@@ -47,6 +47,8 @@ def list_orders(session: SessionDep):
                     quantity=item.quantity,
                     add_ingredients=json.loads(item.add_ingredients_json),
                     remove_ingredients=json.loads(item.remove_ingredients_json),
+                    size=item.size,
+                    temperature=item.temperature,
                 )
                 for item in items_by_order.get(order.id, [])
             ],

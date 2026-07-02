@@ -529,8 +529,9 @@ def save_order_to_base44(
     review_reason = "Bassa confidenza AI" if needs_review else None
     total_amount = round(sum(item.get("total_price", 0.0) for item in items), 2)
 
-    base44_items = [
-        {
+    base44_items = []
+    for item in items:
+        b44_item = {
             "pizza_name": item["pizza_name"],
             "quantity": item["quantity"],
             "dough_type": (
@@ -543,8 +544,11 @@ def save_order_to_base44(
             "extras_price": item.get("extras_price", 0.0),
             "total_price": item.get("total_price", 0.0),
         }
-        for item in items
-    ]
+        if item.get("sale_unit") == "kg":
+            kg_size = item.get("size", "normale")
+            if kg_size in ("piena", "mezza"):
+                b44_item["size"] = kg_size
+        base44_items.append(b44_item)
 
     payload = {
         "order_number": order_number,
@@ -635,7 +639,9 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
         if sale_unit == "kg":
             temperature = item.get("temperature") or "fredda"
             temp_str = " (calda)" if temperature == "calda" else " (fredda)"
-            lines.append(f"- {format_weight_display(float(qty))} {name}{temp_str}")
+            kg_size = item.get("size", "normale")
+            size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else ""
+            lines.append(f"- {format_weight_display(float(qty))} {name}{size_str}{temp_str}")
             continue
 
         dough = item.get("dough_type", "classica")
@@ -2138,9 +2144,9 @@ Rules:
 - If using "Personalizzata", still fill add_ingredients and remove_ingredients correctly. Never use "Pizza personalizzata" — always just "Personalizzata".
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"].
 - If the user says "rossa", do not add anything automatically unless specific ingredients are mentioned.
-- SIZE MODIFIERS — il campo size indica la dimensione della pizza:
+- SIZE MODIFIERS — il campo size indica la dimensione della pizza (solo per pizze al PEZZO, NON per voci al kg):
   * "normale" → default, nessun modificatore di prezzo.
-  * "mini" → pizza più piccola (-€1.50 sul prezzo base). Parole chiave: "mini", "piccola", "mezza".
+  * "mini" → pizza più piccola (-€1.50 sul prezzo base). Parole chiave: "mini", "piccola".
   * "doppio" → pizza con doppio impasto (+€2.00 extra). Parole chiave: "doppio impasto", "doppia pasta", "doppia", "doppio".
   Se il cliente non specifica, usa size="normale".
   NON mettere "mini" o "doppio" nel pizza_name o in add_ingredients — vanno SOLO nel campo size.
@@ -2150,6 +2156,19 @@ Rules:
   * "una diavola doppia" → pizza_name="Diavola", size="doppio"
   * "una margherita doppia pasta integrale" → pizza_name="Margherita", size="doppio", dough_type="integrale"
   * "una margherita" → pizza_name="Margherita", size="normale"
+
+DIMENSIONE TRANCIO (solo per voci "[al kg]"):
+- Le voci al kg hanno due formati di taglio: "piena" (trancio 15×20 cm) e "mezza" (trancio 7.5×10 cm).
+- Se il cliente dice "piena", "intera", "grande" → size="piena".
+- Se dice "mezza", "mezza porzione", "piccola" → size="mezza".
+- Se NON specificata, usa size="normale" (il backend chiederà piena o mezza).
+- NON confondere "mezza" come dimensione trancio con "mezza" come orario (es. "alle otto e mezza").
+- Esempi:
+  * "300g di porchetta piena" → pizza_name="Porchetta", quantity=0.3, size="piena"
+  * "200g di pizza bianca mezza" → pizza_name="Pizza Bianca", quantity=0.2, size="mezza"
+  * "mezzo chilo di porchetta" → quantity=0.5, size="normale" ("mezzo" qui è il peso, non la dimensione)
+- Se risponde SOLO con "piena" o "mezza" senza pizze nuove → intent="set_kg_size", items=[].
+- NON usare "piena"/"mezza" nel pizza_name o in add_ingredients — va SOLO nel campo size.
 
 Intent rules:
 - Use "add_items" when the user is adding pizzas.
@@ -2161,6 +2180,8 @@ Intent rules:
 - Use "cancel_order" when the user wants to cancel the whole order including name and time (annulla l'ordine, voglio annullare).
 - Use "clear_cart" when the user wants to reset only the pizzas and start over, keeping name and pickup time (cancella tutto e ricominciamo, ricominciamo da capo, azzera le pizze, voglio ricominciare).
 - Use "set_kg_temperature" when the user is answering a temperature question (fredda/calda/da portar via/da mangiare) with NO new pizza items. Return items=[].
+- Use "set_kg_size" when the user is answering a slice-size question (piena/mezza/intera/metà porzione) for a kg item with NO new pizza items. Return items=[].
+- Use "ask_kg_price" when the user is asking about the price of a kg item (quanto costa, quanto viene, che prezzo, il prezzo) with NO new pizza items. Return items=[].
 - Use "unknown" if the message is unclear.
 
 TEMPERATURA PER PIZZE AL KG:
@@ -2337,9 +2358,11 @@ _ALLOWED_INTENTS = {
     "cancel_order",
     "clear_cart",
     "set_kg_temperature",
+    "set_kg_size",
+    "ask_kg_price",
     "unknown",
 }
-_ALLOWED_SIZES = {"normale", "mini", "doppio"}
+_ALLOWED_SIZES = {"normale", "mini", "doppio", "piena", "mezza"}
 
 
 class _ExtractedItem(BaseModel):
@@ -2620,7 +2643,7 @@ def extract_order_from_text(
         rem_ing = item.get("remove_ingredients", [])
         dough_log = item.get("dough_type", "classica")
         size = item.get("size", "normale").lower().strip()
-        if size not in ("normale", "mini", "doppio"):
+        if size not in ("normale", "mini", "doppio", "piena", "mezza"):
             size = "normale"
         item["size"] = size
         add_count = len(add_ing) if isinstance(add_ing, list) else 0

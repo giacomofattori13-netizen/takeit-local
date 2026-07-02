@@ -49,6 +49,8 @@ class OrderItemRead(SQLModel):
     quantity: int
     add_ingredients: list[str] = []
     remove_ingredients: list[str] = []
+    size: str = "normale"
+    temperature: str | None = None
 
 
 class OrderRead(SQLModel):
