@@ -18,6 +18,14 @@ from app.telemetry import record_latency
 
 load_dotenv()
 
+_B44_KEY_RE = re.compile(r"api_key=[^&\s'\"]+")
+
+
+def _mask_b44(s) -> str:
+    """Mask api_key value in log strings to prevent key exposure."""
+    return _B44_KEY_RE.sub("api_key=***", str(s))
+
+
 BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
 BASE44_RESERVATION_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Reservation"
@@ -384,7 +392,7 @@ def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict
         timeout = timeout_seconds or _dough_refresh_timeout_seconds()
         response = httpx.get(
             url,
-            headers={"X-Api-Key": api_key},
+            params={"api_key": api_key},
             timeout=timeout,
         )
         response.raise_for_status()
@@ -392,7 +400,7 @@ def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict
         print(f"[Dough] Body keys: {list(body.keys()) if isinstance(body, dict) else type(body).__name__}")
         return _parse_doughs_from_base44_body(body)
     except Exception as e:
-        print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {e}")
+        print(f"[Dough] Errore fetch Base44: {type(e).__name__}: {_mask_b44(e)}")
         return []
 
 
@@ -488,7 +496,7 @@ def get_next_order_number() -> int:
         try:
             response = httpx.get(
                 BASE44_ORDER_URL,
-                headers={"X-Api-Key": api_key},
+                params={"api_key": api_key},
                 timeout=10,
             )
             response.raise_for_status()
@@ -499,7 +507,7 @@ def get_next_order_number() -> int:
             print(f"[Order] Ordini esistenti: {count} → prossimo numero: {next_num}")
             return next_num
         except Exception as e:
-            print(f"[Order] Errore conteggio ordini: {type(e).__name__}: {e} → uso fallback random")
+            print(f"[Order] Errore conteggio ordini: {type(e).__name__}: {_mask_b44(e)} → uso fallback random")
     fallback = _random.randint(1000, 9999)
     print(f"[Order] Fallback numero ordine random: {fallback}")
     return fallback
@@ -578,8 +586,9 @@ def save_order_to_base44(
     try:
         response = httpx.post(
             BASE44_ORDER_URL,
+            params={"api_key": api_key},
             json=payload,
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+            headers={"Content-Type": "application/json"},
             timeout=10,
         )
         print(f"[Base44] Status code: {response.status_code}")
@@ -590,7 +599,7 @@ def save_order_to_base44(
         print(f"[Base44] HTTP error {e.response.status_code}: body_len={len(e.response.text)}")
         return
     except Exception as e:
-        print(f"[Base44] Errore generico: {type(e).__name__}: {e}")
+        print(f"[Base44] Errore generico: {type(e).__name__}: {_mask_b44(e)}")
         return
 
 
@@ -832,7 +841,7 @@ def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict 
     url = f"{BASE44_APP}/Restaurant"
     try:
         timeout = timeout_seconds or _restaurant_refresh_timeout_seconds()
-        response = httpx.get(url, headers={"X-Api-Key": api_key}, timeout=timeout)
+        response = httpx.get(url, params={"api_key": api_key}, timeout=timeout)
         response.raise_for_status()
         body = response.json()
         entities = body.get("entities", body) if isinstance(body, dict) else body
@@ -842,7 +851,7 @@ def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict 
             return None
         return data
     except Exception as e:
-        print(f"[Restaurant] Errore fetch Base44: {type(e).__name__}: {e}")
+        print(f"[Restaurant] Errore fetch Base44: {type(e).__name__}: {_mask_b44(e)}")
         return None
 
 
@@ -1368,7 +1377,7 @@ def _fetch_customers_by_phone(
         print(f"[Customer] GET {BASE44_CUSTOMER_URL} timeout={timeout_seconds}s")
         response = httpx.get(
             BASE44_CUSTOMER_URL,
-            headers={"X-Api-Key": api_key},
+            params={"api_key": api_key},
             timeout=timeout_seconds,
         )
         print(f"[Customer] HTTP {response.status_code}")
@@ -1390,7 +1399,7 @@ def _fetch_customers_by_phone(
         print(f"[Customer] Match trovati: {len(matches)}")
         return matches
     except Exception as e:
-        print(f"[Customer] Errore lookup: {type(e).__name__}: {e}")
+        print(f"[Customer] Errore lookup: {type(e).__name__}: {_mask_b44(e)}")
         return []
 
 
@@ -1404,7 +1413,7 @@ def _delete_customer(customer_id: str, auth_kwargs: dict) -> None:
         response.raise_for_status()
         print(f"[Customer] Eliminato duplicato id={customer_id}")
     except Exception as e:
-        print(f"[Customer] Errore eliminazione duplicato id={customer_id}: {type(e).__name__}: {e}")
+        print(f"[Customer] Errore eliminazione duplicato id={customer_id}: {type(e).__name__}: {_mask_b44(e)}")
 
 
 def upsert_customer(
@@ -1423,7 +1432,7 @@ def upsert_customer(
         print("[Customer] BASE44_API_KEY non configurato, skip upsert")
         return
 
-    auth_kwargs: dict = {"headers": {"X-Api-Key": api_key}}
+    auth_kwargs: dict = {"params": {"api_key": api_key}}
     today = datetime.date.today().isoformat()
 
     all_matches = _fetch_customers_by_phone(phone) if phone else []
@@ -1478,7 +1487,7 @@ def upsert_customer(
             resp.raise_for_status()
             print(f"[Customer] Primario aggiornato dopo merge: ordini={combined_orders} spend={combined_spend}")
         except Exception as e:
-            print(f"[Customer] Errore merge primario: {type(e).__name__}: {e}")
+            print(f"[Customer] Errore merge primario: {type(e).__name__}: {_mask_b44(e)}")
 
         # Cancella i duplicati
         for dup in duplicates:
@@ -1529,7 +1538,7 @@ def upsert_customer(
                 f"total_spend={new_total_spend} avg={new_average_spend}"
             )
         except Exception as e:
-            print(f"[Customer] Errore update: {type(e).__name__}: {e}")
+            print(f"[Customer] Errore update: {type(e).__name__}: {_mask_b44(e)}")
     else:
         payload = {
             "full_name": full_name,
@@ -1551,7 +1560,7 @@ def upsert_customer(
             response.raise_for_status()
             print(f"[Customer] Creato: {mask_name(full_name)} | total_spend={payload['total_spend']}")
         except Exception as e:
-            print(f"[Customer] Errore create: {type(e).__name__}: {e}")
+            print(f"[Customer] Errore create: {type(e).__name__}: {_mask_b44(e)}")
 
 
 _RESERVATION_INTENT_PATTERNS = re.compile(
@@ -1577,7 +1586,7 @@ def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
     try:
         response = httpx.get(
             BASE44_TABLE_URL,
-            headers={"X-Api-Key": api_key},
+            params={"api_key": api_key},
             timeout=5,
         )
         response.raise_for_status()
@@ -1587,7 +1596,7 @@ def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
         print(f"[Table] Recuperati {len(tables)} tavoli da Base44")
         return tables
     except Exception as e:
-        print(f"[Table] Errore fetch tavoli: {type(e).__name__}: {e}")
+        print(f"[Table] Errore fetch tavoli: {type(e).__name__}: {_mask_b44(e)}")
         if required:
             raise ReservationAvailabilityError(f"fetch tavoli fallito: {type(e).__name__}") from e
         return []
@@ -1603,7 +1612,7 @@ def _fetch_reservations_for_date(date: str, required: bool = False) -> list[dict
     try:
         response = httpx.get(
             BASE44_RESERVATION_URL,
-            headers={"X-Api-Key": api_key},
+            params={"api_key": api_key},
             timeout=5,
         )
         response.raise_for_status()
@@ -1613,7 +1622,7 @@ def _fetch_reservations_for_date(date: str, required: bool = False) -> list[dict
             return []
         return [r for r in entities if r.get("date") == date and r.get("status") == "confermata"]
     except Exception as e:
-        print(f"[Reservation] Errore fetch prenotazioni: {type(e).__name__}: {e}")
+        print(f"[Reservation] Errore fetch prenotazioni: {type(e).__name__}: {_mask_b44(e)}")
         if required:
             raise ReservationAvailabilityError(f"fetch prenotazioni fallito: {type(e).__name__}") from e
         return []
@@ -1938,8 +1947,9 @@ def save_reservation_to_base44(
     try:
         response = httpx.post(
             BASE44_RESERVATION_URL,
+            params={"api_key": api_key},
             json=payload,
-            headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
+            headers={"Content-Type": "application/json"},
             timeout=10,
         )
         response.raise_for_status()
@@ -1947,7 +1957,7 @@ def save_reservation_to_base44(
         print(f"[Reservation] Salvata con id={reservation_id}")
         return reservation_id
     except Exception as e:
-        print(f"[Reservation] Errore salvataggio: {type(e).__name__}: {e}")
+        print(f"[Reservation] Errore salvataggio: {type(e).__name__}: {_mask_b44(e)}")
         return None
 
 

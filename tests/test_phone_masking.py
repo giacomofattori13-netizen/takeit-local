@@ -88,9 +88,10 @@ class PhoneMaskingTests(unittest.TestCase):
             def json(self):
                 return {"id": "order-1"}
 
-        def fake_post(url, json, headers, timeout):
+        def fake_post(url, params, json, headers, timeout):
             calls.append({
                 "url": url,
+                "params": params,
                 "json": json,
                 "headers": headers,
                 "timeout": timeout,

@@ -61,10 +61,10 @@ class CustomerLookupTests(unittest.TestCase):
                     }]
                 }
 
-        def fake_get(url, headers, timeout):
+        def fake_get(url, params, timeout):
             calls.append({
                 "url": url,
-                "headers": headers,
+                "params": params,
                 "timeout": timeout,
             })
             return FakeResponse()
@@ -82,7 +82,7 @@ class CustomerLookupTests(unittest.TestCase):
 
         self.assertEqual(customer["full_name"], "Mario Rossi")
         self.assertEqual(calls[0]["timeout"], 1.25)
-        self.assertEqual(calls[0]["headers"], {"X-Api-Key": "test-key"})
+        self.assertEqual(calls[0]["params"], {"api_key": "test-key"})
         logs = output.getvalue()
         self.assertNotIn("Mario Rossi", logs)
         self.assertNotIn("raw-body-secret", logs)
@@ -106,7 +106,7 @@ class CustomerLookupTests(unittest.TestCase):
                     }]
                 }
 
-        def fake_get(url, headers, timeout):
+        def fake_get(url, params, timeout):
             calls.append(url)
             return FakeResponse()
 
@@ -138,7 +138,7 @@ class CustomerLookupTests(unittest.TestCase):
             def json(self):
                 return {"entities": self._entities}
 
-        def fake_get(url, headers, timeout):
+        def fake_get(url, params, timeout):
             calls.append(url)
             if len(calls) == 1:
                 return FakeResponse([])

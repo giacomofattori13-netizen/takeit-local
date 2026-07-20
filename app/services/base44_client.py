@@ -1,6 +1,7 @@
 """Centralized Base44 REST API client.
 
-All requests use BASE44_API_KEY passed as an X-Api-Key header (not a query param).
+All requests authenticate with BASE44_API_KEY as the ?api_key= query parameter.
+The key is never logged in plain text — error handlers mask it via _mask_key().
 App ID: 69c54bc5c44250d7da397903
 """
 import os
@@ -11,13 +12,16 @@ import httpx
 _APP_ID = "69c54bc5c44250d7da397903"
 _BASE = f"https://app.base44.com/api/apps/{_APP_ID}/entities"
 
+_KEY_RE = re.compile(r"api_key=[^&\s'\"]+")
 
-def _auth_headers() -> dict:
-    api_key = os.getenv("BASE44_API_KEY", "")
-    h: dict = {"Content-Type": "application/json"}
-    if api_key:
-        h["X-Api-Key"] = api_key
-    return h
+
+def _auth_params() -> dict:
+    return {"api_key": os.getenv("BASE44_API_KEY", "")}
+
+
+def _mask_key(s) -> str:
+    """Mask api_key value in any string to prevent key exposure in logs."""
+    return _KEY_RE.sub("api_key=***", str(s))
 
 
 def _parse_entities(data) -> list[dict]:
@@ -31,7 +35,7 @@ def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> l
         print("[Base44] get_menu_items: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/MenuItem", headers=_auth_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/MenuItem", params=_auth_params(), timeout=timeout)
         resp.raise_for_status()
         items = _parse_entities(resp.json())
         if restaurant_id:
@@ -41,7 +45,7 @@ def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> l
             print(f"[Base44] get_menu_items: {len(items)} voci")
         return items
     except Exception as e:
-        print(f"[Base44] get_menu_items error: {type(e).__name__}: {e}")
+        print(f"[Base44] get_menu_items error: {type(e).__name__}: {_mask_key(e)}")
         return []
 
 
@@ -51,13 +55,13 @@ def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
         print("[Base44] get_all_restaurants: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", headers=_auth_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", params=_auth_params(), timeout=timeout)
         resp.raise_for_status()
         restaurants = _parse_entities(resp.json())
         print(f"[Base44] get_all_restaurants: {len(restaurants)} ristoranti")
         return restaurants
     except Exception as e:
-        print(f"[Base44] get_all_restaurants error: {type(e).__name__}: {e}")
+        print(f"[Base44] get_all_restaurants error: {type(e).__name__}: {_mask_key(e)}")
         return []
 
 
@@ -115,7 +119,7 @@ def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
         print(f"[Base44] Nessun match per To={phone!r}")
         return None
     except Exception as e:
-        print(f"[Base44] get_restaurant_by_phone error: {type(e).__name__}: {e}")
+        print(f"[Base44] get_restaurant_by_phone error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -127,7 +131,7 @@ def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | No
     try:
         resp = httpx.get(
             f"{_BASE}/Restaurant/{restaurant_id}",
-            headers=_auth_headers(),
+            params=_auth_params(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -144,7 +148,7 @@ def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | No
             print(f"[Base44] get_restaurant_by_id ok id={restaurant.get('id')!r}")
         return restaurant
     except Exception as e:
-        print(f"[Base44] get_restaurant_by_id id={restaurant_id!r} error: {type(e).__name__}: {e}")
+        print(f"[Base44] get_restaurant_by_id id={restaurant_id!r} error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -154,7 +158,7 @@ def get_restaurant(timeout: float = 10.0) -> dict | None:
         print("[Base44] get_restaurant: BASE44_API_KEY mancante")
         return None
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", headers=_auth_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", params=_auth_params(), timeout=timeout)
         resp.raise_for_status()
         entities = _parse_entities(resp.json())
         restaurant = entities[0] if entities else None
@@ -162,7 +166,7 @@ def get_restaurant(timeout: float = 10.0) -> dict | None:
             print(f"[Base44] get_restaurant ok id={restaurant.get('id')}")
         return restaurant
     except Exception as e:
-        print(f"[Base44] get_restaurant error: {type(e).__name__}: {e}")
+        print(f"[Base44] get_restaurant error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -183,15 +187,16 @@ def update_restaurant(patch: dict, restaurant_id: str | None = None, timeout: fl
     try:
         resp = httpx.put(
             f"{_BASE}/Restaurant/{restaurant_id}",
+            params=_auth_params(),
             json=patch,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
         print(f"[Base44] update_restaurant id={restaurant_id} ok")
         return resp.json()
     except Exception as e:
-        print(f"[Base44] update_restaurant id={restaurant_id} error: {type(e).__name__}: {e}")
+        print(f"[Base44] update_restaurant id={restaurant_id} error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -203,15 +208,16 @@ def update_menu_item(item_id: str, patch: dict, timeout: float = 10.0) -> dict |
     try:
         resp = httpx.put(
             f"{_BASE}/MenuItem/{item_id}",
+            params=_auth_params(),
             json=patch,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
         print(f"[Base44] update_menu_item id={item_id} ok")
         return resp.json()
     except Exception as e:
-        print(f"[Base44] update_menu_item id={item_id} error: {type(e).__name__}: {e}")
+        print(f"[Base44] update_menu_item id={item_id} error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -222,8 +228,9 @@ def create_call_log(data: dict, timeout: float = 8.0) -> dict | None:
     try:
         resp = httpx.post(
             f"{_BASE}/CallLog",
+            params=_auth_params(),
             json=data,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -231,7 +238,7 @@ def create_call_log(data: dict, timeout: float = 8.0) -> dict | None:
         print(f"[Base44] create_call_log ok id={result.get('id')!r}")
         return result
     except Exception as e:
-        print(f"[Base44] create_call_log error: {type(e).__name__}: {e}")
+        print(f"[Base44] create_call_log error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -242,15 +249,16 @@ def update_call_log(log_id: str, patch: dict, timeout: float = 8.0) -> dict | No
     try:
         resp = httpx.put(
             f"{_BASE}/CallLog/{log_id}",
+            params=_auth_params(),
             json=patch,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
         print(f"[Base44] update_call_log id={log_id!r} outcome={patch.get('outcome')!r}")
         return resp.json()
     except Exception as e:
-        print(f"[Base44] update_call_log id={log_id!r} error: {type(e).__name__}: {e}")
+        print(f"[Base44] update_call_log id={log_id!r} error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -262,8 +270,9 @@ def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:
     try:
         resp = httpx.post(
             f"{_BASE}/OwnerCommand",
+            params=_auth_params(),
             json=data,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -271,7 +280,7 @@ def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:
         print(f"[Base44] create_owner_command ok id={result.get('id')}")
         return result
     except Exception as e:
-        print(f"[Base44] create_owner_command error: {type(e).__name__}: {e}")
+        print(f"[Base44] create_owner_command error: {type(e).__name__}: {_mask_key(e)}")
         return None
 
 
@@ -283,13 +292,14 @@ def update_owner_command(command_id: str, patch: dict, timeout: float = 10.0) ->
     try:
         resp = httpx.put(
             f"{_BASE}/OwnerCommand/{command_id}",
+            params=_auth_params(),
             json=patch,
-            headers=_auth_headers(),
+            headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
         resp.raise_for_status()
         print(f"[Base44] update_owner_command id={command_id} ok")
         return resp.json()
     except Exception as e:
-        print(f"[Base44] update_owner_command id={command_id} error: {type(e).__name__}: {e}")
+        print(f"[Base44] update_owner_command id={command_id} error: {type(e).__name__}: {_mask_key(e)}")
         return None
