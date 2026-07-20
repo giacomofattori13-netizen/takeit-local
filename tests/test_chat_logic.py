@@ -410,6 +410,70 @@ class ChatLogicTests(unittest.TestCase):
         self.assertTrue(future.cancelled)
         self.assertEqual(future.timeout_seen, 0.25)
 
+    # ── restaurant_id forwarding to Base44 order ──────────────────────────────
+
+    def _base_order_payload(self, **overrides):
+        payload = {
+            "customer_name": "Mario",
+            "customer_phone": "+393331234567",
+            "pickup_time": "20:00",
+            "order_number": 99,
+            "ai_confidence": 0.95,
+            "items": [{
+                "pizza_name": "Margherita",
+                "pizza_type": "Normale",
+                "quantity": 1,
+                "base_price": 7.5,
+                "extras_price": 0.0,
+                "total_price": 7.5,
+            }],
+            "total_amount": 7.5,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_execute_order_side_effect_forwards_restaurant_id_pizza_a_pezzi(self):
+        """restaurant_id from the payload must reach save_order_to_base44 (Pizza a Pezzi)."""
+        PIZZA_A_PEZZI_ID = "6a22d781b615baedb412be35"
+        captured = {}
+        original = chat_module.save_order_to_base44
+
+        def fake_save(**kwargs):
+            captured.update(kwargs)
+
+        chat_module.save_order_to_base44 = fake_save
+        try:
+            chat_module._execute_order_side_effect(
+                "base44_order",
+                self._base_order_payload(restaurant_id=PIZZA_A_PEZZI_ID),
+            )
+        finally:
+            chat_module.save_order_to_base44 = original
+
+        self.assertEqual(captured.get("restaurant_id"), PIZZA_A_PEZZI_ID)
+
+    def test_execute_order_side_effect_empty_restaurant_id_corte_del_sole(self):
+        """When no restaurant_id in payload and DEFAULT_RESTAURANT_ID unset, passes ''."""
+        captured = {}
+        original = chat_module.save_order_to_base44
+        original_env = os.environ.pop("DEFAULT_RESTAURANT_ID", None)
+
+        def fake_save(**kwargs):
+            captured.update(kwargs)
+
+        chat_module.save_order_to_base44 = fake_save
+        try:
+            chat_module._execute_order_side_effect(
+                "base44_order",
+                self._base_order_payload(),  # no restaurant_id key
+            )
+        finally:
+            chat_module.save_order_to_base44 = original
+            if original_env is not None:
+                os.environ["DEFAULT_RESTAURANT_ID"] = original_env
+
+        self.assertEqual(captured.get("restaurant_id"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -965,6 +965,8 @@ def enrich_items_with_pricing(
 
 def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
     if kind == "base44_order":
+        rid = payload.get("restaurant_id") or os.getenv("DEFAULT_RESTAURANT_ID", "")
+        print(f"[SideEffects] base44_order restaurant_id={rid!r}")
         save_order_to_base44(
             customer_name=payload["customer_name"],
             customer_phone=payload["customer_phone"],
@@ -972,6 +974,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
             order_number=payload["order_number"],
             ai_confidence=payload["ai_confidence"],
             items=payload["items"],
+            restaurant_id=rid,
         )
         return
 
