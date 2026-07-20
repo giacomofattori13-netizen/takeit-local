@@ -52,6 +52,7 @@ from app.services.conversation_service import (
     get_agent_greeting,
     validate_pickup_time,
     resolve_pickup_time,
+    get_next_open_day,
     lookup_customer,
     upsert_customer,
     ReservationAvailabilityError,
@@ -975,6 +976,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
             ai_confidence=payload["ai_confidence"],
             items=payload["items"],
             restaurant_id=rid,
+            pickup_date=payload.get("pickup_date"),
         )
         return
 
@@ -1182,6 +1184,7 @@ def _enqueue_order_side_effects(
     total_amount: float,
     pizza_names: list[str],
     restaurant_id: str = "",
+    pickup_date: str | None = None,
 ) -> None:
     now = time.time()
     item_payload = copy.deepcopy(items)
@@ -1195,6 +1198,8 @@ def _enqueue_order_side_effects(
     }
     if restaurant_id:
         b44_order_payload["restaurant_id"] = restaurant_id
+    if pickup_date:
+        b44_order_payload["pickup_date"] = pickup_date
     job_specs = [
         ("base44_order", b44_order_payload),
         ("whatsapp_confirmation", {
@@ -1621,6 +1626,7 @@ def _persist_order_once(
         conversation_session_id=conversation.session_id,
         customer_name=merged_order["customer_name"],
         pickup_time=merged_order["pickup_time"],
+        pickup_date=merged_order.get("pickup_date"),
         status="new",
     )
     session.add(order)
@@ -1641,6 +1647,8 @@ def _persist_order_once(
         if not _item_sale_unit:
             _mi = session.exec(select(MenuItem).where(MenuItem.name == item["pizza_name"])).first()
             _item_sale_unit = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
+        _kg_size = item.get("size") if _item_sale_unit == "kg" else None
+        _portion = _kg_size if _kg_size in ("piena", "mezza") else None
         session.add(OrderItem(
             order_id=order.id,
             pizza_name=item["pizza_name"],
@@ -1652,6 +1660,7 @@ def _persist_order_once(
             size=item.get("size", "normale"),
             sale_unit=_item_sale_unit,
             temperature=item.get("temperature") or None,
+            portion=_portion,
         ))
     session.commit()
 
@@ -1746,6 +1755,14 @@ def _extract_kg_size(message: str) -> str | None:
     if re.fullmatch(r'\s*mezz[ao]\s*', m):
         return "mezza"
     return None
+
+
+_TODAY_ORDER_RE = re.compile(r'\b(per oggi|in giornata|oggi stesso)\b', re.IGNORECASE)
+
+
+def _is_today_order_request(message: str) -> bool:
+    """Return True if the message explicitly asks for a same-day order."""
+    return bool(_TODAY_ORDER_RE.search(message))
 
 
 @router.post("/", response_model=ChatResponse)
@@ -1899,6 +1916,13 @@ def chat(request: ChatRequest, session: SessionDep):
     # - ignora qualsiasi intent di prenotazione e riporta al flusso ordine
     # - reindirizza eventuali stati di prenotazione rimasti aperti
     _reservations_on = is_reservations_enabled(restaurant_id=restaurant_id)
+    # Pizza al taglio: ogni ordine telefonico è un preordine per il giorno successivo.
+    # Calcola una volta sola il primo giorno aperto a partire da domani.
+    _preorder_date: "datetime.date | None" = None
+    _preorder_day_it: "str | None" = None
+    if not _reservations_on:
+        _preorder_date, _preorder_day_it = get_next_open_day(restaurant_id=restaurant_id)
+        print(f"[Preorder] prossimo giorno aperto: {_preorder_date} ({_preorder_day_it})")
     _reservation_states = {
         "collecting_reservation_date",
         "collecting_reservation_time",
@@ -2236,6 +2260,8 @@ def chat(request: ChatRequest, session: SessionDep):
             "pickup_time":   conversation.pickup_time,
             "items":         existing_items,
         }
+        if _preorder_date:
+            merged_order["pickup_date"] = _preorder_date.isoformat()
 
         order = None
         if _is_confirm and not conversation.completed:
@@ -2256,6 +2282,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     total_amount=order_total,
                     pizza_names=pizza_names,
                     restaurant_id=restaurant_id,
+                    pickup_date=merged_order.get("pickup_date"),
                 )
 
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
@@ -2281,7 +2308,10 @@ def chat(request: ChatRequest, session: SessionDep):
         else:
             # Messaggio ambiguo — richiedi conferma di nuovo
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
-            _resp = f"Perfetto{name_part}, confermo per le {merged_order.get('pickup_time')}?"
+            if _preorder_day_it and merged_order.get("pickup_time"):
+                _resp = f"Perfetto{name_part}, per {_preorder_day_it} alle {merged_order.get('pickup_time')}. Confermo?"
+            else:
+                _resp = f"Perfetto{name_part}, confermo per le {merged_order.get('pickup_time')}?"
             _extracted_stub = {"intent": "unknown", "items": [], "customer_name": None, "pickup_time": None}
 
         session.add(ConversationLog(
@@ -2674,6 +2704,44 @@ def chat(request: ChatRequest, session: SessionDep):
             state="confirming_usual",
         )
 
+    # Guard pizza al taglio: ordini telefonici sono sempre per il giorno successivo.
+    # Se il cliente chiede esplicitamente "per oggi", spiega la regola senza LLM.
+    if not _reservations_on and _is_today_order_request(request.message):
+        _next_day = _preorder_day_it or "domani"
+        _today_guard_msg = (
+            "Gli ordini telefonici sono preordini per il giorno successivo. "
+            f"Per oggi può passare direttamente in negozio! "
+            f"Per {_next_day} vuole ordinare?"
+        )
+        _cur_merged = {
+            "customer_name": conversation.customer_name,
+            "pickup_time": conversation.pickup_time,
+            "items": json.loads(conversation.items_json),
+        }
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps({"intent": "today_order_rejected", "items": []}, ensure_ascii=False),
+            merged_order_json=json.dumps(_cur_merged, ensure_ascii=False),
+            response_message=_today_guard_msg,
+            valid=False,
+            missing_items_json="[]",
+            state=conversation.state,
+        ))
+        session.commit()
+        _log_chat_timing(request.session_id, "today_order_rejected", request_started_at)
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={"intent": "today_order_rejected", "items": []},
+            merged_order=_cur_merged,
+            valid=False,
+            missing_items=[],
+            response_message=_today_guard_msg,
+            order_id=None,
+            state=conversation.state,
+        )
+
     # Da qui in poi serve davvero l'LLM: carichiamo menu/dough solo dopo tutti
     # i fast path locali, così i turni semplici non pagano latenza di rete/cache.
     # get_proposable_menu() filtra available=True + no ingredienti finiti.
@@ -2870,6 +2938,8 @@ def chat(request: ChatRequest, session: SessionDep):
         "pickup_time": conversation.pickup_time,
         "items": merged_items,
     }
+    if _preorder_date:
+        merged_order["pickup_date"] = _preorder_date.isoformat()
     conversation.items_json = json.dumps(merged_items, ensure_ascii=False)
 
     # 5. Validazione item contro DB (nessun fuzzy matching)
@@ -3001,6 +3071,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 total_amount=order_total,
                 pizza_names=pizza_names,
                 restaurant_id=restaurant_id,
+                pickup_date=merged_order.get("pickup_date"),
             )
 
     response_message = build_assistant_response(
@@ -3016,6 +3087,27 @@ def chat(request: ChatRequest, session: SessionDep):
         not_found_names=not_found_names,
         intended_quantity=conversation.intended_quantity,
     )
+
+    # Per pizza al taglio: la conferma include il giorno del preordine.
+    # Sovrascrive il messaggio generico di awaiting_confirmation.
+    if (
+        conversation.state == "awaiting_confirmation"
+        and _preorder_day_it
+        and merged_order.get("pickup_time")
+        and not pickup_time_error
+        and not missing_messages
+    ):
+        _name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
+        _rome_now = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+        _is_tomorrow = _preorder_date == _rome_now + datetime.timedelta(days=1)
+        _day_prefix = f"domani {_preorder_day_it}" if _is_tomorrow else _preorder_day_it
+        _closed_note = "" if _is_tomorrow else f"Domani siamo chiusi. "
+        _has_kg = any(i.get("sale_unit") == "kg" for i in merged_order.get("items", []))
+        _price_note = " Il prezzo esatto dipende dal peso." if _has_kg else ""
+        response_message = (
+            f"{_closed_note}Perfetto{_name_part}, per {_day_prefix} alle "
+            f"{merged_order['pickup_time']}.{_price_note} Confermo?"
+        )
 
     # Chiedi temperatura UNA volta quando compare il primo item al kg nell'ordine
     has_kg_items = any(i.get("sale_unit") == "kg" for i in merged_order.get("items", []))

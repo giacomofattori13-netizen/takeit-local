@@ -18,6 +18,7 @@ class Order(SQLModel, table=True):
     conversation_session_id: Optional[str] = Field(default=None, index=True)
     customer_name: str
     pickup_time: str
+    pickup_date: Optional[str] = None  # "YYYY-MM-DD" — preorder date (pizza al taglio)
     status: str = "new"
 
 
@@ -33,6 +34,7 @@ class OrderItem(SQLModel, table=True):
     size: str = "normale"
     sale_unit: str = Field(default="piece")
     temperature: Optional[str] = None
+    portion: Optional[str] = None  # "piena" | "mezza" — slice size label (kg items only)
 
 
 class OrderSideEffect(SQLModel, table=True):

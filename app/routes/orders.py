@@ -37,6 +37,7 @@ def list_orders(session: SessionDep):
             id=order.id,
             customer_name=order.customer_name,
             pickup_time=order.pickup_time,
+            pickup_date=order.pickup_date,
             status=order.status,
             items=[
                 OrderItemRead(
@@ -49,6 +50,7 @@ def list_orders(session: SessionDep):
                     remove_ingredients=json.loads(item.remove_ingredients_json),
                     size=item.size,
                     temperature=item.temperature,
+                    portion=item.portion,
                 )
                 for item in items_by_order.get(order.id, [])
             ],
@@ -80,6 +82,7 @@ def update_order_status(order_id: int, payload: OrderStatusUpdate, session: Sess
         id=order.id,
         customer_name=order.customer_name,
         pickup_time=order.pickup_time,
+        pickup_date=order.pickup_date,
         status=order.status,
         items=[
             OrderItemRead(
@@ -90,6 +93,9 @@ def update_order_status(order_id: int, payload: OrderStatusUpdate, session: Sess
                 quantity=item.quantity,
                 add_ingredients=json.loads(item.add_ingredients_json),
                 remove_ingredients=json.loads(item.remove_ingredients_json),
+                size=item.size,
+                temperature=item.temperature,
+                portion=item.portion,
             )
             for item in order_items
         ],

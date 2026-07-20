@@ -513,6 +513,7 @@ def save_order_to_base44(
     ai_confidence: float,
     items: list[dict],
     restaurant_id: str = "",
+    pickup_date: str | None = None,
 ) -> None:
     """
     Invia l'ordine a Base44.
@@ -565,10 +566,13 @@ def save_order_to_base44(
     }
     if restaurant_id:
         payload["restaurant_id"] = restaurant_id
+    if pickup_date:
+        payload["pickup_date"] = pickup_date
 
     print(
         f"[Base44] Payload ordine=#{order_number} customer={mask_name(customer_name)} "
         f"phone={mask_phone(customer_phone)} items={len(base44_items)} total={total_amount}"
+        f" pickup_date={pickup_date!r}"
     )
 
     try:
@@ -1296,6 +1300,27 @@ def validate_pickup_time(pickup_time: str, restaurant_id: str = "") -> tuple[boo
         return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
 
     return True, None, None
+
+
+def get_next_open_day(restaurant_id: str = "") -> tuple[datetime.date, str]:
+    """Return (date, weekday_it_name) of the first open business day starting from tomorrow.
+
+    Checks opening_hours from Base44; if unavailable or no slot is closed,
+    returns tomorrow unconditionally.
+    """
+    rome = ZoneInfo("Europe/Rome")
+    today = datetime.datetime.now(tz=rome).date()
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+    for i in range(1, 8):
+        candidate = today + datetime.timedelta(days=i)
+        if opening_hours and isinstance(opening_hours, dict):
+            slot = opening_hours.get(_WEEKDAY_NAMES[candidate.weekday()], "")
+            if _parse_opening_range(slot) is None:
+                continue  # this day is closed
+        return candidate, _WEEKDAY_IT[candidate.weekday()]
+    # Fallback: tomorrow regardless
+    tomorrow = today + datetime.timedelta(days=1)
+    return tomorrow, _WEEKDAY_IT[tomorrow.weekday()]
 
 
 def lookup_customer(phone: str) -> dict | None:

@@ -474,6 +474,190 @@ class ChatLogicTests(unittest.TestCase):
 
         self.assertEqual(captured.get("restaurant_id"), "")
 
+    # ── preorder / pickup_date / portion / today-guard ────────────────────────
+
+    def test_persist_order_sets_pickup_date_tomorrow(self):
+        """A phone order for pizza al taglio gets pickup_date = tomorrow."""
+        import datetime
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            conv = ConversationSession(
+                session_id="pd-test",
+                customer_name="Mario",
+                pickup_time="20:00",
+                items_json="[]",
+                state="awaiting_confirmation",
+                completed=False,
+            )
+            session.add(conv)
+            session.commit()
+            session.refresh(conv)
+
+            tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+            merged = {
+                "customer_name": "Mario",
+                "pickup_time": "20:00",
+                "pickup_date": tomorrow,
+                "items": [],
+            }
+            order, created = chat_module._persist_order_once(session, conv, merged)
+            saved_pickup_date = order.pickup_date
+            saved_created = created
+
+        self.assertTrue(saved_created)
+        self.assertEqual(saved_pickup_date, tomorrow)
+
+    def test_persist_order_item_portion_and_temperature(self):
+        """kg items get portion ('piena'/'mezza') and temperature saved on OrderItem."""
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            session.add(MenuItem(
+                name="Margherita al taglio",
+                category="rosse",
+                pizza_type="Normale",
+                price=0.0,
+                sale_unit="kg",
+            ))
+            session.commit()
+            conv = ConversationSession(
+                session_id="pt-test",
+                customer_name="Luigi",
+                pickup_time="19:00",
+                items_json="[]",
+                state="awaiting_confirmation",
+                completed=False,
+            )
+            session.add(conv)
+            session.commit()
+            session.refresh(conv)
+
+            merged = {
+                "customer_name": "Luigi",
+                "pickup_time": "19:00",
+                "items": [{
+                    "pizza_name": "Margherita al taglio",
+                    "pizza_type": "Normale",
+                    "quantity": 0.5,
+                    "sale_unit": "kg",
+                    "size": "piena",
+                    "temperature": "calda",
+                    "add_ingredients": [],
+                    "remove_ingredients": [],
+                    "dough_type": "classica",
+                }],
+            }
+            order, _ = chat_module._persist_order_once(session, conv, merged)
+            items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].portion, "piena")
+        self.assertEqual(items[0].temperature, "calda")
+
+    def test_is_today_order_request_detects_keywords(self):
+        """_is_today_order_request fires on 'per oggi', 'in giornata', 'oggi stesso'."""
+        self.assertTrue(chat_module._is_today_order_request("vorrei ordinare per oggi"))
+        self.assertTrue(chat_module._is_today_order_request("posso avere qualcosa in giornata?"))
+        self.assertTrue(chat_module._is_today_order_request("mi serve oggi stesso"))
+        self.assertFalse(chat_module._is_today_order_request("vorrei ordinare per domani"))
+        self.assertFalse(chat_module._is_today_order_request("prima possibile domani sera"))
+
+    def test_get_next_open_day_skips_closed_days(self):
+        """get_next_open_day returns the first open day when tomorrow is closed."""
+        import datetime
+        from unittest.mock import patch
+        from app.services import conversation_service as svc
+
+        rome_today = datetime.date(2026, 7, 20)  # lunedì
+        # opening_hours: lunedì chiuso, martedì aperto
+        fake_hours = {
+            "monday": "closed",
+            "tuesday": "18:00-22:00",
+            "wednesday": "18:00-22:00",
+            "thursday": "18:00-22:00",
+            "friday": "18:00-22:00",
+            "saturday": "18:00-22:00",
+            "sunday": "closed",
+        }
+        fake_restaurant = {"opening_hours": fake_hours}
+
+        with (
+            patch.object(svc, "load_restaurant", return_value=fake_restaurant),
+            patch("app.services.conversation_service.datetime") as mock_dt,
+        ):
+            mock_dt.datetime.now.return_value.date.return_value = rome_today
+            mock_dt.timedelta = datetime.timedelta
+            mock_dt.date = datetime.date
+            result_date, result_day = svc.get_next_open_day()
+
+        # Domani è martedì 21/7 → aperto → deve restituire martedì
+        self.assertEqual(result_date, datetime.date(2026, 7, 21))
+        self.assertEqual(result_day, "martedì")
+
+    def test_get_next_open_day_skips_to_wednesday_when_tuesday_closed(self):
+        """get_next_open_day skips Tuesday (closed) and lands on Wednesday."""
+        import datetime
+        from unittest.mock import patch
+        from app.services import conversation_service as svc
+
+        rome_today = datetime.date(2026, 7, 20)  # lunedì
+        fake_hours = {
+            "monday": "closed",
+            "tuesday": "closed",
+            "wednesday": "18:00-22:00",
+            "thursday": "18:00-22:00",
+            "friday": "18:00-22:00",
+            "saturday": "18:00-22:00",
+            "sunday": "closed",
+        }
+        fake_restaurant = {"opening_hours": fake_hours}
+
+        with (
+            patch.object(svc, "load_restaurant", return_value=fake_restaurant),
+            patch("app.services.conversation_service.datetime") as mock_dt,
+        ):
+            mock_dt.datetime.now.return_value.date.return_value = rome_today
+            mock_dt.timedelta = datetime.timedelta
+            mock_dt.date = datetime.date
+            result_date, result_day = svc.get_next_open_day()
+
+        self.assertEqual(result_date, datetime.date(2026, 7, 22))
+        self.assertEqual(result_day, "mercoledì")
+
+    def test_corte_del_sole_order_has_no_pickup_date(self):
+        """Corte del Sole orders (reservations_enabled) don't set pickup_date."""
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            conv = ConversationSession(
+                session_id="cds-no-pd",
+                customer_name="Giulia",
+                pickup_time="20:00",
+                items_json="[]",
+                state="awaiting_confirmation",
+                completed=False,
+            )
+            session.add(conv)
+            session.commit()
+            session.refresh(conv)
+
+            # No pickup_date in merged_order → simulates reservations_enabled path
+            merged = {
+                "customer_name": "Giulia",
+                "pickup_time": "20:00",
+                "items": [],
+            }
+            order, created = chat_module._persist_order_once(session, conv, merged)
+            saved_pickup_date = order.pickup_date
+            saved_created = created
+
+        self.assertTrue(saved_created)
+        self.assertIsNone(saved_pickup_date)
+
 
 if __name__ == "__main__":
     unittest.main()
