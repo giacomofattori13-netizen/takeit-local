@@ -1030,8 +1030,8 @@ async def voice_incoming(
     print(f"[Voice] Chiamata in arrivo da: {mask_phone(caller_phone)}")
 
     # Risolvi il ristorante dal numero chiamato (To)
-    _restaurant, restaurant_id = await asyncio.to_thread(resolve_restaurant_from_phone, To)
-    print(f"[Voice] To={To!r} → restaurant_id={restaurant_id!r}")
+    _restaurant, restaurant_id, _match_method = await asyncio.to_thread(resolve_restaurant_from_phone, To)
+    print(f"[Voice] Chiamata: To={To!r} → restaurant_id={restaurant_id!r} match={_match_method!r}")
 
     # Controlla agent_active prima di qualsiasi altra operazione
     if not is_agent_active(restaurant_id=restaurant_id):

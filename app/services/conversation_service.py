@@ -982,12 +982,13 @@ def fetch_and_save_restaurant(restaurant_id: str = "") -> dict:
     return load_restaurant(restaurant_id=restaurant_id)
 
 
-def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str]:
+def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str, str]:
     """Find the Restaurant whose agent_phone matches to_number (the Twilio To field).
 
-    Returns (restaurant_dict, restaurant_id_str).
+    Returns (restaurant_dict, restaurant_id_str, match_method) where match_method is
+    one of: "agent_phone" | "default_restaurant_id" | "global_fallback".
     Falls back to DEFAULT_RESTAURANT_ID env, then empty-string default.
-    Never raises — always returns a usable pair.
+    Never raises — always returns a usable triple.
     """
     from app.services.base44_client import get_restaurant_by_phone as _b44_by_phone
 
@@ -1003,24 +1004,24 @@ def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str]:
 
         if matched:
             rid = matched.get("id", "")
-            print(f"[Restaurant] Risolto restaurant_id={rid!r} da numero To={to_clean!r}")
+            print(f"[Restaurant] To={to_clean!r} → restaurant_id={rid!r} (match=agent_phone)")
             _cache_restaurant_data(matched, "phone_lookup", rid)
-            return matched, rid
+            return matched, rid, "agent_phone"
 
-    print(f"[Restaurant] Nessun match per To={to_clean!r}")
+    print(f"[Restaurant] To={to_clean!r} → nessun match agent_phone")
 
     # 2. Fallback: DEFAULT_RESTAURANT_ID env
     default_id = os.getenv("DEFAULT_RESTAURANT_ID", "").strip()
     if default_id:
         restaurant = load_restaurant(restaurant_id=default_id)
         if restaurant:
-            print(f"[Restaurant] Fallback a DEFAULT_RESTAURANT_ID={default_id!r}")
-            return restaurant, default_id
+            print(f"[Restaurant] To={to_clean!r} → restaurant_id={default_id!r} (match=default_restaurant_id)")
+            return restaurant, default_id, "default_restaurant_id"
         print(f"[Restaurant] DEFAULT_RESTAURANT_ID={default_id!r} non trovato in cache/Base44")
 
     # 3. Last resort: empty-string default (existing global behaviour)
-    print("[Restaurant] Warning: nessun ristorante risolto, uso comportamento globale")
-    return load_restaurant(""), ""
+    print(f"[Restaurant] To={to_clean!r} → nessun ristorante risolto (match=global_fallback)")
+    return load_restaurant(""), "", "global_fallback"
 
 
 _GREETING_PATTERN = re.compile(r"buon pomeriggio|buonasera|buongiorno", re.IGNORECASE)

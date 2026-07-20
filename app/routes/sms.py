@@ -246,8 +246,8 @@ async def sms_incoming(
 
     # Risolvi il ristorante dal numero chiamato (To)
     from app.services.conversation_service import resolve_restaurant_from_phone as _resolve
-    _restaurant, restaurant_id = await asyncio.to_thread(_resolve, To)
-    print(f"[SMS] To={To!r} → restaurant_id={restaurant_id!r}")
+    _restaurant, restaurant_id, _match_method = await asyncio.to_thread(_resolve, To)
+    print(f"[SMS] To={To!r} → restaurant_id={restaurant_id!r} match={_match_method!r}")
 
     print(f"[SMS] Comando titolare: {command_text!r}")
 
