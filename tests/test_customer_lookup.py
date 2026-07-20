@@ -9,7 +9,7 @@ from app.services.conversation_service import lookup_customer, reset_customer_lo
 
 class CustomerLookupTests(unittest.TestCase):
     def setUp(self):
-        self.previous_token = os.environ.get("BASE44_TOKEN")
+        self.previous_api_key = os.environ.get("BASE44_API_KEY")
         self.previous_timeout = os.environ.get("CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS")
         self.previous_cache_ttl = os.environ.get("CUSTOMER_LOOKUP_CACHE_TTL_SECONDS")
         self.previous_miss_cache_ttl = os.environ.get("CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS")
@@ -18,10 +18,10 @@ class CustomerLookupTests(unittest.TestCase):
 
     def tearDown(self):
         reset_customer_lookup_cache()
-        if self.previous_token is None:
-            os.environ.pop("BASE44_TOKEN", None)
+        if self.previous_api_key is None:
+            os.environ.pop("BASE44_API_KEY", None)
         else:
-            os.environ["BASE44_TOKEN"] = self.previous_token
+            os.environ["BASE44_API_KEY"] = self.previous_api_key
         if self.previous_timeout is None:
             os.environ.pop("CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS", None)
         else:
@@ -70,7 +70,7 @@ class CustomerLookupTests(unittest.TestCase):
             return FakeResponse()
 
         original_get = conversation_service.httpx.get
-        os.environ["BASE44_TOKEN"] = "test-token"
+        os.environ["BASE44_API_KEY"] = "test-key"
         os.environ["CUSTOMER_LOOKUP_HTTP_TIMEOUT_SECONDS"] = "1.25"
         conversation_service.httpx.get = fake_get
         output = io.StringIO()
@@ -82,7 +82,7 @@ class CustomerLookupTests(unittest.TestCase):
 
         self.assertEqual(customer["full_name"], "Mario Rossi")
         self.assertEqual(calls[0]["timeout"], 1.25)
-        self.assertEqual(calls[0]["headers"], {"Authorization": "Bearer test-token"})
+        self.assertEqual(calls[0]["headers"], {"X-Api-Key": "test-key"})
         logs = output.getvalue()
         self.assertNotIn("Mario Rossi", logs)
         self.assertNotIn("raw-body-secret", logs)
@@ -111,7 +111,7 @@ class CustomerLookupTests(unittest.TestCase):
             return FakeResponse()
 
         original_get = conversation_service.httpx.get
-        os.environ["BASE44_TOKEN"] = "test-token"
+        os.environ["BASE44_API_KEY"] = "test-key"
         conversation_service.httpx.get = fake_get
         try:
             first = lookup_customer("+39 333 123 4567")
@@ -148,7 +148,7 @@ class CustomerLookupTests(unittest.TestCase):
             }])
 
         original_get = conversation_service.httpx.get
-        os.environ["BASE44_TOKEN"] = "test-token"
+        os.environ["BASE44_API_KEY"] = "test-key"
         os.environ["CUSTOMER_LOOKUP_MISS_CACHE_TTL_SECONDS"] = "1"
         conversation_service.httpx.get = fake_get
         try:

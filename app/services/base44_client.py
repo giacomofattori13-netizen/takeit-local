@@ -1,6 +1,6 @@
 """Centralized Base44 REST API client.
 
-Uses BASE44_API_KEY (env) for write operations and BASE44_TOKEN for reads.
+All requests use BASE44_API_KEY passed as an X-Api-Key header (not a query param).
 App ID: 69c54bc5c44250d7da397903
 """
 import os
@@ -12,13 +12,12 @@ _APP_ID = "69c54bc5c44250d7da397903"
 _BASE = f"https://app.base44.com/api/apps/{_APP_ID}/entities"
 
 
-def _rw_params() -> dict:
-    return {"api_key": os.getenv("BASE44_API_KEY", "")}
-
-
-def _ro_headers() -> dict:
-    token = os.getenv("BASE44_TOKEN", "")
-    return {"Authorization": f"Bearer {token}"} if token else {}
+def _auth_headers() -> dict:
+    api_key = os.getenv("BASE44_API_KEY", "")
+    h: dict = {"Content-Type": "application/json"}
+    if api_key:
+        h["X-Api-Key"] = api_key
+    return h
 
 
 def _parse_entities(data) -> list[dict]:
@@ -28,11 +27,11 @@ def _parse_entities(data) -> list[dict]:
 
 def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> list[dict]:
     """Fetch MenuItem entities from Base44, optionally filtered by restaurant_id."""
-    if not os.getenv("BASE44_TOKEN"):
-        print("[Base44] get_menu_items: BASE44_TOKEN mancante")
+    if not os.getenv("BASE44_API_KEY"):
+        print("[Base44] get_menu_items: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/MenuItem", headers=_ro_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/MenuItem", headers=_auth_headers(), timeout=timeout)
         resp.raise_for_status()
         items = _parse_entities(resp.json())
         if restaurant_id:
@@ -48,11 +47,11 @@ def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> l
 
 def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
     """Fetch all Restaurant entities from Base44."""
-    if not os.getenv("BASE44_TOKEN"):
-        print("[Base44] get_all_restaurants: BASE44_TOKEN mancante")
+    if not os.getenv("BASE44_API_KEY"):
+        print("[Base44] get_all_restaurants: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", headers=_ro_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", headers=_auth_headers(), timeout=timeout)
         resp.raise_for_status()
         restaurants = _parse_entities(resp.json())
         print(f"[Base44] get_all_restaurants: {len(restaurants)} ristoranti")
@@ -87,8 +86,8 @@ def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
     2. 10-digit suffix match to handle country-code prefix differences.
     Logs every candidate so mismatches are visible in Railway logs.
     """
-    if not os.getenv("BASE44_TOKEN"):
-        print("[Base44] get_restaurant_by_phone: BASE44_TOKEN mancante")
+    if not os.getenv("BASE44_API_KEY"):
+        print("[Base44] get_restaurant_by_phone: BASE44_API_KEY mancante")
         return None
     try:
         restaurants = get_all_restaurants(timeout=timeout)
@@ -122,13 +121,13 @@ def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
 
 def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | None:
     """Fetch a specific Restaurant entity by ID from Base44."""
-    if not os.getenv("BASE44_TOKEN"):
-        print("[Base44] get_restaurant_by_id: BASE44_TOKEN mancante")
+    if not os.getenv("BASE44_API_KEY"):
+        print("[Base44] get_restaurant_by_id: BASE44_API_KEY mancante")
         return None
     try:
         resp = httpx.get(
             f"{_BASE}/Restaurant/{restaurant_id}",
-            headers=_ro_headers(),
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -151,11 +150,11 @@ def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | No
 
 def get_restaurant(timeout: float = 10.0) -> dict | None:
     """Fetch the first Restaurant entity from Base44."""
-    if not os.getenv("BASE44_TOKEN"):
-        print("[Base44] get_restaurant: BASE44_TOKEN mancante")
+    if not os.getenv("BASE44_API_KEY"):
+        print("[Base44] get_restaurant: BASE44_API_KEY mancante")
         return None
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", headers=_ro_headers(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", headers=_auth_headers(), timeout=timeout)
         resp.raise_for_status()
         entities = _parse_entities(resp.json())
         restaurant = entities[0] if entities else None
@@ -169,8 +168,7 @@ def get_restaurant(timeout: float = 10.0) -> dict | None:
 
 def update_restaurant(patch: dict, restaurant_id: str | None = None, timeout: float = 10.0) -> dict | None:
     """PUT (full update) the Restaurant entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         print("[Base44] update_restaurant: BASE44_API_KEY mancante")
         return None
     if not restaurant_id:
@@ -185,9 +183,8 @@ def update_restaurant(patch: dict, restaurant_id: str | None = None, timeout: fl
     try:
         resp = httpx.put(
             f"{_BASE}/Restaurant/{restaurant_id}",
-            params=_rw_params(),
             json=patch,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -200,16 +197,14 @@ def update_restaurant(patch: dict, restaurant_id: str | None = None, timeout: fl
 
 def update_menu_item(item_id: str, patch: dict, timeout: float = 10.0) -> dict | None:
     """PUT a MenuItem entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         print("[Base44] update_menu_item: BASE44_API_KEY mancante")
         return None
     try:
         resp = httpx.put(
             f"{_BASE}/MenuItem/{item_id}",
-            params=_rw_params(),
             json=patch,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -222,15 +217,13 @@ def update_menu_item(item_id: str, patch: dict, timeout: float = 10.0) -> dict |
 
 def create_call_log(data: dict, timeout: float = 8.0) -> dict | None:
     """Create a CallLog entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         return None
     try:
         resp = httpx.post(
             f"{_BASE}/CallLog",
-            params=_rw_params(),
             json=data,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -244,15 +237,13 @@ def create_call_log(data: dict, timeout: float = 8.0) -> dict | None:
 
 def update_call_log(log_id: str, patch: dict, timeout: float = 8.0) -> dict | None:
     """Update a CallLog entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         return None
     try:
         resp = httpx.put(
             f"{_BASE}/CallLog/{log_id}",
-            params=_rw_params(),
             json=patch,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -265,16 +256,14 @@ def update_call_log(log_id: str, patch: dict, timeout: float = 8.0) -> dict | No
 
 def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:
     """Create an OwnerCommand entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         print("[Base44] create_owner_command: BASE44_API_KEY mancante")
         return None
     try:
         resp = httpx.post(
             f"{_BASE}/OwnerCommand",
-            params=_rw_params(),
             json=data,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()
@@ -288,16 +277,14 @@ def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:
 
 def update_owner_command(command_id: str, patch: dict, timeout: float = 10.0) -> dict | None:
     """Update an OwnerCommand entity on Base44."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    if not os.getenv("BASE44_API_KEY"):
         print("[Base44] update_owner_command: BASE44_API_KEY mancante")
         return None
     try:
         resp = httpx.put(
             f"{_BASE}/OwnerCommand/{command_id}",
-            params=_rw_params(),
             json=patch,
-            headers={"Content-Type": "application/json"},
+            headers=_auth_headers(),
             timeout=timeout,
         )
         resp.raise_for_status()

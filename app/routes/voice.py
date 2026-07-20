@@ -55,9 +55,13 @@ async def _call_log_create_instant(
     summary: str = "",
 ) -> None:
     """Fire-and-forget: create a completed CallLog in a single step (no update needed)."""
+    _rid = restaurant_id or os.getenv("DEFAULT_RESTAURANT_ID", "")
+    if not _rid:
+        print(f"[CallLog] Skip create_instant outcome={outcome!r}: restaurant_id mancante")
+        return
     now = _now_iso()
     data: dict = {
-        "restaurant_id": restaurant_id or None,
+        "restaurant_id": _rid,
         "started_at": now,
         "ended_at": now,
         "duration_seconds": 0,
@@ -79,9 +83,13 @@ async def _call_log_create(
     caller_phone: str | None,
 ) -> None:
     """Fire-and-forget: create a CallLog with outcome=abbandonata as safety default."""
+    _rid = restaurant_id or os.getenv("DEFAULT_RESTAURANT_ID", "")
+    if not _rid:
+        print(f"[CallLog] Skip create session={session_id!r}: restaurant_id mancante")
+        return
     started_epoch = time.time()
     data = {
-        "restaurant_id": restaurant_id or None,
+        "restaurant_id": _rid,
         "started_at": _now_iso(),
         "caller_phone": caller_phone,
         "outcome": "abbandonata",
