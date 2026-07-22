@@ -31,13 +31,16 @@ def _parse_entities(data) -> list[dict]:
 
 def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> list[dict]:
     """Fetch MenuItem entities from Base44, optionally filtered by restaurant_id."""
-    if not os.getenv("BASE44_API_KEY"):
+    api_key = os.getenv("BASE44_API_KEY", "")
+    if not api_key:
         print("[Base44] get_menu_items: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/MenuItem", params=_auth_params(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/MenuItem", params={"api_key": api_key}, timeout=timeout)
         resp.raise_for_status()
-        items = _parse_entities(resp.json())
+        body = resp.json()
+        print(f"[Base44] get_menu_items Body type={type(body).__name__} preview={str(body)[:200]!r}")
+        items = _parse_entities(body)
         if restaurant_id:
             items = [item for item in items if item.get("restaurant_id") == restaurant_id]
             print(f"[Base44] get_menu_items: {len(items)} voci (restaurant_id={restaurant_id!r})")
@@ -51,11 +54,12 @@ def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> l
 
 def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
     """Fetch all Restaurant entities from Base44."""
-    if not os.getenv("BASE44_API_KEY"):
+    api_key = os.getenv("BASE44_API_KEY", "")
+    if not api_key:
         print("[Base44] get_all_restaurants: BASE44_API_KEY mancante")
         return []
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", params=_auth_params(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", params={"api_key": api_key}, timeout=timeout)
         resp.raise_for_status()
         body = resp.json()
         print(f"[Base44] get_all_restaurants Body type={type(body).__name__} preview={str(body)[:300]!r}")
@@ -163,16 +167,21 @@ def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | No
 
 def get_restaurant(timeout: float = 10.0) -> dict | None:
     """Fetch the first Restaurant entity from Base44."""
-    if not os.getenv("BASE44_API_KEY"):
+    api_key = os.getenv("BASE44_API_KEY", "")
+    if not api_key:
         print("[Base44] get_restaurant: BASE44_API_KEY mancante")
         return None
     try:
-        resp = httpx.get(f"{_BASE}/Restaurant", params=_auth_params(), timeout=timeout)
+        resp = httpx.get(f"{_BASE}/Restaurant", params={"api_key": api_key}, timeout=timeout)
         resp.raise_for_status()
-        entities = _parse_entities(resp.json())
-        restaurant = entities[0] if entities else None
-        if restaurant:
-            print(f"[Base44] get_restaurant ok id={restaurant.get('id')}")
+        body = resp.json()
+        print(f"[Base44] get_restaurant Body type={type(body).__name__} preview={str(body)[:200]!r}")
+        entities = _parse_entities(body)
+        if len(entities) == 0:
+            print("[Base44] 0 ristoranti da Base44 (get_restaurant)")
+            return None
+        restaurant = entities[0]
+        print(f"[Base44] get_restaurant ok id={restaurant.get('id')}")
         return restaurant
     except Exception as e:
         print(f"[Base44] get_restaurant error: {type(e).__name__}: {_mask_key(e)}")

@@ -1033,6 +1033,9 @@ def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str, str]:
     default_id = os.getenv("DEFAULT_RESTAURANT_ID", "").strip()
     if default_id:
         restaurant = load_restaurant(restaurant_id=default_id)
+        if not restaurant:
+            print(f"[Restaurant] Cache vuota per default_id={default_id!r}, fetch sincrono via get_restaurant_by_id")
+            restaurant = _refresh_restaurant_cache_blocking(default_id) or {}
         if restaurant:
             print(f"[Restaurant] To={to_clean!r} → restaurant_id={default_id!r} (match=default_restaurant_id)")
             return restaurant, default_id, "default_restaurant_id"
