@@ -844,10 +844,17 @@ def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict 
         response = httpx.get(url, params={"api_key": api_key}, timeout=timeout)
         response.raise_for_status()
         body = response.json()
+        print(f"[Restaurant] Body type={type(body).__name__} preview={str(body)[:300]!r}")
         entities = body.get("entities", body) if isinstance(body, dict) else body
-        data = entities[0] if isinstance(entities, list) and entities else (body if isinstance(body, dict) else None)
+        if not isinstance(entities, list):
+            print(f"[Restaurant] Risposta Base44 non valida: tipo inatteso {type(entities).__name__}")
+            return None
+        if len(entities) == 0:
+            print("[Restaurant] 0 ristoranti da Base44")
+            return None
+        data = entities[0]
         if not isinstance(data, dict):
-            print("[Restaurant] Risposta Base44 non valida")
+            print(f"[Restaurant] Risposta Base44 non valida: primo elemento di tipo {type(data).__name__}")
             return None
         return data
     except Exception as e:

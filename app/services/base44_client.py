@@ -57,8 +57,13 @@ def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
     try:
         resp = httpx.get(f"{_BASE}/Restaurant", params=_auth_params(), timeout=timeout)
         resp.raise_for_status()
-        restaurants = _parse_entities(resp.json())
-        print(f"[Base44] get_all_restaurants: {len(restaurants)} ristoranti")
+        body = resp.json()
+        print(f"[Base44] get_all_restaurants Body type={type(body).__name__} preview={str(body)[:300]!r}")
+        restaurants = _parse_entities(body)
+        if len(restaurants) == 0:
+            print("[Base44] 0 ristoranti da Base44")
+        else:
+            print(f"[Base44] get_all_restaurants: {len(restaurants)} ristoranti")
         return restaurants
     except Exception as e:
         print(f"[Base44] get_all_restaurants error: {type(e).__name__}: {_mask_key(e)}")
@@ -135,18 +140,22 @@ def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | No
             timeout=timeout,
         )
         resp.raise_for_status()
-        data = resp.json()
-        # Base44 may return the entity directly or wrapped
-        if isinstance(data, dict) and "entities" in data:
-            entities = data["entities"]
-            restaurant = entities[0] if isinstance(entities, list) and entities else None
-        elif isinstance(data, dict):
-            restaurant = data
+        body = resp.json()
+        print(f"[Base44] get_restaurant_by_id Body type={type(body).__name__} preview={str(body)[:300]!r}")
+        entities = body.get("entities", body) if isinstance(body, dict) else body
+        if isinstance(entities, list):
+            restaurant = entities[0] if entities else None
+            if restaurant is None:
+                print(f"[Base44] 0 ristoranti da Base44 (id={restaurant_id!r})")
+        elif isinstance(entities, dict):
+            restaurant = entities
         else:
             restaurant = None
-        if restaurant:
+        if restaurant and isinstance(restaurant, dict):
             print(f"[Base44] get_restaurant_by_id ok id={restaurant.get('id')!r}")
-        return restaurant
+        elif restaurant is None:
+            print(f"[Base44] get_restaurant_by_id: nessun ristorante per id={restaurant_id!r}")
+        return restaurant if isinstance(restaurant, dict) else None
     except Exception as e:
         print(f"[Base44] get_restaurant_by_id id={restaurant_id!r} error: {type(e).__name__}: {_mask_key(e)}")
         return None
