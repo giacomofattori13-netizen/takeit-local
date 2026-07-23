@@ -1,926 +1,792 @@
 [
   {
-    "name": "4 Formaggi",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 7.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "Asiago",
-      "gorgonzola dolce",
-      "Monte Veronese"
-    ]
-  },
-  {
-    "name": "4 Stagioni",
+    "name": "Acciughe, Capperi e Olive",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "acciughe",
+      "capperi",
+      "olive di Taggia"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Bufala",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "mozzarella di bufala campana DOP",
+      "olive di Taggia",
+      "datterini",
+      "basilico"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Capesante",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "rondelle di patate al forno",
+      "capasanta gratinata"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Caprese",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "pomodoro grappolo a fette",
+      "origano",
+      "olio extra vergine d'oliva"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Code di Gambero",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "fiordilatte",
+      "mazzancolle",
+      "guanciale di cinta senese",
+      "scorzetta di lime",
+      "pepe nero"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Cotto, Burrata e Polvere di Pistacchio",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto di Praga cotto alla brace",
+      "burrata pugliese",
+      "pistacchi"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Crudo e Burrata",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto crudo di Parma 24 mesi",
+      "burrata pugliese",
+      "basilico"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Crudo e Fichi",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto crudo di Parma 24 mesi",
+      "fichi freschi",
+      "semi di papavero"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Crudo e Noci",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto crudo di Parma 24 mesi",
+      "mascarpone",
+      "gherigli di noce",
+      "Grana Padano DOP"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Crudo e Verde",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto crudo di Parma 24 mesi",
+      "gorgonzola DOP dolce"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "FIT - Bufala",
+    "price": 7.0,
+    "category": "altro",
+    "sale_unit": "piece",
+    "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
+    "ingredients": [
+      "pomodoro",
+      "mozzarella di bufala campana DOP",
+      "datterini",
+      "olive taggiasche",
+      "basilico"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "FIT - Cotto e Funghi",
+    "price": 7.0,
+    "category": "altro",
+    "sale_unit": "piece",
+    "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "prosciutto cotto alta qualita",
+      "funghi champignon"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "FIT - Crudo",
     "price": 8.0,
+    "category": "altro",
+    "sale_unit": "piece",
     "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "prosciutto cotto",
-      "carciofi",
-      "funghi trifolati"
-    ]
+      "fiordilatte",
+      "prosciutto crudo di Parma 24 mesi"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Appennino",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
+    "name": "FIT - Gamberi",
+    "price": 9.0,
+    "category": "altro",
+    "sale_unit": "piece",
     "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
     "ingredients": [
-      "pomodoro",
-      "bufala campana",
-      "radicchio",
-      "cipolla brasata nel Valpolicella",
-      "salamino piccante"
-    ]
-  },
-  {
-    "name": "Appia",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "burrata pugliese",
-      "carciofi",
-      "bresaola"
-    ]
-  },
-  {
-    "name": "Aprica",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "cipolla brasata nel Valpolicella",
-      "stracchino",
-      "bresaola"
-    ]
-  },
-  {
-    "name": "Baita",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "funghi porcini",
-      "cipolla rossa",
-      "pancetta affumicata",
-      "Grana grattugiato"
-    ]
-  },
-  {
-    "name": "Beata",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "bufala campana",
-      "prosciutto crudo di Soave",
-      "pomodorini"
-    ]
-  },
-  {
-    "name": "Bonassola",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "gamberetti",
-      "Philadelphia",
-      "pomodorini confit"
-    ]
-  },
-  {
-    "name": "Bondola",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "burrata pugliese",
-      "granella di pistacchi",
-      "mortadella"
-    ]
-  },
-  {
-    "name": "Boscaiola",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "salsiccia dolce",
-      "funghi chiodini",
-      "funghi porcini",
-      "speck"
-    ]
-  },
-  {
-    "name": "Bresaola",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "bresaola",
-      "rucola",
-      "scaglie di Grana"
-    ]
-  },
-  {
-    "name": "Briosa",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
+      "ricotta",
       "zucchine grigliate",
-      "pancetta affumicata",
-      "stracchino"
-    ]
+      "gamberi",
+      "zest di lime"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Brunico",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.5,
+    "name": "FIT - Salmone",
+    "price": 9.0,
+    "category": "altro",
+    "sale_unit": "piece",
     "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
+    "ingredients": [
+      "fiordilatte",
+      "porri",
+      "salmone",
+      "pomodorini confit"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "FIT - Vegana",
+    "price": 8.0,
+    "category": "altro",
+    "sale_unit": "piece",
+    "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
+    "ingredients": [
+      "hummus",
+      "melanzane grigliate",
+      "zucca al forno",
+      "porcini",
+      "pomodori secchi"
+    ],
+    "tags": ["fit", "preorder", "vegana"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "FIT - Vegetariana",
+    "price": 7.0,
+    "category": "altro",
+    "sale_unit": "piece",
+    "available": true,
+    "description": "Linea Pizza FIT - porzione 15x20 cm. Prenotazione 24h prima.",
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "gorgonzola dolce",
+      "fiordilatte",
+      "patate al forno",
+      "zucchine grigliate",
+      "melanzane grigliate",
+      "datterini"
+    ],
+    "tags": ["fit", "preorder"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Friarielli e Salsiccia",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "cime di rapa in padella al peperoncino",
+      "tastasal"
+    ],
+    "tags": ["taglio", "piccante"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Gamberi e Burrata",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
+    "available": true,
+    "description": "Impasto nero al carbone vegetale",
+    "ingredients": [
+      "burrata pugliese",
+      "mazzancolle",
+      "zucchine grigliate",
+      "polvere di arancia",
+      "prezzemolo"
+    ],
+    "tags": ["taglio", "bianca", "carbone"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Giardiniera",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "chiodini",
+      "porcini",
+      "peperoni al forno",
+      "cuore di carciofo",
+      "olive di Taggia"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Ligure",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
+    "available": true,
+    "description": "Impasto nero al carbone vegetale",
+    "ingredients": [
+      "pesto alla genovese",
+      "mozzarella di bufala campana DOP",
+      "olive di Taggia",
       "noci",
-      "speck"
-    ]
+      "Parmigiano Reggiano 36 mesi"
+    ],
+    "tags": ["taglio", "bianca", "carbone"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Bufalina",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "bufala campana",
-      "pomodorini",
-      "basilico"
-    ]
-  },
-  {
-    "name": "Calzone",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "prosciutto cotto",
-      "funghi trifolati",
-      "ricotta"
-    ]
-  },
-  {
-    "name": "Campagna",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "prosciutto cotto",
-      "champignons freschi"
-    ]
-  },
-  {
-    "name": "Capricciosa",
+    "name": "Meline e Guanciale",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 9.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "prosciutto cotto",
-      "funghi trifolati",
-      "carciofi",
-      "olive nere greche"
-    ]
-  },
-  {
-    "name": "Casale",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "Asiago",
-      "melanzane grigliate",
-      "gorgonzola dolce",
-      "salsiccia dolce"
-    ]
-  },
-  {
-    "name": "Cascina",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "patate",
-      "salsiccia dolce",
-      "cipolla brasata nel Valpolicella"
-    ]
-  },
-  {
-    "name": "Caserta",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "burrata pugliese",
-      "prosciutto crudo di Soave",
-      "champignons freschi"
-    ]
-  },
-  {
-    "name": "Contadina",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "porro",
-      "salsiccia dolce"
-    ]
-  },
-  {
-    "name": "Contrada",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "porro",
-      "stracchino",
-      "prosciutto crudo di Soave"
-    ]
-  },
-  {
-    "name": "Corte",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "Asiago",
-      "carciofi",
-      "funghi chiodini",
-      "salamino piccante"
-    ]
-  },
-  {
-    "name": "Creta",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "melanzane",
-      "olive greche",
-      "basilico",
-      "pomodorini confit"
-    ]
-  },
-  {
-    "name": "Cunzata",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "acciughe",
-      "pomodorini",
-      "olive greche",
-      "origano",
-      "bufala campana"
-    ]
-  },
-  {
-    "name": "Deliziosa",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 10.5,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "gorgonzola dolce",
-      "salamino piccante",
-      "champignons freschi",
-      "pancetta affumicata"
-    ]
-  },
-  {
-    "name": "Diavola",
-    "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "capperi",
-      "salamino piccante"
-    ]
-  },
-  {
-    "name": "Estate",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "rucola",
-      "pomodorini",
-      "scaglie di Grana"
-    ]
-  },
-  {
-    "name": "Fiordo",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "melanzane",
-      "salmone affumicato",
-      "stracchino",
-      "pomodorini confit"
-    ]
-  },
-  {
-    "name": "Gallio",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "speck",
-      "Asiago",
-      "rosmarino",
-      "patate"
-    ]
-  },
-  {
-    "name": "Gallura",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "tonno",
-      "capperi",
-      "olive greche",
-      "origano",
-      "bufala campana"
-    ]
-  },
-  {
-    "name": "Gavia",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "champignons freschi",
-      "bresaola",
-      "glassa aceto balsamico"
-    ]
-  },
-  {
-    "name": "Gustosa",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "salsiccia dolce",
-      "salamino piccante",
-      "provola affumicata"
-    ]
-  },
-  {
-    "name": "Liguria",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 13.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "pesto genovese",
-      "burrata pugliese",
-      "gamberetti",
-      "pomodorini confit"
-    ]
-  },
-  {
-    "name": "Lord",
-    "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "mozzarella",
-      "champignons freschi",
-      "cipolla rossa",
-      "salamino piccante",
-      "briè",
-      "Grana grattugiato"
-    ]
-  },
-  {
-    "name": "Margherita",
-    "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 5.8,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella"
-    ]
-  },
-  {
-    "name": "Marinara",
-    "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 5.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
+      "fiordilatte",
+      "funghi sbrise trifolati",
+      "guanciale di cinta senese",
       "aglio",
-      "origano",
-      "olio"
-    ]
+      "pepe nero"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Mat",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "zucchine grigliate",
-      "Grana grattugiato",
-      "salamino piccante",
-      "bufala campana"
-    ]
-  },
-  {
-    "name": "Melanzane",
+    "name": "Messicana",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "melanzane grigliate",
-      "Grana grattugiato"
-    ]
+      "fiordilatte",
+      "olive di Taggia",
+      "tastasal",
+      "peperoncino Cayenne"
+    ],
+    "tags": ["taglio", "piccante"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Mondello",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 13.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "burrata pugliese",
-      "zucchine grigliate",
-      "tonno affumicato"
-    ]
-  },
-  {
-    "name": "Monti",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "funghi chiodini",
-      "gorgonzola dolce",
-      "speck"
-    ]
-  },
-  {
-    "name": "Napoli",
+    "name": "Misto Bosco e Spianata",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.5,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "acciughe",
-      "olive nere greche"
-    ]
+      "fiordilatte",
+      "chiodini",
+      "pioppini",
+      "porcini",
+      "spianata calabra"
+    ],
+    "tags": ["taglio", "piccante"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Palinuro",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "zucchine grigliate",
-      "tonno",
-      "briè"
-    ]
-  },
-  {
-    "name": "Ponza",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "pesto genovese",
-      "bufala campana",
-      "pomodori secchi",
-      "scaglie di Grana",
-      "basilico"
-    ]
-  },
-  {
-    "name": "Porcini",
+    "name": "Pancetta Stufata e Brie",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 8.5,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "funghi porcini",
-      "Grana grattugiato"
-    ]
+      "fiordilatte",
+      "pancetta stufata",
+      "brie",
+      "erba cipollina"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Porky's",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "patate",
-      "funghi porcini",
-      "salsiccia dolce"
-    ]
-  },
-  {
-    "name": "Posillipo",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "bufala campana",
-      "melanzane fritte",
-      "Grana grattugiato",
-      "pomodorini confit",
-      "basilico"
-    ]
-  },
-  {
-    "name": "Primavera",
+    "name": "Pancetta e Prugne",
+    "price": 18.5,
     "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 9.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
-      "mozzarella",
-      "zucchine grigliate",
-      "radicchio",
-      "rucola",
-      "pomodorini",
-      "ricotta"
-    ]
+      "fiordilatte",
+      "pancetta arrotolata",
+      "prugne secche"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Prosciutto e Funghi",
+    "name": "Pancetta e Scamorza",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "prosciutto cotto",
-      "funghi trifolati"
-    ]
+      "fiordilatte",
+      "pancetta arrotolata",
+      "scamorza affumicata"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Pusteria",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "Asiago",
-      "Monte Veronese",
-      "speck",
-      "salamino piccante"
-    ]
-  },
-  {
-    "name": "Romagna",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "ricotta",
-      "prosciutto crudo di Soave",
-      "rucola"
-    ]
-  },
-  {
-    "name": "Romana",
+    "name": "Parmigiana",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.5,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "acciughe",
-      "capperi"
-    ]
-  },
-  {
-    "name": "S. Andrea",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "zucchine grigliate",
-      "ricotta",
-      "speck"
-    ]
-  },
-  {
-    "name": "Santorini",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 12.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "burrata pugliese",
       "melanzane al forno",
-      "salamino piccante",
-      "Grana grattugiato",
+      "mozzarella di bufala campana DOP",
+      "Parmigiano Reggiano 36 mesi",
       "basilico"
-    ]
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Sassari",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
+    "name": "Patate Viola e Guanciale alla Paprika",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "bufala campana",
-      "pomodorini",
-      "tonno",
-      "capperi"
-    ]
+      "fiordilatte",
+      "patate vitelotte",
+      "guanciale di cinta senese",
+      "paprika"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Sottobosco",
+    "name": "Patate e Guanciale",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "rondelle di patate al forno",
+      "guanciale di cinta senese",
+      "aglio",
+      "pepe nero"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Patate e Lardo",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "patate al forno",
+      "lardo di Colonnata IGP",
+      "rosmarino"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Patate, Salsiccia e Philadelphia",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "rondelle di patate al forno",
+      "tastasal",
+      "Philadelphia"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Pepe Rosa",
+    "price": 18.5,
     "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 12.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
-      "mozzarella",
-      "crema di tartufo",
-      "champignons freschi",
-      "speck"
-    ]
+      "patate sfoglia",
+      "stracciatella di burrata",
+      "rosmarino",
+      "erba cipollina",
+      "pepe rosa"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Stromboli",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
+    "name": "Pesce Spada",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
     "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "cipolla rossa",
-      "capperi",
-      "salamino piccante",
-      "peperoni grigliati"
-    ]
-  },
-  {
-    "name": "Super",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
-      "prosciutto cotto",
-      "funghi trifolati",
-      "carciofi",
-      "würstel",
-      "salsiccia dolce",
-      "olive nere greche"
-    ]
+      "fiordilatte",
+      "pesce spada affumicato",
+      "olio",
+      "cipolla",
+      "prezzemolo"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Tartufata",
+    "name": "Pioppini e Verde",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "pioppini in padella",
+      "gorgonzola DOP dolce"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Polpo nell'Acqua Sua",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "polpo",
+      "patate",
+      "prezzemolo"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Porchetta",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "porchetta romana DOP",
+      "patate al forno",
+      "rosmarino"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Porri, Speck e Parmigiano",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "porri stufati",
+      "Parmigiano Reggiano 36 mesi",
+      "speck Alto Adige IGP",
+      "pepe nero"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Salmone e Limone",
+    "price": 18.5,
     "category": "pizza_bianca",
-    "dough_type": "classica",
-    "price": 12.5,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
-      "mozzarella",
-      "funghi porcini",
-      "crema di tartufo",
-      "Philadelphia",
-      "prosciutto crudo di Soave"
-    ]
+      "fiordilatte",
+      "salmone norvegese affumicato",
+      "carpaccio di limone",
+      "erba cipollina"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Speck e Salamino",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "peperoni al forno",
+      "speck Alto Adige IGP",
+      "salamino piccante"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Speck, Chiodini e Brie",
+    "price": 18.5,
+    "category": "pizza_classica",
+    "sale_unit": "kg",
+    "available": true,
+    "description": null,
+    "ingredients": [
+      "pomodoro",
+      "fiordilatte",
+      "speck Alto Adige IGP",
+      "chiodini",
+      "brie"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Stracciatella Gialla",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
+    "available": true,
+    "description": "Impasto nero al carbone vegetale",
+    "ingredients": [
+      "stracciatella di burrata allo zafferano",
+      "guanciale affumicato",
+      "pomodorini confit"
+    ],
+    "tags": ["taglio", "bianca", "carbone"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
     "name": "Tirolese",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 9.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "funghi trifolati",
-      "würstel",
-      "Asiago",
-      "speck"
-    ]
-  },
-  {
-    "name": "Urlo",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.5,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "Asiago",
-      "peperoni grigliati",
-      "Grana grattugiato",
-      "speck"
-    ]
-  },
-  {
-    "name": "Valpolicella",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 11.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "stracchino",
-      "patate",
-      "pancetta affumicata",
-      "cipolla brasata nel Valpolicella"
-    ]
-  },
-  {
-    "name": "Vegetariana",
+    "price": 18.5,
     "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 8.0,
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
       "pomodoro",
-      "mozzarella",
+      "fiordilatte",
+      "speck Alto Adige IGP",
+      "teste di porcino trifolato",
+      "tastasal"
+    ],
+    "tags": ["taglio"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Vegana N.1",
+    "price": 18.5,
+    "category": "pizza_speciale",
+    "sale_unit": "kg",
+    "available": true,
+    "description": "Impasto alla curcuma",
+    "ingredients": [
+      "hummus",
+      "zucchine",
+      "porri",
+      "pomodorini confit"
+    ],
+    "tags": ["taglio", "vegana", "curcuma"],
+    "restaurant_id": "6a22d781b615baedb412be35"
+  },
+  {
+    "name": "Vegana N.2",
+    "price": 18.5,
+    "category": "pizza_speciale",
+    "sale_unit": "kg",
+    "available": true,
+    "description": "Impasto alla curcuma",
+    "ingredients": [
+      "hummus",
       "melanzane grigliate",
-      "zucchine grigliate",
-      "radicchio rosso",
-      "pomodorini",
-      "patate"
-    ]
+      "zucca al forno",
+      "porcini",
+      "pomodori secchi"
+    ],
+    "tags": ["taglio", "vegana", "curcuma"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Viennese",
-    "category": "pizza_classica",
-    "dough_type": "classica",
-    "price": 7.5,
+    "name": "Verde e Noci",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "salamino piccante",
-      "würstel"
-    ]
+      "fiordilatte",
+      "gorgonzola DOP",
+      "noci",
+      "miele della Lessinia"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   },
   {
-    "name": "Zingara",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 8.5,
+    "name": "Zucca e Pistacchi",
+    "price": 18.5,
+    "category": "pizza_bianca",
+    "sale_unit": "kg",
     "available": true,
+    "description": null,
     "ingredients": [
-      "pomodoro",
-      "mozzarella",
-      "peperoni grigliati",
-      "olive nere greche",
-      "carciofi",
-      "origano"
-    ]
-  },
-  {
-    "name": "Zuccona",
-    "category": "pizza_speciale",
-    "dough_type": "classica",
-    "price": 10.0,
-    "available": true,
-    "ingredients": [
-      "pomodoro",
-      "bufala campana",
-      "speck",
-      "zucchine grigliate"
-    ]
+      "fiordilatte",
+      "dadolata di zucca al forno",
+      "granella di pistacchi di Bronte"
+    ],
+    "tags": ["taglio", "bianca"],
+    "restaurant_id": "6a22d781b615baedb412be35"
   }
 ]
