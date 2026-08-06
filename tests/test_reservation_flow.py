@@ -16,6 +16,7 @@ class ReservationFlowTests(unittest.TestCase):
         SQLModel.metadata.create_all(engine)
 
         original_is_agent_active = chat_module.is_agent_active
+        original_is_reservations_enabled = chat_module.is_reservations_enabled
         original_validate = chat_module.validate_reservation_time
         original_check = chat_module.check_reservation_availability
         original_save = chat_module.save_reservation_to_base44
@@ -23,6 +24,7 @@ class ReservationFlowTests(unittest.TestCase):
         sms_calls = []
 
         chat_module.is_agent_active = lambda restaurant_id="": True
+        chat_module.is_reservations_enabled = lambda restaurant_id="": True
         chat_module.validate_reservation_time = lambda *args, **kwargs: (True, None)
         chat_module.check_reservation_availability = lambda *args, **kwargs: (
             True,
@@ -68,6 +70,7 @@ class ReservationFlowTests(unittest.TestCase):
                 ).one()
         finally:
             chat_module.is_agent_active = original_is_agent_active
+            chat_module.is_reservations_enabled = original_is_reservations_enabled
             chat_module.validate_reservation_time = original_validate
             chat_module.check_reservation_availability = original_check
             chat_module.save_reservation_to_base44 = original_save
@@ -204,9 +207,11 @@ class ReservationFlowTests(unittest.TestCase):
         engine = create_engine("sqlite://")
         SQLModel.metadata.create_all(engine)
         original_is_agent_active = chat_module.is_agent_active
+        original_is_reservations_enabled = chat_module.is_reservations_enabled
         original_check = chat_module.check_reservation_availability
 
         chat_module.is_agent_active = lambda restaurant_id="": True
+        chat_module.is_reservations_enabled = lambda restaurant_id="": True
 
         def unavailable(*args, **kwargs):
             raise service_module.ReservationAvailabilityError("Base44 down")
@@ -232,6 +237,7 @@ class ReservationFlowTests(unittest.TestCase):
                 )
         finally:
             chat_module.is_agent_active = original_is_agent_active
+            chat_module.is_reservations_enabled = original_is_reservations_enabled
             chat_module.check_reservation_availability = original_check
 
         self.assertEqual(response.state, "collecting_reservation_party")
@@ -267,12 +273,14 @@ class ReservationFlowTests(unittest.TestCase):
         SQLModel.metadata.create_all(engine)
         scheduled = []
         original_is_agent_active = chat_module.is_agent_active
+        original_is_reservations_enabled = chat_module.is_reservations_enabled
         original_validate = chat_module.validate_reservation_time
         original_check = chat_module.check_reservation_availability
         original_save = chat_module.save_reservation_to_base44
         original_schedule = chat_module._schedule_order_side_effect_job
 
         chat_module.is_agent_active = lambda restaurant_id="": True
+        chat_module.is_reservations_enabled = lambda restaurant_id="": True
         chat_module.validate_reservation_time = lambda *args, **kwargs: (True, None)
         chat_module.check_reservation_availability = lambda *args, **kwargs: (
             True,
@@ -311,6 +319,7 @@ class ReservationFlowTests(unittest.TestCase):
                 jobs = session.exec(select(OrderSideEffect)).all()
         finally:
             chat_module.is_agent_active = original_is_agent_active
+            chat_module.is_reservations_enabled = original_is_reservations_enabled
             chat_module.validate_reservation_time = original_validate
             chat_module.check_reservation_availability = original_check
             chat_module.save_reservation_to_base44 = original_save
