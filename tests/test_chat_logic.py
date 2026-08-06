@@ -658,6 +658,161 @@ class ChatLogicTests(unittest.TestCase):
         self.assertTrue(saved_created)
         self.assertIsNone(saved_pickup_date)
 
+    # ── Base44 payload: al taglio kg fields ─────────────────────────────────
+
+    def test_save_order_to_base44_kg_payload_fields(self):
+        """save_order_to_base44 sends pickup_date, sale_unit, temperature, portion for kg items."""
+        from unittest.mock import MagicMock, patch
+        import app.services.conversation_service as svc
+
+        kg_item = {
+            "pizza_name": "Margherita al taglio",
+            "quantity": 0.5,
+            "sale_unit": "kg",
+            "size": "mezza",
+            "temperature": "calda",
+            "dough_type": "classica",
+            "add_ingredients": [],
+            "remove_ingredients": [],
+            "base_price": 9.95,
+            "extras_price": 0.0,
+            "total_price": 9.95,
+        }
+
+        captured: dict = {}
+
+        def fake_post(url, *, params, json, headers, timeout):
+            captured.update(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = '{"id": "test-id"}'
+            mock_resp.raise_for_status = lambda: None
+            mock_resp.json.return_value = {"id": "test-id"}
+            return mock_resp
+
+        with (
+            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+        ):
+            svc.save_order_to_base44(
+                customer_name="Mario",
+                customer_phone="+393331234567",
+                pickup_time="19:00",
+                order_number=1001,
+                ai_confidence=0.95,
+                items=[kg_item],
+                restaurant_id="6a22d781b615baedb412be35",
+                pickup_date="2026-07-23",
+            )
+
+        self.assertEqual(captured.get("pickup_date"), "2026-07-23")
+        items_sent = captured.get("items", [])
+        self.assertEqual(len(items_sent), 1)
+        sent = items_sent[0]
+        self.assertEqual(sent.get("sale_unit"), "kg")
+        self.assertEqual(sent.get("temperature"), "calda")
+        self.assertEqual(sent.get("portion"), "mezza")
+        self.assertEqual(sent.get("size"), "mezza")
+
+    def test_save_order_to_base44_piece_item_no_kg_fields(self):
+        """save_order_to_base44 does not add temperature or portion for piece items."""
+        from unittest.mock import MagicMock, patch
+        import app.services.conversation_service as svc
+
+        piece_item = {
+            "pizza_name": "FIT Bresaola",
+            "quantity": 1,
+            "sale_unit": "piece",
+            "dough_type": "classica",
+            "add_ingredients": [],
+            "remove_ingredients": [],
+            "base_price": 8.5,
+            "extras_price": 0.0,
+            "total_price": 8.5,
+        }
+
+        captured: dict = {}
+
+        def fake_post(url, *, params, json, headers, timeout):
+            captured.update(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = '{"id": "test-id"}'
+            mock_resp.raise_for_status = lambda: None
+            mock_resp.json.return_value = {"id": "test-id"}
+            return mock_resp
+
+        with (
+            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+        ):
+            svc.save_order_to_base44(
+                customer_name="Laura",
+                customer_phone=None,
+                pickup_time="13:00",
+                order_number=1002,
+                ai_confidence=0.99,
+                items=[piece_item],
+                pickup_date=None,
+            )
+
+        self.assertNotIn("pickup_date", captured)
+        items_sent = captured.get("items", [])
+        self.assertEqual(len(items_sent), 1)
+        sent = items_sent[0]
+        self.assertEqual(sent.get("sale_unit"), "piece")
+        self.assertNotIn("temperature", sent)
+        self.assertNotIn("portion", sent)
+
+    def test_save_order_to_base44_kg_piena_portion(self):
+        """portion='piena' is sent for size='piena' kg items."""
+        from unittest.mock import MagicMock, patch
+        import app.services.conversation_service as svc
+
+        kg_item = {
+            "pizza_name": "Capricciosa al taglio",
+            "quantity": 1.0,
+            "sale_unit": "kg",
+            "size": "piena",
+            "temperature": "fredda",
+            "dough_type": "classica",
+            "add_ingredients": [],
+            "remove_ingredients": [],
+            "base_price": 18.5,
+            "extras_price": 0.0,
+            "total_price": 18.5,
+        }
+
+        captured: dict = {}
+
+        def fake_post(url, *, params, json, headers, timeout):
+            captured.update(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = '{"id": "test-id"}'
+            mock_resp.raise_for_status = lambda: None
+            mock_resp.json.return_value = {"id": "test-id"}
+            return mock_resp
+
+        with (
+            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+        ):
+            svc.save_order_to_base44(
+                customer_name="Luca",
+                customer_phone=None,
+                pickup_time="18:30",
+                order_number=1003,
+                ai_confidence=0.90,
+                items=[kg_item],
+                pickup_date="2026-07-24",
+            )
+
+        sent = captured.get("items", [])[0]
+        self.assertEqual(sent.get("portion"), "piena")
+        self.assertEqual(sent.get("temperature"), "fredda")
+        self.assertEqual(captured.get("pickup_date"), "2026-07-24")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -543,6 +543,7 @@ def save_order_to_base44(
         b44_item = {
             "pizza_name": item["pizza_name"],
             "quantity": item["quantity"],
+            "sale_unit": item.get("sale_unit", "piece"),
             "dough_type": (
                 item.get("dough_type")
                 or _PIZZA_TYPE_TO_DOUGH.get(item.get("pizza_type", ""), "classica")
@@ -554,9 +555,11 @@ def save_order_to_base44(
             "total_price": item.get("total_price", 0.0),
         }
         if item.get("sale_unit") == "kg":
+            b44_item["temperature"] = item.get("temperature") or "fredda"
             kg_size = item.get("size", "normale")
             if kg_size in ("piena", "mezza"):
                 b44_item["size"] = kg_size
+                b44_item["portion"] = kg_size
         base44_items.append(b44_item)
 
     payload = {
@@ -952,13 +955,14 @@ def load_restaurant(restaurant_id: str = "") -> dict:
         _start_restaurant_refresh_background("cache_stale", restaurant_id)
         return cached
 
-    # For non-default restaurants, don't use the local file fallback (it's only for Corte del Sole)
-    if not restaurant_id:
-        local = _load_restaurant_from_file()
-        if local:
-            cached = _cache_restaurant_data(local, "file", restaurant_id)
-            _start_restaurant_refresh_background("cold_file_fallback", restaurant_id)
-            return cached
+    # File fallback: serve restaurant_id="" (legacy) and also the restaurant_id
+    # that matches the id field in the file (so that cold-cache calls with a
+    # specific restaurant_id still get reservations_enabled / opening_hours right).
+    local = _load_restaurant_from_file()
+    if local and (not restaurant_id or local.get("id") == restaurant_id):
+        cached = _cache_restaurant_data(local, "file", restaurant_id)
+        _start_restaurant_refresh_background("cold_file_fallback", restaurant_id)
+        return cached
 
     _start_restaurant_refresh_background("cold_empty", restaurant_id)
     if restaurant_id:
