@@ -49,6 +49,7 @@ from app.services.conversation_service import (
     SIZE_MINI_DISCOUNT,
     SIZE_DOPPIO_SURCHARGE,
     _PIZZA_TYPE_TO_DOUGH,
+    ORDER_VOCAB_NAME_BLOCKERS,
     get_agent_greeting,
     validate_pickup_time,
     resolve_pickup_time,
@@ -532,11 +533,8 @@ _NUMBER_WORDS = {
 }
 
 _LOCAL_NAME_BLOCKERS = {
-    "pizza", "pizze", "margherita", "diavola", "capricciosa", "ordine", "ordinare",
-    "aggiungi", "metti", "vorrei", "voglio", "ritiro", "alle", "ore", "prima",
-    "possibile", "subito", "senza", "con", "glutine", "impasto", "mini", "doppio",
-    "annulla", "cancella", "basta", "ok", "si", "sì", "io",
-}
+    "ok", "si", "sì", "io",
+} | ORDER_VOCAB_NAME_BLOCKERS
 
 _LOCAL_PICKUP_BLOCKERS = {
     "pizza", "pizze", "margherita", "diavola", "capricciosa", "aggiungi", "metti",
@@ -1424,7 +1422,7 @@ def build_assistant_response(
 
     # Collecting name
     if state == "collecting_name":
-        return "Che nome metto?"
+        return "A che nome?"
 
     # Collecting items — risposte brevissime, niente domande
     if intent in ("add_items", "modify_items", "replace_items"):
@@ -2829,7 +2827,12 @@ def chat(request: ChatRequest, session: SessionDep):
             item["sale_unit"] = "piece"
     intent = extracted.get("intent", "unknown")
 
-    # Gestione temperatura per item al kg
+    # Gestione temperatura/porzione per item al kg. Ogni slot kg ha un default
+    # sensato applicato SUBITO (mai null): la domanda viene comunque fatta una
+    # volta sola, e una risposta esplicita del cliente sovrascrive il default.
+    _kg_temp_just_asked = False
+    _kg_size_just_asked_for: list[str] = []
+
     # set_kg_temperature: il cliente risponde alla domanda temperatura
     if intent == "set_kg_temperature" and not new_items:
         new_temp = _extract_temperature(request.message) or "fredda"
@@ -2840,23 +2843,43 @@ def chat(request: ChatRequest, session: SessionDep):
                 ei["temperature"] = new_temp
         print(f"[KgTemp] Temperatura impostata: {new_temp!r}")
 
-    # set_kg_size: il cliente risponde alla domanda piena/mezza
+    # set_kg_size: il cliente risponde alla domanda piena/mezza. Si applica solo
+    # agli item a cui è stato appena proposto un default in attesa di conferma
+    # (_size_prompted e non ancora _size_explicit) — non a tutti quelli "normale",
+    # perché con il default immediato nessun item kg resta più "normale".
     if intent == "set_kg_size" and not new_items:
         new_kg_size = _extract_kg_size(request.message) or "piena"
         for ei in existing_items:
-            if ei.get("sale_unit") == "kg" and ei.get("size", "normale") == "normale":
+            if ei.get("sale_unit") == "kg" and ei.get("_size_prompted") and not ei.get("_size_explicit"):
                 ei["size"] = new_kg_size
+                ei["_size_explicit"] = True
         print(f"[KgSize] Dimensione impostata: {new_kg_size!r}")
 
-    # Applica temperatura agli item kg appena estratti
+    # Applica temperatura e porzione agli item kg appena estratti
     for item in new_items:
-        if item.get("sale_unit") == "kg":
-            # LLM potrebbe aver estratto temperatura esplicita
-            item_temp = item.get("temperature") or ""
-            if item_temp:
-                item["_explicit_temperature"] = True  # non sovrascrivere con session default
-            else:
-                item["temperature"] = conversation.kg_temperature or "fredda"
+        if item.get("sale_unit") != "kg":
+            continue
+
+        # Temperatura: se il cliente non l'ha specificata su questo item,
+        # usa il default di sessione (chiesto una volta, poi riusato).
+        item_temp = item.get("temperature") or ""
+        if item_temp:
+            item["_explicit_temperature"] = True  # non sovrascrivere con session default
+        else:
+            if conversation.kg_temperature is None:
+                _kg_temp_just_asked = True
+                conversation.kg_temperature = "fredda"
+            item["temperature"] = conversation.kg_temperature
+
+        # Porzione (piena/mezza): se non specificata su questo item, applica
+        # subito il default "piena" e segna che la domanda va fatta una volta.
+        if item.get("size") in ("piena", "mezza"):
+            item["_size_explicit"] = True
+            item["_size_prompted"] = True
+        else:
+            item["_size_prompted"] = True
+            item["size"] = "piena"
+            _kg_size_just_asked_for.append(item.get("pizza_name") or "pizza")
 
     # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
@@ -3109,39 +3132,29 @@ def chat(request: ChatRequest, session: SessionDep):
             f"{merged_order['pickup_time']}.{_price_note} Confermo?"
         )
 
-    # Chiedi temperatura UNA volta quando compare il primo item al kg nell'ordine
-    has_kg_items = any(i.get("sale_unit") == "kg" for i in merged_order.get("items", []))
+    # Chiedi temperatura/porzione UNA volta sola per ogni slot appena valorizzato
+    # con un default (vedi blocco "Applica temperatura e porzione" sopra). Il
+    # default è già applicato: se la risposta del cliente non arriva o finisce
+    # fraintesa, l'ordine resta comunque valido (mai più null).
     if (
-        has_kg_items
-        and conversation.kg_temperature is None
-        and intent != "set_kg_temperature"
+        (_kg_temp_just_asked or _kg_size_just_asked_for)
         and not missing_messages
         and not pickup_time_error
     ):
-        # Pre-imposta il default fredda per non chiedere di nuovo
-        conversation.kg_temperature = "fredda"
-        temp_question = "Le pizze le vuole fredde da portar via o calde da mangiare subito?"
-        if response_message and not response_message.endswith("?"):
-            response_message = response_message.rstrip(".") + ". " + temp_question
-        else:
-            response_message = (response_message + " " + temp_question).strip()
+        if _kg_temp_just_asked:
+            temp_question = "Le pizze le vuole fredde da portar via o calde da mangiare subito?"
+            if response_message and not response_message.endswith("?"):
+                response_message = response_message.rstrip(".") + ". " + temp_question
+            else:
+                response_message = (response_message + " " + temp_question).strip()
 
-    # Chiedi piena o mezza quando un item al kg non ha ancora la dimensione specificata
-    has_kg_no_size = any(
-        i.get("sale_unit") == "kg" and i.get("size", "normale") == "normale"
-        for i in merged_order.get("items", [])
-    )
-    if (
-        has_kg_no_size
-        and intent not in ("set_kg_size", "set_kg_temperature")
-        and not missing_messages
-        and not pickup_time_error
-    ):
-        size_question = "Trancio pieno (15×20) o mezza porzione (7,5×10)?"
-        if response_message and not response_message.endswith("?"):
-            response_message = response_message.rstrip(".") + ". " + size_question
-        else:
-            response_message = (response_message + " " + size_question).strip()
+        if _kg_size_just_asked_for:
+            pizza_list = _format_pizza_list(_kg_size_just_asked_for)
+            size_question = f"Per {pizza_list}, trancio pieno (15×20) o mezza porzione (7,5×10)?"
+            if response_message and not response_message.endswith("?"):
+                response_message = response_message.rstrip(".") + ". " + size_question
+            else:
+                response_message = (response_message + " " + size_question).strip()
 
     session.add(conversation)
     session.commit()

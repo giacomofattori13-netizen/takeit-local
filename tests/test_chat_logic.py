@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 
@@ -653,6 +654,257 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(sent_item.get("sale_unit"), "kg")
         self.assertEqual(sent_item.get("temperature"), "calda")
         self.assertEqual(sent_item.get("portion"), "mezza")
+
+    # ── slot-filling: nome cliente non inquinato, porzione mai null ──────────
+
+    def test_local_customer_name_rejects_order_fragments(self):
+        """_extract_local_customer_name must reject al-taglio order fragments
+        (weight/portion/temperature words) instead of treating them as a name."""
+        self.assertIsNone(chat_module._extract_local_customer_name("Intero è fredda"))
+        self.assertIsNone(chat_module._extract_local_customer_name("intero, fredda"))
+        self.assertIsNone(chat_module._extract_local_customer_name("due etti di bufala fredda"))
+        self.assertIsNone(chat_module._extract_local_customer_name("mezza porzione calda"))
+        self.assertIsNone(chat_module._extract_local_customer_name("trancio piena grazie"))
+        # Legit names must still work
+        self.assertEqual(chat_module._extract_local_customer_name("Mario Rossi"), "Mario Rossi")
+        self.assertEqual(chat_module._extract_local_customer_name("mi chiamo Elena"), "Elena")
+
+    def test_normalize_extracted_payload_rejects_order_vocab_customer_name(self):
+        """The LLM-extraction normalizer must null out a customer_name that is
+        actually an order-vocabulary fragment (e.g. LLM hallucinated a name from
+        the client's answer to the portion/temperature question)."""
+        from app.services import conversation_service as svc
+
+        result = svc._normalize_extracted_payload({
+            "intent": "set_customer_name",
+            "customer_name": "Intero è fredda",
+            "pickup_time": None,
+            "items": [],
+        })
+        self.assertIsNone(result["customer_name"])
+
+        # A real name must survive normalization unchanged
+        result_ok = svc._normalize_extracted_payload({
+            "intent": "set_customer_name",
+            "customer_name": "Giulia Bianchi",
+            "pickup_time": None,
+            "items": [],
+        })
+        self.assertEqual(result_ok["customer_name"], "Giulia Bianchi")
+
+    def test_two_kg_items_both_get_portion_and_temperature_default(self):
+        """Ordering two al-taglio flavors in one turn, with no explicit portion,
+        must default BOTH items to a sensible portion ('piena') and temperature
+        ('fredda') — not just the first one — and ask the courtesy question once
+        for both, naming both pizzas."""
+        import datetime
+        from app.schemas import ChatRequest
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        original_is_agent_active = chat_module.is_agent_active
+        original_is_reservations_enabled = chat_module.is_reservations_enabled
+        original_get_next_open_day = chat_module.get_next_open_day
+        original_get_sold_out = chat_module.get_sold_out_item_names
+        original_extract = chat_module.extract_order_from_text
+
+        chat_module.is_agent_active = lambda restaurant_id="": True
+        chat_module.is_reservations_enabled = lambda restaurant_id="": False
+        chat_module.get_next_open_day = lambda restaurant_id="": (
+            datetime.date.today() + datetime.timedelta(days=1), "domani"
+        )
+        chat_module.get_sold_out_item_names = lambda *a, **k: set()
+
+        def fake_extract(message, menu_items, dough_items=None, state="collecting_items",
+                          existing_items=None, customer_name=None, restaurant_id=""):
+            return {
+                "intent": "add_items",
+                "customer_name": None,
+                "pickup_time": None,
+                "items": [
+                    {
+                        "pizza_name": "Bufala al taglio",
+                        "pizza_type": "Normale",
+                        "dough_type": "classica",
+                        "quantity": 0.2,
+                        "size": "normale",
+                        "add_ingredients": [],
+                        "remove_ingredients": [],
+                        "temperature": "",
+                    },
+                    {
+                        "pizza_name": "Porchetta al taglio",
+                        "pizza_type": "Normale",
+                        "dough_type": "classica",
+                        "quantity": 0.2,
+                        "size": "normale",
+                        "add_ingredients": [],
+                        "remove_ingredients": [],
+                        "temperature": "",
+                    },
+                ],
+            }
+        chat_module.extract_order_from_text = fake_extract
+
+        try:
+            with Session(engine) as session:
+                session.add(MenuItem(
+                    name="Bufala al taglio", category="rosse", pizza_type="Normale",
+                    price=18.50, sale_unit="kg",
+                ))
+                session.add(MenuItem(
+                    name="Porchetta al taglio", category="rosse", pizza_type="Normale",
+                    price=19.90, sale_unit="kg",
+                ))
+                session.commit()
+
+                conversation = ConversationSession(
+                    session_id="two-kg-items",
+                    customer_name=None,
+                    pickup_time=None,
+                    items_json="[]",
+                    state="collecting_items",
+                    completed=False,
+                )
+                session.add(conversation)
+                session.commit()
+
+                response = chat_module.chat(
+                    ChatRequest(session_id="two-kg-items", message="una bufala e una porchetta al taglio, due etti ciascuna"),
+                    session,
+                )
+                updated = session.exec(
+                    select(ConversationSession).where(ConversationSession.session_id == "two-kg-items")
+                ).one()
+                saved_items = json.loads(updated.items_json)
+        finally:
+            chat_module.is_agent_active = original_is_agent_active
+            chat_module.is_reservations_enabled = original_is_reservations_enabled
+            chat_module.get_next_open_day = original_get_next_open_day
+            chat_module.get_sold_out_item_names = original_get_sold_out
+            chat_module.extract_order_from_text = original_extract
+
+        self.assertEqual(len(saved_items), 2)
+        for item in saved_items:
+            self.assertEqual(item.get("size"), "piena", msg=f"{item['pizza_name']} missing portion default")
+            self.assertEqual(item.get("temperature"), "fredda")
+        # Courtesy question mentions both pizzas, asked once
+        self.assertIn("Bufala al taglio", response.response_message)
+        self.assertIn("Porchetta al taglio", response.response_message)
+
+        # Confirm the defaults actually reach the persisted OrderItem rows too
+        # (this is where the original bug surfaced: portion null on Base44/local DB).
+        with Session(engine) as session:
+            conv = session.exec(
+                select(ConversationSession).where(ConversationSession.session_id == "two-kg-items")
+            ).one()
+            merged = {
+                "customer_name": "Elena",
+                "pickup_time": "20:00",
+                "items": saved_items,
+            }
+            conv.customer_name = "Elena"
+            conv.pickup_time = "20:00"
+            order, _ = chat_module._persist_order_once(session, conv, merged)
+            order_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+
+        self.assertEqual(len(order_items), 2)
+        for oi in order_items:
+            self.assertEqual(oi.portion, "piena", msg=f"{oi.pizza_name} missing persisted portion")
+            self.assertEqual(oi.temperature, "fredda")
+
+    def test_kg_slot_answer_does_not_pollute_customer_name(self):
+        """Reproduces the reported bug: after a kg item is added (name still
+        unknown → state=collecting_name), a message meant to answer the
+        portion/temperature courtesy question must NOT be accepted as the
+        customer name."""
+        import datetime
+        from app.schemas import ChatRequest
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        original_is_agent_active = chat_module.is_agent_active
+        original_is_reservations_enabled = chat_module.is_reservations_enabled
+        original_get_next_open_day = chat_module.get_next_open_day
+        original_get_sold_out = chat_module.get_sold_out_item_names
+        original_extract = chat_module.extract_order_from_text
+
+        chat_module.is_agent_active = lambda restaurant_id="": True
+        chat_module.is_reservations_enabled = lambda restaurant_id="": False
+        chat_module.get_next_open_day = lambda restaurant_id="": (
+            datetime.date.today() + datetime.timedelta(days=1), "domani"
+        )
+        chat_module.get_sold_out_item_names = lambda *a, **k: set()
+
+        def fake_extract(message, menu_items, dough_items=None, state="collecting_items",
+                          existing_items=None, customer_name=None, restaurant_id=""):
+            if "bufala" in message.lower():
+                return {
+                    "intent": "add_items",
+                    "customer_name": None,
+                    "pickup_time": None,
+                    "items": [{
+                        "pizza_name": "Bufala al taglio",
+                        "pizza_type": "Normale",
+                        "dough_type": "classica",
+                        "quantity": 0.2,
+                        "size": "normale",
+                        "add_ingredients": [],
+                        "remove_ingredients": [],
+                        "temperature": "",
+                    }],
+                }
+            # Simulates the real LLM guard (system prompt + normalizer) also
+            # declining to guess a name from an order-vocabulary fragment.
+            return {"intent": "unknown", "customer_name": None, "pickup_time": None, "items": []}
+        chat_module.extract_order_from_text = fake_extract
+
+        try:
+            with Session(engine) as session:
+                session.add(MenuItem(
+                    name="Bufala al taglio", category="rosse", pizza_type="Normale",
+                    price=18.50, sale_unit="kg",
+                ))
+                session.commit()
+
+                conversation = ConversationSession(
+                    session_id="kg-name-guard",
+                    customer_name=None,
+                    pickup_time=None,
+                    items_json="[]",
+                    state="collecting_items",
+                    completed=False,
+                )
+                session.add(conversation)
+                session.commit()
+
+                first = chat_module.chat(
+                    ChatRequest(session_id="kg-name-guard", message="una bufala al taglio, due etti"),
+                    session,
+                )
+                self.assertEqual(first.state, "collecting_name")
+
+                # Customer replies to the (misheard) portion/temperature question
+                # instead of the name question — this must NOT become the name.
+                second = chat_module.chat(
+                    ChatRequest(session_id="kg-name-guard", message="Intero è fredda"),
+                    session,
+                )
+                updated = session.exec(
+                    select(ConversationSession).where(ConversationSession.session_id == "kg-name-guard")
+                ).one()
+        finally:
+            chat_module.is_agent_active = original_is_agent_active
+            chat_module.is_reservations_enabled = original_is_reservations_enabled
+            chat_module.get_next_open_day = original_get_next_open_day
+            chat_module.get_sold_out_item_names = original_get_sold_out
+            chat_module.extract_order_from_text = original_extract
+
+        self.assertIsNone(updated.customer_name)
+        self.assertEqual(updated.state, "collecting_name")
+        self.assertIn("nome", second.response_message.lower())
 
     def test_is_today_order_request_detects_keywords(self):
         """_is_today_order_request fires on 'per oggi', 'in giornata', 'oggi stesso'."""

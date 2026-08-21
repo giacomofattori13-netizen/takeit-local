@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -2278,7 +2279,13 @@ def _build_slim_system_prompt(
     if state == "collecting_name":
         primary_goal = (
             "PRIMARY GOAL: extract customer_name. "
-            "The customer is providing their name. They may also add/modify pizzas."
+            "The customer is providing their name. They may also add/modify pizzas.\n"
+            "IMPORTANT: the message may actually be answering an earlier question about "
+            "the al-taglio order (weight, portion size 'piena'/'mezza', temperature "
+            "'calda'/'fredda') rather than giving their name. If the message contains "
+            "words like 'intero', 'mezza', 'piena', 'calda', 'fredda', 'etti', 'chilo', "
+            "'grammi', 'trancio', 'porzione' and does NOT look like a real person's name, "
+            "set customer_name=null instead of guessing."
         )
         intent_hint = (
             'Use "set_customer_name" if mainly providing a name, '
@@ -2407,6 +2414,36 @@ _ALLOWED_INTENTS = {
 }
 _ALLOWED_SIZES = {"normale", "mini", "doppio", "piena", "mezza"}
 
+# Parole che indicano un frammento di frase d'ordine, non un nome cliente.
+# Condiviso con app.routes.chat (_LOCAL_NAME_BLOCKERS) per evitare che risposte
+# tipo "intero, fredda" (risposta alla domanda porzione/temperatura al kg,
+# fraintesa come risposta alla domanda del nome) finiscano in customer_name.
+ORDER_VOCAB_NAME_BLOCKERS = {
+    "pizza", "pizze", "margherita", "diavola", "capricciosa", "ordine", "ordinare",
+    "aggiungi", "metti", "vorrei", "voglio", "ritiro", "alle", "ore", "prima",
+    "possibile", "subito", "senza", "con", "glutine", "impasto", "mini", "doppio",
+    "annulla", "cancella", "basta",
+    # vocabolario pizza al taglio / kg
+    "intero", "intera", "interi", "intere", "piena", "piene", "pieno", "pieni",
+    "mezza", "mezzo", "mezzi", "mezze", "meta",
+    "etti", "etto", "grammi", "grammo", "chilo", "chili", "kg",
+    "calda", "calde", "caldo", "caldi", "fredda", "fredde", "freddo", "freddi",
+    "porzione", "porzioni", "trancio", "tranci", "peso", "taglio", "asporto",
+}
+
+
+def _normalize_for_name_check(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+
+def _contains_order_vocab(text: str) -> bool:
+    normalized = _normalize_for_name_check(text)
+    return any(
+        re.search(rf"\b{re.escape(word)}\b", normalized)
+        for word in ORDER_VOCAB_NAME_BLOCKERS
+    )
+
 
 class _ExtractedItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -2487,6 +2524,16 @@ class _ExtractedOrderPayload(BaseModel):
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("customer_name", mode="after")
+    @classmethod
+    def _reject_order_vocab_name(cls, value: str | None) -> str | None:
+        """Scarta un customer_name che è in realtà un frammento della frase
+        d'ordine (es. "intero è fredda") finito nel campo sbagliato."""
+        if value and _contains_order_vocab(value):
+            print(f"[NameGuard] customer_name scartato (vocabolario ordine): {value!r}")
+            return None
+        return value
 
     @field_validator("items", mode="before")
     @classmethod
