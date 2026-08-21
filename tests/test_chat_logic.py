@@ -557,6 +557,103 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(items[0].portion, "piena")
         self.assertEqual(items[0].temperature, "calda")
 
+    def test_order_domani_mezza_calda_end_to_end(self):
+        """Full pipeline for a phone al-taglio order 'per domani / mezza / calda':
+        local DB (Order.pickup_date, OrderItem.portion/temperature/sale_unit) AND
+        the Base44 payload (pickup_date + item sale_unit/temperature/portion) must
+        both carry the values through — not just one of the two sinks."""
+        import datetime
+        from unittest.mock import MagicMock, patch
+        import app.services.conversation_service as svc
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+
+        with Session(engine) as session:
+            session.add(MenuItem(
+                name="Margherita al taglio",
+                category="rosse",
+                pizza_type="Normale",
+                price=19.90,
+                sale_unit="kg",
+            ))
+            session.commit()
+
+            conv = ConversationSession(
+                session_id="domani-mezza-calda",
+                customer_name="Elena",
+                pickup_time="19:30",
+                items_json="[]",
+                state="awaiting_confirmation",
+                completed=False,
+            )
+            session.add(conv)
+            session.commit()
+            session.refresh(conv)
+
+            tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+            merged = {
+                "customer_name": "Elena",
+                "pickup_time": "19:30",
+                "pickup_date": tomorrow,
+                "items": [{
+                    "pizza_name": "Margherita al taglio",
+                    "pizza_type": "Normale",
+                    "quantity": 0.5,
+                    "sale_unit": "kg",
+                    "size": "mezza",
+                    "temperature": "calda",
+                    "add_ingredients": [],
+                    "remove_ingredients": [],
+                    "dough_type": "classica",
+                }],
+            }
+
+            # 1) Local DB persistence
+            order, created = chat_module._persist_order_once(session, conv, merged)
+            self.assertTrue(created)
+            self.assertEqual(order.pickup_date, tomorrow)
+
+            saved_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
+            self.assertEqual(len(saved_items), 1)
+            self.assertEqual(saved_items[0].sale_unit, "kg")
+            self.assertEqual(saved_items[0].portion, "mezza")
+            self.assertEqual(saved_items[0].temperature, "calda")
+
+            # 2) Base44 payload (same merged_order, through the real pricing/enrichment step)
+            enriched_items, _total = chat_module.enrich_items_with_pricing(session, merged["items"])
+
+        captured: dict = {}
+
+        def fake_post(url, *, params, json, headers, timeout):
+            captured.update(json)
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = '{"id": "test-id"}'
+            mock_resp.raise_for_status = lambda: None
+            mock_resp.json.return_value = {"id": "test-id"}
+            return mock_resp
+
+        with (
+            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+        ):
+            svc.save_order_to_base44(
+                customer_name="Elena",
+                customer_phone="+393331234567",
+                pickup_time="19:30",
+                order_number=2001,
+                ai_confidence=0.95,
+                items=enriched_items,
+                pickup_date=merged["pickup_date"],
+            )
+
+        self.assertEqual(captured.get("pickup_date"), tomorrow)
+        sent_item = captured.get("items", [])[0]
+        self.assertEqual(sent_item.get("sale_unit"), "kg")
+        self.assertEqual(sent_item.get("temperature"), "calda")
+        self.assertEqual(sent_item.get("portion"), "mezza")
+
     def test_is_today_order_request_detects_keywords(self):
         """_is_today_order_request fires on 'per oggi', 'in giornata', 'oggi stesso'."""
         self.assertTrue(chat_module._is_today_order_request("vorrei ordinare per oggi"))
