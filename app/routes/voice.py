@@ -47,6 +47,27 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def _fetch_transcript_sync(session_id: str) -> str:
+    """Ricostruisce la trascrizione turno-per-turno (utente + agente) dai ConversationLog."""
+    from sqlmodel import select as _select
+
+    from app.models import ConversationLog
+
+    with Session(_db_engine) as db:
+        logs = db.exec(
+            _select(ConversationLog)
+            .where(ConversationLog.session_id == session_id)
+            .order_by(ConversationLog.id)
+        ).all()
+    lines: list[str] = []
+    for log in logs:
+        if log.user_message:
+            lines.append(f"Utente: {log.user_message}")
+        if log.response_message:
+            lines.append(f"Agente: {log.response_message}")
+    return "\n".join(lines)
+
+
 async def _call_log_create_instant(
     *,
     restaurant_id: str,
@@ -128,6 +149,9 @@ async def _call_log_update(
         patch["order_id"] = str(order_id)
     if summary:
         patch["summary"] = summary
+    transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
+    if transcript:
+        patch["transcript"] = transcript
     try:
         from app.services.base44_client import update_call_log
         await asyncio.to_thread(update_call_log, log_id, patch)
