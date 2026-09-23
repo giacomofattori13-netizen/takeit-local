@@ -1112,6 +1112,27 @@ def _is_truthy_flag(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def ensure_restaurant_config(restaurant_id: str) -> bool:
+    """Garantisce che per restaurant_id ci siano i dati necessari a confermare ordini
+    e prenotazioni (record del locale con orari di apertura).
+
+    Se mancano, fa un recupero bloccante da Base44. Ritorna False se i dati restano
+    non disponibili: in quel caso il chiamante non deve confermare nulla.
+    Senza restaurant_id (flusso legacy) ritorna sempre True.
+    """
+    if not restaurant_id:
+        return True
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
+    if restaurant.get("id") and restaurant.get("opening_hours"):
+        return True
+    print(f"[Restaurant] Configurazione incompleta per restaurant_id={restaurant_id!r}: recupero bloccante")
+    fresh = _refresh_restaurant_cache_blocking(restaurant_id)
+    if fresh and fresh.get("id"):
+        return True
+    print(f"[Restaurant] Configurazione non disponibile per restaurant_id={restaurant_id!r}")
+    return False
+
+
 SERVICE_UNAVAILABLE_MESSAGE = (
     "Mi scusi, in questo momento il servizio non è disponibile. "
     "La preghiamo di richiamare tra qualche minuto."

@@ -944,7 +944,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
         f"[Voice] Risposta agente: {describe_text_for_log(reply)} "
         f"stato={result.state!r} cache_hit={cache_hit}"
     )
-    if result.state == "completed":
+    if result.state in ("completed", "unavailable"):
         audio = await _audio_element_async(reply)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'

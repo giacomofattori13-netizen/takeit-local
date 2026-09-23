@@ -31,7 +31,9 @@ from app.models import (
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest, ChatResponse, ChatStartResponse
 from app.services.conversation_service import (
+    SERVICE_UNAVAILABLE_MESSAGE,
     build_closed_message,
+    ensure_restaurant_config,
     extract_order_from_text,
     load_menu_from_base44,
     get_proposable_menu,
@@ -1788,6 +1790,23 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # Restaurant scope for this session (resolved at call time in voice_incoming)
     restaurant_id: str = conversation.restaurant_id or ""
+
+    # Senza configurazione del locale (orari, flag) non si può confermare nulla:
+    # meglio un messaggio di servizio che un ordine con dati sbagliati.
+    if not ensure_restaurant_config(restaurant_id):
+        print(f"[Chat] Configurazione assente per restaurant_id={restaurant_id!r} → servizio non disponibile")
+        _log_chat_timing(request.session_id, "restaurant_unavailable", request_started_at)
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order={},
+            merged_order={},
+            valid=False,
+            missing_items=[],
+            response_message=SERVICE_UNAVAILABLE_MESSAGE,
+            order_id=None,
+            state="unavailable",
+        )
 
     if not is_agent_active(restaurant_id=restaurant_id):
         print("[Chat] agent_active=False → rifiuto messaggio")
