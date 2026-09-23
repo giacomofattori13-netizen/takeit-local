@@ -23,6 +23,8 @@ from app.services.conversation_service import (
 )
 
 ROME = ZoneInfo("Europe/Rome")
+DAILY_RESET_ATTEMPTS_DEFAULT = 3
+DAILY_RESET_RETRY_DELAY_DEFAULT_SECONDS = 450.0  # 3 tentativi in 15 minuti
 
 
 def _truthy(value) -> bool:
@@ -102,13 +104,17 @@ def _invalidate_caches(restaurant_id: str) -> None:
     print(f"[DailyReset]   Cache invalidata per restaurant_id={restaurant_id!r}")
 
 
-def perform_daily_reset() -> list[str]:
-    """Esegue il reset e ritorna gli id dei locali falliti ([] = tutto ok)."""
+def perform_daily_reset() -> list[str] | None:
+    """Esegue il reset e ritorna gli id dei locali falliti ([] = tutto ok).
+    None se l'elenco dei ristoranti non è leggibile da Base44."""
     print("[DailyReset] Inizio reset giornaliero")
 
-    restaurants = base44_client.get_all_restaurants()
+    restaurants = base44_client.get_all_restaurants_or_none()
+    if restaurants is None:
+        print("[DailyReset] Elenco ristoranti Base44 non disponibile")
+        return None
     if not restaurants:
-        print("[DailyReset] Nessun ristorante trovato su Base44, skip")
+        print("[DailyReset] Nessun ristorante su Base44, nulla da fare")
         return []
 
     reenable_count = sum(1 for r in restaurants if is_daily_reset_enabled(r))
@@ -131,6 +137,34 @@ def perform_daily_reset() -> list[str]:
     else:
         print("[DailyReset] Reset completato")
     return failed
+
+
+def _positive_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def run_daily_reset_with_retries() -> bool:
+    """Esegue il reset riprovando se Base44 non risponde o una scrittura fallisce
+    (default 3 tentativi, uno ogni 7,5 minuti). True se un tentativo va a buon fine."""
+    attempts = int(_positive_env("DAILY_RESET_ATTEMPTS", DAILY_RESET_ATTEMPTS_DEFAULT))
+    delay = _positive_env("DAILY_RESET_RETRY_DELAY_SECONDS", DAILY_RESET_RETRY_DELAY_DEFAULT_SECONDS)
+    for attempt in range(1, attempts + 1):
+        try:
+            failed = perform_daily_reset()
+        except Exception as e:
+            print(f"[DailyReset] Errore inatteso: {type(e).__name__}: {e}")
+            failed = None
+        if failed == []:
+            return True
+        if attempt < attempts:
+            print(f"[DailyReset] Tentativo {attempt}/{attempts} non riuscito, nuovo tentativo tra {delay / 60:.1f} min")
+            time.sleep(delay)
+    print(f"[DailyReset] ERRORE: reset non riuscito dopo {attempts} tentativi")
+    return False
 
 
 def _reset_time() -> tuple[int, int]:
@@ -156,10 +190,7 @@ def _daily_reset_worker() -> None:
             f"(tra {sleep_seconds / 3600:.1f}h)"
         )
         time.sleep(max(sleep_seconds, 1))
-        try:
-            perform_daily_reset()
-        except Exception as e:
-            print(f"[DailyReset] Errore inatteso: {type(e).__name__}: {e}")
+        run_daily_reset_with_retries()
 
 
 def start_daily_reset_thread() -> None:

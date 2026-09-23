@@ -21,8 +21,12 @@ class FakeBase44:
         self.menu_writes: list[tuple[str, dict]] = []
         self.failing_restaurant_writes: set[str] = set()
         self.failing_menu_writes: set[str] = set()
+        self.restaurants_unavailable = 0  # quante letture dell'elenco falliscono
 
-    def get_all_restaurants(self, timeout=10.0):
+    def get_all_restaurants_or_none(self, timeout=10.0):
+        if self.restaurants_unavailable:
+            self.restaurants_unavailable -= 1
+            return None
         return [dict(r) for r in self.restaurants.values()]
 
     def get_menu_items(self, restaurant_id=None, timeout=10.0):
@@ -45,7 +49,7 @@ class FakeBase44:
     def patches(self):
         return [
             patch.object(daily_reset.base44_client, name, side_effect=getattr(self, name))
-            for name in ("get_all_restaurants", "get_menu_items", "update_restaurant", "update_menu_item")
+            for name in ("get_all_restaurants_or_none", "get_menu_items", "update_restaurant", "update_menu_item")
         ]
 
 
@@ -97,12 +101,12 @@ class DailyResetTestCase(unittest.TestCase):
         for p in self._patches:
             p.stop()
 
-    def _run(self, fake):
+    def _run(self, fake, runner=None):
         patches = fake.patches()
         for p in patches:
             p.start()
         try:
-            return daily_reset.perform_daily_reset()
+            return (runner or daily_reset.perform_daily_reset)()
         finally:
             for p in patches:
                 p.stop()
@@ -201,6 +205,65 @@ class DailyResetWriteFailureTests(DailyResetTestCase):
         fake = FakeBase44(_restaurants(), MENU)
 
         self.assertEqual(self._run(fake), [])
+
+
+class DailyResetRetryTests(DailyResetTestCase):
+    def setUp(self):
+        super().setUp()
+        self.sleeps: list[float] = []
+        p = patch.object(daily_reset.time, "sleep", side_effect=self.sleeps.append)
+        p.start()
+        self._patches.append(p)
+
+    def test_restaurant_list_unavailable_is_not_success(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.restaurants_unavailable = 1
+
+        self.assertIsNone(self._run(fake))
+
+    def test_retries_until_base44_answers(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.restaurants_unavailable = 2
+
+        ok = self._run(fake, daily_reset.run_daily_reset_with_retries)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.sleeps, [450.0, 450.0])
+        self.assertEqual(fake.restaurants[CDS_ID]["sold_out_ingredients"], [])
+
+    def test_three_attempts_within_fifteen_minutes_then_gives_up(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.restaurants_unavailable = 10
+
+        with patch("builtins.print") as printed:
+            ok = self._run(fake, daily_reset.run_daily_reset_with_retries)
+
+        self.assertFalse(ok)
+        self.assertEqual(len(self.sleeps), 2)
+        self.assertLessEqual(sum(self.sleeps), 15 * 60)
+        self.assertEqual(fake.restaurants_unavailable, 7)
+        logs = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertIn("non riuscito dopo 3 tentativi", logs)
+
+    def test_failed_write_is_retried(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.failing_menu_writes.add("m1")
+
+        def _heal(delay):
+            self.sleeps.append(delay)
+            fake.failing_menu_writes.clear()
+
+        with patch.object(daily_reset.time, "sleep", side_effect=_heal):
+            ok = self._run(fake, daily_reset.run_daily_reset_with_retries)
+
+        self.assertTrue(ok)
+        self.assertTrue(fake.menu_items["m1"]["available"])
+
+    def test_empty_restaurant_list_is_success_without_retry(self):
+        fake = FakeBase44([], MENU)
+
+        self.assertTrue(self._run(fake, daily_reset.run_daily_reset_with_retries))
+        self.assertEqual(self.sleeps, [])
 
 
 if __name__ == "__main__":
