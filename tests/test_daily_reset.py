@@ -1,3 +1,4 @@
+import datetime
 import unittest
 from unittest.mock import patch
 
@@ -264,6 +265,77 @@ class DailyResetRetryTests(DailyResetTestCase):
 
         self.assertTrue(self._run(fake, daily_reset.run_daily_reset_with_retries))
         self.assertEqual(self.sleeps, [])
+
+
+class DailyResetCatchUpTests(DailyResetTestCase):
+    TODAY = "2026-09-23"
+
+    def test_successful_reset_records_today_on_base44(self):
+        fake = FakeBase44(_restaurants(), MENU)
+
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+
+        self.assertEqual(fake.restaurants[PAP_ID]["last_daily_reset_date"], self.TODAY)
+        self.assertEqual(fake.restaurants[CDS_ID]["last_daily_reset_date"], self.TODAY)
+
+    def test_failed_reset_does_not_record_the_date(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.failing_menu_writes.add("m1")
+
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+
+        self.assertNotIn("last_daily_reset_date", fake.restaurants[PAP_ID])
+        self.assertEqual(fake.restaurants[PAP_ID]["sold_out_ingredients"], ["bufala"])
+
+    def test_restaurant_already_reset_today_is_skipped(self):
+        fake = FakeBase44(
+            _restaurants(pap={"last_daily_reset_date": self.TODAY}, cds={"last_daily_reset_date": "2026-09-22"}),
+            MENU,
+        )
+
+        failed = self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+
+        self.assertEqual(failed, [])
+        self.assertEqual([rid for rid, _ in fake.restaurant_writes], [CDS_ID])
+        self.assertEqual(fake.restaurants[PAP_ID]["sold_out_ingredients"], ["bufala"])
+        self.assertFalse(fake.menu_items["m1"]["available"])
+
+    def test_restart_after_reset_keeps_owner_sold_out_of_the_day(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+        # Il titolare segna un finito dopo il reset, poi il processo riparte
+        fake.restaurants[CDS_ID]["sold_out_ingredients"] = ["burrata"]
+        writes_before = len(fake.restaurant_writes)
+
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+
+        self.assertEqual(len(fake.restaurant_writes), writes_before)
+        self.assertEqual(fake.restaurants[CDS_ID]["sold_out_ingredients"], ["burrata"])
+
+    def test_next_day_resets_again(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today=self.TODAY))
+        fake.restaurants[CDS_ID]["sold_out_ingredients"] = ["burrata"]
+
+        self._run(fake, lambda: daily_reset.perform_daily_reset(today="2026-09-24"))
+
+        self.assertEqual(fake.restaurants[CDS_ID]["sold_out_ingredients"], [])
+
+    def _catch_up_at(self, hour, minute):
+        now = datetime.datetime(2026, 9, 23, hour, minute, tzinfo=daily_reset.ROME)
+        with (
+            patch.dict("os.environ", {"DAILY_RESET_HOUR": "11:00"}),
+            patch.object(daily_reset, "run_daily_reset_with_retries", return_value=True) as runner,
+        ):
+            started = daily_reset._catch_up_missed_reset(now)
+        return started, runner.call_count
+
+    def test_startup_after_reset_time_runs_catch_up(self):
+        self.assertEqual(self._catch_up_at(15, 30), (True, 1))
+        self.assertEqual(self._catch_up_at(11, 0), (True, 1))
+
+    def test_startup_before_reset_time_waits_for_schedule(self):
+        self.assertEqual(self._catch_up_at(10, 59), (False, 0))
 
 
 if __name__ == "__main__":
