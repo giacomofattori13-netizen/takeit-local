@@ -43,6 +43,7 @@ RESTAURANT_JSON_PATH = os.path.normpath(
 )
 
 _menu_cache: dict[str, list[dict]] = {}           # "" = default JSON file; restaurant_id = per-restaurant
+_menu_cache_ts: dict[str, float] = {}              # stesso keying di _menu_cache
 _dough_cache: list[dict] = []
 _dough_refresh_inflight = False
 _dough_refresh_lock = threading.Lock()
@@ -56,6 +57,7 @@ _system_prompt_cache: dict[str, str | None] = {}   # "" = default; restaurant_id
 _system_prompt_slim_cache: dict[str, dict[str, str]] = {}  # "" = default; restaurant_id → {state: prompt}
 
 RESTAURANT_CACHE_TTL = 600  # 10 minuti
+MENU_CACHE_TTL_DEFAULT_SECONDS = 600.0
 RESTAURANT_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 DOUGH_REFRESH_TIMEOUT_DEFAULT_SECONDS = 3.0
 CUSTOMER_LOOKUP_CACHE_TTL_DEFAULT_SECONDS = 300.0
@@ -125,6 +127,10 @@ def _customer_lookup_cache_max_items() -> int:
     )
 
 
+def _menu_cache_ttl_seconds() -> float:
+    return _positive_float_env("MENU_CACHE_TTL_SECONDS", MENU_CACHE_TTL_DEFAULT_SECONDS)
+
+
 def _restaurant_refresh_timeout_seconds() -> float:
     return _positive_float_env(
         "RESTAURANT_REFRESH_TIMEOUT_SECONDS",
@@ -136,10 +142,12 @@ def reset_menu_cache(restaurant_id: str | None = None) -> None:
     global _menu_cache, _system_prompt_cache, _system_prompt_slim_cache
     if restaurant_id is None:
         _menu_cache.clear()
+        _menu_cache_ts.clear()
         _system_prompt_cache.clear()
         _system_prompt_slim_cache.clear()
     else:
         _menu_cache.pop(restaurant_id, None)
+        _menu_cache_ts.pop(restaurant_id, None)
         _system_prompt_cache.pop(restaurant_id, None)
         _system_prompt_slim_cache.pop(restaurant_id, None)
 
@@ -252,85 +260,119 @@ _PIZZA_TYPE_TO_DOUGH: dict[str, str] = {
 }
 
 
-def load_menu_from_base44(restaurant_id: str = "") -> list[dict]:
-    """
-    Carica il menu.
-    - restaurant_id=="" → legge app/menu_data.json (comportamento legacy)
-    - restaurant_id!="" → fetcha da Base44 filtrando per restaurant_id;
-                          fallback al file JSON se Base44 non ritorna nulla.
-    """
-    global _menu_cache
+def _normalize_menu_item(item: dict, *, with_restaurant_id: bool) -> dict:
+    normalized = {
+        "name": item["name"],
+        "category": item.get("category", ""),
+        "dough_type": item.get("dough_type", "classica"),
+        "pizza_type": _DOUGH_TO_PIZZA_TYPE.get(
+            item.get("dough_type", "classica"), "Normale"
+        ),
+        "price": item.get("price", 0.0),
+        "available": item.get("available", True),
+        "ingredients": item.get("ingredients", []),
+        "sale_unit": item.get("sale_unit", "piece"),
+    }
+    if with_restaurant_id:
+        normalized["restaurant_id"] = item.get("restaurant_id")
+    return normalized
 
-    if restaurant_id in _menu_cache:
-        return _menu_cache[restaurant_id]
 
-    if restaurant_id:
-        # Fetch dal Base44 per questo ristorante specifico
-        try:
-            from app.services.base44_client import get_menu_items as _b44_get_menu_items
-            raw_items = _b44_get_menu_items(restaurant_id=restaurant_id)
-            if raw_items:
-                menu = [
-                    {
-                        "name": item["name"],
-                        "category": item.get("category", ""),
-                        "dough_type": item.get("dough_type", "classica"),
-                        "pizza_type": _DOUGH_TO_PIZZA_TYPE.get(
-                            item.get("dough_type", "classica"), "Normale"
-                        ),
-                        "price": item.get("price", 0.0),
-                        "available": item.get("available", True),
-                        "ingredients": item.get("ingredients", []),
-                        "sale_unit": item.get("sale_unit", "piece"),
-                        "restaurant_id": item.get("restaurant_id"),
-                    }
-                    for item in raw_items
-                    if item.get("available", True)
-                ]
-                _menu_cache[restaurant_id] = menu
-                first_names = [item["name"] for item in menu[:3]]
-                print(f"[Menu] Caricato da Base44: {len(menu)} voci (restaurant_id={restaurant_id!r})")
-                print(f"[Menu] Prime 3 voci: {first_names}")
-                return menu
-            print(f"[Menu] Base44 non ha restituito voci per restaurant_id={restaurant_id!r}, fallback a file")
-        except Exception as e:
-            print(f"[Menu] Errore fetch Base44 per restaurant_id={restaurant_id!r}: {type(e).__name__}: {e}")
-        # fallback al file
-
+def read_menu_file_raw() -> list[dict]:
+    """Legge app/menu_data.json così com'è (voci disponibili e non). [] se assente o non valido."""
     menu_path = os.path.normpath(MENU_JSON_PATH)
     try:
         with open(menu_path, encoding="utf-8") as f:
             raw = json.load(f)
-
-        menu = [
-            {
-                "name": item["name"],
-                "category": item.get("category", ""),
-                "dough_type": item.get("dough_type", "classica"),
-                "pizza_type": _DOUGH_TO_PIZZA_TYPE.get(
-                    item.get("dough_type", "classica"), "Normale"
-                ),
-                "price": item.get("price", 0.0),
-                "available": item.get("available", True),
-                "ingredients": item.get("ingredients", []),
-                "sale_unit": item.get("sale_unit", "piece"),
-            }
-            for item in raw
-            if item.get("available", True)
-        ]
-
-        _menu_cache[restaurant_id] = menu
-        first_names = [item["name"] for item in menu[:3]]
-        print(f"[Menu] Caricato da file: {len(menu)} voci ({menu_path})")
-        print(f"[Menu] Prime 3 voci: {first_names}")
-        return menu
-
     except FileNotFoundError:
         print(f"[Menu] File non trovato: {menu_path} — verrà usato il DB locale come fallback")
         return []
     except Exception as e:
         print(f"[Menu] Errore lettura menu_data.json: {type(e).__name__}: {e}")
         return []
+    if not isinstance(raw, list):
+        print(f"[Menu] menu_data.json non valido: {type(raw).__name__}")
+        return []
+    return [item for item in raw if isinstance(item, dict) and item.get("name")]
+
+
+def _load_menu_from_file(restaurant_id: str = "") -> list[dict]:
+    """Menu dal file locale. Con restaurant_id restituisce solo le voci di quel locale:
+    il file di un altro locale non viene mai usato."""
+    raw = read_menu_file_raw()
+    if restaurant_id:
+        raw = [item for item in raw if item.get("restaurant_id") == restaurant_id]
+    return [
+        _normalize_menu_item(item, with_restaurant_id=False)
+        for item in raw
+        if item.get("available", True)
+    ]
+
+
+def _store_menu_cache(restaurant_id: str, menu: list[dict]) -> None:
+    previous = _menu_cache.get(restaurant_id)
+    if previous is not None and previous != menu:
+        # Il prompt di sistema contiene il menu: va ricostruito se il menu è cambiato.
+        _system_prompt_cache.pop(restaurant_id, None)
+        _system_prompt_slim_cache.pop(restaurant_id, None)
+    _menu_cache[restaurant_id] = menu
+    _menu_cache_ts[restaurant_id] = time.monotonic()
+
+
+def load_menu_from_base44(restaurant_id: str = "") -> list[dict]:
+    """
+    Carica il menu.
+    - restaurant_id=="" → legge app/menu_data.json (comportamento legacy)
+    - restaurant_id!="" → fetcha da Base44 filtrando per restaurant_id.
+      Se Base44 non risponde: ultimo menu Base44 in cache (anche scaduto), altrimenti
+      le voci del file locale solo se appartengono a questo restaurant_id.
+
+    Cache con scadenza (MENU_CACHE_TTL_SECONDS). Risultati vuoti o di ripiego non
+    vengono mai salvati in cache, così il turno successivo riprova Base44.
+    """
+    cached = _menu_cache.get(restaurant_id)
+    cached_ts = _menu_cache_ts.get(restaurant_id, 0.0)
+    if cached is not None and (time.monotonic() - cached_ts) < _menu_cache_ttl_seconds():
+        return cached
+
+    if restaurant_id:
+        try:
+            from app.services.base44_client import get_menu_items as _b44_get_menu_items
+            raw_items = _b44_get_menu_items(restaurant_id=restaurant_id)
+            menu = [
+                _normalize_menu_item(item, with_restaurant_id=True)
+                for item in raw_items
+                if item.get("available", True)
+            ]
+            if menu:
+                _store_menu_cache(restaurant_id, menu)
+                first_names = [item["name"] for item in menu[:3]]
+                print(f"[Menu] Caricato da Base44: {len(menu)} voci (restaurant_id={restaurant_id!r})")
+                print(f"[Menu] Prime 3 voci: {first_names}")
+                return menu
+            print(f"[Menu] Base44 non ha restituito voci per restaurant_id={restaurant_id!r}")
+        except Exception as e:
+            print(f"[Menu] Errore fetch Base44 per restaurant_id={restaurant_id!r}: {type(e).__name__}: {e}")
+
+        if cached is not None:
+            print(f"[Menu] Uso menu Base44 scaduto per restaurant_id={restaurant_id!r} (non ricachato)")
+            return cached
+
+        menu = _load_menu_from_file(restaurant_id)
+        if menu:
+            print(f"[Menu] Ripiego su file: {len(menu)} voci per restaurant_id={restaurant_id!r} (non cachato)")
+        else:
+            print(f"[Menu] Nessun menu disponibile per restaurant_id={restaurant_id!r}")
+        return menu
+
+    menu = _load_menu_from_file()
+    if not menu:
+        return cached or []
+    _store_menu_cache("", menu)
+    first_names = [item["name"] for item in menu[:3]]
+    print(f"[Menu] Caricato da file: {len(menu)} voci ({os.path.normpath(MENU_JSON_PATH)})")
+    print(f"[Menu] Prime 3 voci: {first_names}")
+    return menu
 
 
 def _filter_doughs(raw: list[dict]) -> list[dict]:
