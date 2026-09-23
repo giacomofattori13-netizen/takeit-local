@@ -1162,6 +1162,62 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(sent.get("temperature"), "fredda")
         self.assertEqual(captured.get("pickup_date"), "2026-07-24")
 
+    def test_preorder_confirmation_question_names_tomorrow(self):
+        """Al-taglio order reaching awaiting_confirmation builds the 'per domani ...
+        Confermo?' question (regression: datetime/ZoneInfo were not imported)."""
+        import datetime
+        from unittest.mock import patch
+        from zoneinfo import ZoneInfo
+        from app.schemas import ChatRequest
+
+        engine = create_engine("sqlite://")
+        SQLModel.metadata.create_all(engine)
+        tomorrow = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date() + datetime.timedelta(days=1)
+        extracted = {
+            "intent": "add_items",
+            "customer_name": "Elena",
+            "pickup_time": "19:30",
+            "items": [{
+                "pizza_name": "Bufala al taglio",
+                "pizza_type": "Normale",
+                "dough_type": "classica",
+                "quantity": 0.5,
+                "size": "piena",
+                "temperature": "fredda",
+                "add_ingredients": [],
+                "remove_ingredients": [],
+            }],
+        }
+
+        with (
+            patch.object(chat_module, "is_agent_active", return_value=True),
+            patch.object(chat_module, "is_reservations_enabled", return_value=False),
+            patch.object(chat_module, "get_next_open_day", return_value=(tomorrow, "giovedì")),
+            patch.object(chat_module, "get_proposable_menu", return_value=[{"name": "Bufala al taglio"}]),
+            patch.object(chat_module, "get_sold_out_item_names", return_value=set()),
+            patch.object(chat_module, "validate_pickup_time", return_value=(True, None, None)),
+            patch.object(chat_module, "detect_reservation_intent", return_value=False),
+            patch.object(chat_module, "extract_order_from_text", return_value=extracted),
+            Session(engine) as session,
+        ):
+            session.add(MenuItem(
+                name="Bufala al taglio", category="rosse", pizza_type="Normale",
+                price=18.50, sale_unit="kg",
+            ))
+            session.add(ConversationSession(
+                session_id="preorder-confirm", items_json="[]", state="collecting_items", completed=False,
+            ))
+            session.commit()
+
+            response = chat_module.chat(
+                ChatRequest(session_id="preorder-confirm", message="mezzo chilo di bufala, Elena, 19:30"),
+                session,
+            )
+
+        self.assertEqual(response.state, "awaiting_confirmation")
+        self.assertIn("per domani giovedì alle 19:30", response.response_message)
+        self.assertIn("Confermo?", response.response_message)
+
 
 if __name__ == "__main__":
     unittest.main()
