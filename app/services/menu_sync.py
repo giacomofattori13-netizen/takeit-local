@@ -1,8 +1,12 @@
-from sqlmodel import Session, delete
+from sqlmodel import Session, delete, func, select
 
 from app.db import engine
 from app.models import MenuItem
 from app.services.conversation_service import load_menu_from_base44, read_menu_file_raw, reset_menu_cache
+
+# Un menu che scende sotto questa frazione delle righe già presenti è sospetto
+# (risposta Base44 parziale): le righe attuali vengono mantenute.
+MIN_MENU_RATIO = 0.5
 
 
 def _restaurant_ids_to_sync() -> list[str]:
@@ -21,13 +25,21 @@ def _restaurant_ids_to_sync() -> list[str]:
     return ids
 
 
+def _existing_row_count(restaurant_id: str) -> int:
+    with Session(engine) as session:
+        return session.exec(
+            select(func.count()).select_from(MenuItem).where(MenuItem.restaurant_id == restaurant_id)
+        ).one()
+
+
 def sync_menu_to_db() -> int:
     """
     Risincronizza la tabella MenuItem con il menu di ogni ristorante, salvando
     restaurant_id su ogni riga (i prezzi del locale X non vengono mai usati per Y).
 
-    Per ogni locale le righe vengono sostituite solo se il suo menu non è vuoto:
-    un errore transitorio di Base44 non cancella i prezzi già presenti.
+    Per ogni locale le righe vengono sostituite solo se il suo menu non è vuoto e
+    ha almeno il 50% delle righe già nel DB per quel locale: un errore o una
+    risposta parziale di Base44 non cancella i prezzi già presenti.
     Le righe legacy senza restaurant_id vengono rimosse appena almeno un locale
     è sincronizzato. Invalida prima la cache in-memory. Ritorna le voci inserite.
     """
@@ -35,10 +47,17 @@ def sync_menu_to_db() -> int:
     menus: dict[str, list[dict]] = {}
     for rid in _restaurant_ids_to_sync():
         menu = load_menu_from_base44(restaurant_id=rid)
-        if menu:
-            menus[rid] = menu
-        else:
+        if not menu:
             print(f"[MenuSync] Menu vuoto per restaurant_id={rid!r}, righe esistenti invariate")
+            continue
+        existing = _existing_row_count(rid)
+        if len(menu) < existing * MIN_MENU_RATIO:
+            print(
+                f"[MenuSync] WARNING: menu sospetto per restaurant_id={rid!r}: {len(menu)} voci "
+                f"contro {existing} nel DB (< {MIN_MENU_RATIO:.0%}), righe esistenti invariate"
+            )
+            continue
+        menus[rid] = menu
 
     if not menus:
         print("[MenuSync] Nessun menu disponibile, DB non aggiornato")

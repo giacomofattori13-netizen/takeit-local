@@ -122,6 +122,39 @@ class SyncMenuPerRestaurantTests(_DbTestCase):
         self.assertEqual(synced, 0)
         self.assertEqual(len(self._rows()), 5)
 
+    def test_partial_menu_below_half_keeps_existing_rows_and_warns(self):
+        self._sync()  # PaP: 3 righe nel DB
+
+        def _pap_partial(restaurant_id=None, timeout=10.0):
+            items = _menu_for(restaurant_id)
+            return items[:1] if restaurant_id == PAP_ID else items  # 1 su 3 (< 50%)
+
+        with patch("builtins.print") as printed:
+            self._sync(menu=_pap_partial)
+
+        pap_rows = [r for r in self._rows() if r.restaurant_id == PAP_ID]
+        self.assertEqual(sorted(r.name for r in pap_rows), ["Bufala al taglio", "Margherita", "Supplì"])
+        logs = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertIn("WARNING", logs)
+        self.assertIn(PAP_ID, logs)
+
+    def test_menu_at_half_of_existing_rows_is_replaced(self):
+        self._sync()  # PaP: 3 righe nel DB
+
+        def _pap_shrunk(restaurant_id=None, timeout=10.0):
+            items = _menu_for(restaurant_id)
+            return items[:2] if restaurant_id == PAP_ID else items
+
+        self._sync(menu=_pap_shrunk)
+
+        pap_rows = [r for r in self._rows() if r.restaurant_id == PAP_ID]
+        self.assertEqual(len(pap_rows), 2)
+
+    def test_new_restaurant_without_rows_is_always_synced(self):
+        synced = self._sync(restaurants=(CDS,))
+
+        self.assertEqual(synced, 2)
+
     def test_base44_down_syncs_restaurants_from_local_file(self):
         file_items = [i for i in BASE44_MENU if i["restaurant_id"] == PAP_ID]
 
