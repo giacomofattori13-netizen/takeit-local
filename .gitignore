@@ -1,1 +1,8 @@
 .env
+takeit.db
+takeit.db-shm
+takeit.db-wal
+.DS_Store
+__pycache__/
+*.pyc
+.claude/
