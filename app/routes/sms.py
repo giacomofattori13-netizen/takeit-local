@@ -249,6 +249,15 @@ async def sms_incoming(
     _restaurant, restaurant_id, _match_method = await asyncio.to_thread(_resolve, To)
     print(f"[SMS] To={To!r} → restaurant_id={restaurant_id!r} match={_match_method!r}")
 
+    # Senza ristorante risolto il comando finirebbe sul locale sbagliato: non applicarlo
+    if _match_method == "unavailable":
+        print(f"[SMS] Ristorante non risolto per To={To!r}: comando non applicato")
+        _send_reply(
+            From,
+            "Servizio momentaneamente non disponibile: comando non applicato. Riprova tra qualche minuto.",
+        )
+        return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
+
     print(f"[SMS] Comando titolare: {command_text!r}")
 
     from app.services.base44_client import create_owner_command, update_owner_command

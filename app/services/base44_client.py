@@ -52,18 +52,26 @@ def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> l
         return []
 
 
-def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
-    """Fetch all Restaurant entities from Base44."""
+def get_all_restaurants_or_none(timeout: float = 10.0) -> list[dict] | None:
+    """Fetch all Restaurant entities from Base44.
+
+    Distingue "Base44 non raggiungibile" (None) da "nessun ristorante" ([]):
+    None se manca la chiave, la richiesta fallisce o la risposta non è una lista.
+    """
     api_key = os.getenv("BASE44_API_KEY", "")
     if not api_key:
         print("[Base44] get_all_restaurants: BASE44_API_KEY mancante")
-        return []
+        return None
     try:
         resp = httpx.get(f"{_BASE}/Restaurant", params={"api_key": api_key}, timeout=timeout)
         resp.raise_for_status()
         body = resp.json()
         print(f"[Base44] get_all_restaurants Body type={type(body).__name__} preview={str(body)[:300]!r}")
-        restaurants = _parse_entities(body)
+        entities = body.get("entities", body) if isinstance(body, dict) else body
+        if not isinstance(entities, list):
+            print(f"[Base44] get_all_restaurants: risposta non valida ({type(entities).__name__})")
+            return None
+        restaurants = [r for r in entities if isinstance(r, dict)]
         if len(restaurants) == 0:
             print("[Base44] 0 ristoranti da Base44")
         else:
@@ -71,7 +79,12 @@ def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
         return restaurants
     except Exception as e:
         print(f"[Base44] get_all_restaurants error: {type(e).__name__}: {_mask_key(e)}")
-        return []
+        return None
+
+
+def get_all_restaurants(timeout: float = 10.0) -> list[dict]:
+    """Fetch all Restaurant entities from Base44 ([] on any error)."""
+    return get_all_restaurants_or_none(timeout=timeout) or []
 
 
 def _normalize_e164(s: str) -> str:
@@ -91,45 +104,48 @@ def _normalize_e164(s: str) -> str:
     return cleaned
 
 
-def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
-    """Find a Restaurant whose agent_phone matches the given phone number.
+def match_restaurant_by_phone(phone: str, restaurants: list[dict]) -> dict | None:
+    """Find the Restaurant in `restaurants` whose agent_phone matches `phone`.
 
     Normalizes both sides to E.164 (digits + optional leading '+') and tries:
     1. Exact match on the normalized string.
     2. 10-digit suffix match to handle country-code prefix differences.
     Logs every candidate so mismatches are visible in Railway logs.
     """
-    if not os.getenv("BASE44_API_KEY"):
-        print("[Base44] get_restaurant_by_phone: BASE44_API_KEY mancante")
+    needle = _normalize_e164(phone)
+    needle_digits = re.sub(r"\D", "", needle)
+    if not needle_digits:
+        print(f"[Base44] Phone lookup: To={phone!r} vuoto, nessun match")
         return None
-    try:
-        restaurants = get_all_restaurants(timeout=timeout)
-        needle = _normalize_e164(phone)
-        needle_digits = re.sub(r"\D", "", needle)
-        needle_suffix = needle_digits[-10:] if len(needle_digits) >= 10 else needle_digits
+    needle_suffix = needle_digits[-10:] if len(needle_digits) >= 10 else needle_digits
+    print(
+        f"[Base44] Phone lookup: To={phone!r} → norm={needle!r} suffix10={needle_suffix!r}"
+        f", candidati={len(restaurants)}"
+    )
+    for r in restaurants:
+        raw = r.get("agent_phone") or ""
+        r_norm = _normalize_e164(raw)
+        r_digits = re.sub(r"\D", "", r_norm)
+        r_suffix = r_digits[-10:] if len(r_digits) >= 10 else r_digits
+        exact = bool(r_digits) and needle == r_norm
+        sfx = bool(needle_suffix and r_suffix and needle_suffix == r_suffix)
         print(
-            f"[Base44] Phone lookup: To={phone!r} → norm={needle!r} suffix10={needle_suffix!r}"
-            f", candidati={len(restaurants)}"
+            f"[Base44]   id={r.get('id')!r} agent_phone={raw!r}"
+            f" norm={r_norm!r} exact={exact} suffix10={sfx}"
         )
-        for r in restaurants:
-            raw = r.get("agent_phone") or ""
-            r_norm = _normalize_e164(raw)
-            r_digits = re.sub(r"\D", "", r_norm)
-            r_suffix = r_digits[-10:] if len(r_digits) >= 10 else r_digits
-            exact = needle == r_norm
-            sfx = bool(needle_suffix and r_suffix and needle_suffix == r_suffix)
-            print(
-                f"[Base44]   id={r.get('id')!r} agent_phone={raw!r}"
-                f" norm={r_norm!r} exact={exact} suffix10={sfx}"
-            )
-            if exact or sfx:
-                print(f"[Base44] Match trovato id={r.get('id')!r} per To={phone!r}")
-                return r
-        print(f"[Base44] Nessun match per To={phone!r}")
+        if exact or sfx:
+            print(f"[Base44] Match trovato id={r.get('id')!r} per To={phone!r}")
+            return r
+    print(f"[Base44] Nessun match per To={phone!r}")
+    return None
+
+
+def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
+    """Fetch all restaurants and return the one whose agent_phone matches `phone`."""
+    restaurants = get_all_restaurants_or_none(timeout=timeout)
+    if not restaurants:
         return None
-    except Exception as e:
-        print(f"[Base44] get_restaurant_by_phone error: {type(e).__name__}: {_mask_key(e)}")
-        return None
+    return match_restaurant_by_phone(phone, restaurants)
 
 
 def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | None:

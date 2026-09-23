@@ -1010,22 +1010,29 @@ def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str, str]:
     """Find the Restaurant whose agent_phone matches to_number (the Twilio To field).
 
     Returns (restaurant_dict, restaurant_id_str, match_method) where match_method is
-    one of: "agent_phone" | "default_restaurant_id" | "global_fallback".
-    Falls back to DEFAULT_RESTAURANT_ID env, then empty-string default.
-    Never raises — always returns a usable triple.
+    one of: "agent_phone" | "default_restaurant_id" | "unavailable".
+
+    Senza corrispondenza su agent_phone non si carica mai il file locale di un altro
+    locale. DEFAULT_RESTAURANT_ID si usa solo se Base44 conferma che esiste un solo
+    locale attivo; in ogni altro caso ritorna ({}, "", "unavailable") e il chiamante
+    risponde con un messaggio di servizio non disponibile.
+    Never raises.
     """
-    from app.services.base44_client import get_restaurant_by_phone as _b44_by_phone
+    from app.services.base44_client import get_all_restaurants_or_none as _b44_all
+    from app.services.base44_client import match_restaurant_by_phone as _b44_match
 
     to_clean = to_number.strip()
 
-    # 1. Match by agent_phone
-    if to_clean:
-        try:
-            matched = _b44_by_phone(to_clean)
-        except Exception as exc:
-            print(f"[Restaurant] Errore risoluzione per To={to_clean!r}: {type(exc).__name__}: {exc}")
-            matched = None
+    restaurants: list[dict] | None
+    try:
+        restaurants = _b44_all()
+    except Exception as exc:
+        print(f"[Restaurant] Errore lettura ristoranti per To={to_clean!r}: {type(exc).__name__}: {exc}")
+        restaurants = None
 
+    # 1. Match by agent_phone
+    if to_clean and restaurants:
+        matched = _b44_match(to_clean, restaurants)
         if matched:
             rid = matched.get("id", "")
             print(f"[Restaurant] To={to_clean!r} → restaurant_id={rid!r} (match=agent_phone)")
@@ -1034,21 +1041,39 @@ def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str, str]:
 
     print(f"[Restaurant] To={to_clean!r} → nessun match agent_phone")
 
-    # 2. Fallback: DEFAULT_RESTAURANT_ID env
+    # 2. DEFAULT_RESTAURANT_ID solo con un unico locale attivo (verificato su Base44)
     default_id = os.getenv("DEFAULT_RESTAURANT_ID", "").strip()
     if default_id:
-        restaurant = load_restaurant(restaurant_id=default_id)
-        if not restaurant:
-            print(f"[Restaurant] Cache vuota per default_id={default_id!r}, fetch sincrono via get_restaurant_by_id")
-            restaurant = _refresh_restaurant_cache_blocking(default_id) or {}
-        if restaurant:
+        active = [r for r in (restaurants or []) if _is_truthy_flag(r.get("agent_active"), default=True)]
+        if restaurants is None:
+            print("[Restaurant] DEFAULT_RESTAURANT_ID ignorato: elenco ristoranti Base44 non disponibile")
+        elif len(active) != 1:
+            print(f"[Restaurant] DEFAULT_RESTAURANT_ID ignorato: {len(active)} locali attivi")
+        elif active[0].get("id") != default_id:
+            print(f"[Restaurant] DEFAULT_RESTAURANT_ID={default_id!r} non corrisponde all'unico locale attivo")
+        else:
+            restaurant = active[0]
+            _cache_restaurant_data(restaurant, "default_restaurant_id", default_id)
             print(f"[Restaurant] To={to_clean!r} → restaurant_id={default_id!r} (match=default_restaurant_id)")
             return restaurant, default_id, "default_restaurant_id"
-        print(f"[Restaurant] DEFAULT_RESTAURANT_ID={default_id!r} non trovato in cache/Base44")
 
-    # 3. Last resort: empty-string default (existing global behaviour)
-    print(f"[Restaurant] To={to_clean!r} → nessun ristorante risolto (match=global_fallback)")
-    return load_restaurant(""), "", "global_fallback"
+    print(f"[Restaurant] To={to_clean!r} → nessun ristorante risolto (match=unavailable)")
+    return {}, "", "unavailable"
+
+
+def _is_truthy_flag(value: Any, default: bool) -> bool:
+    """Interpreta un flag Base44 (bool o stringa); None/assente → default."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.lower() not in ("false", "0", "no")
+    return bool(value)
+
+
+SERVICE_UNAVAILABLE_MESSAGE = (
+    "Mi scusi, in questo momento il servizio non è disponibile. "
+    "La preghiamo di richiamare tra qualche minuto."
+)
 
 
 _GREETING_PATTERN = re.compile(r"buon pomeriggio|buonasera|buongiorno", re.IGNORECASE)
@@ -1095,7 +1120,7 @@ def get_agent_greeting(restaurant_id: str = "") -> str:
         return result
 
     # 3. Fallback di emergenza
-    result = _apply_time_greeting("Pizzeria Corte Del Sole, buonasera. Come posso aiutarla?")
+    result = _apply_time_greeting("Buonasera, come posso aiutarla?")
     print(f"[Agent] Saluto: {result!r} (fonte: fallback hardcoded)")
     return result
 

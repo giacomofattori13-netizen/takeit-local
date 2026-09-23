@@ -23,6 +23,7 @@ from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
 from app.telemetry import record_latency
 from app.services.conversation_service import (
+    SERVICE_UNAVAILABLE_MESSAGE,
     build_closed_message,
     get_agent_greeting,
     is_agent_active,
@@ -1064,6 +1065,25 @@ async def voice_incoming(
     # Risolvi il ristorante dal numero chiamato (To)
     _restaurant, restaurant_id, _match_method = await asyncio.to_thread(resolve_restaurant_from_phone, To)
     print(f"[Voice] Chiamata: To={To!r} → restaurant_id={restaurant_id!r} match={_match_method!r}")
+
+    # Nessun ristorante risolvibile: mai rispondere con i dati di un altro locale
+    if _match_method == "unavailable":
+        print("[Voice] Ristorante non risolto → messaggio di servizio non disponibile")
+        unavailable_audio = await _audio_element_async(SERVICE_UNAVAILABLE_MESSAGE)
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {unavailable_audio}\n"
+            "  <Hangup/>\n"
+            "</Response>"
+        )
+        record_latency(
+            "voice",
+            "incoming",
+            (time.perf_counter() - started) * 1000,
+            result="unavailable",
+        )
+        return Response(content=twiml, media_type="application/xml")
 
     # Controlla agent_active prima di qualsiasi altra operazione
     if not is_agent_active(restaurant_id=restaurant_id):
