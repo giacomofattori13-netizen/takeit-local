@@ -166,7 +166,7 @@ def on_startup():
 
     synced = sync_menu_to_db()
     if synced:
-        print(f"[Startup] DB sincronizzato: {synced} voci da menu_data.json")
+        print(f"[Startup] DB sincronizzato: {synced} voci (menu per ristorante)")
     else:
         print("[Startup] ATTENZIONE: menu vuoto, DB non sincronizzato")
 

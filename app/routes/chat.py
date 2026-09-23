@@ -887,6 +887,15 @@ def _log_chat_timing(
     print(f"[Latency] chat path={path} session={session_id} elapsed_ms={elapsed_ms}{suffix}")
 
 
+def _menu_select(restaurant_id: str, *conditions):
+    """select(MenuItem) limitato alle voci del locale; senza restaurant_id (flusso
+    legacy) nessun filtro. Evita che nomi uguali prendano prezzo/unità di un altro locale."""
+    statement = select(MenuItem).where(*conditions)
+    if restaurant_id:
+        statement = statement.where(MenuItem.restaurant_id == restaurant_id)
+    return statement
+
+
 def enrich_items_with_pricing(
     session: Session,
     items: list[dict[str, Any]],
@@ -894,7 +903,7 @@ def enrich_items_with_pricing(
 ) -> tuple[list[dict[str, Any]], float]:
     """Aggiunge base/extras/total price agli item usando una sola logica condivisa."""
     margherita = session.exec(
-        select(MenuItem).where(MenuItem.name == "Margherita")
+        _menu_select(restaurant_id, MenuItem.name == "Margherita")
     ).first()
     base_personalizzata = round(margherita.price, 2) if margherita else 0.0
 
@@ -912,14 +921,15 @@ def enrich_items_with_pricing(
             item_sale_unit = "piece"
         else:
             menu_item = session.exec(
-                select(MenuItem).where(
+                _menu_select(
+                    restaurant_id,
                     MenuItem.name == item["pizza_name"],
                     MenuItem.pizza_type == item["pizza_type"],
                 )
             ).first()
             if not menu_item:
                 menu_item = session.exec(
-                    select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                    _menu_select(restaurant_id, MenuItem.name == item["pizza_name"])
                 ).first()
             base_price = round(menu_item.price, 2) if menu_item else 0.0
             item_sale_unit = getattr(menu_item, "sale_unit", "piece") if menu_item else "piece"
@@ -1647,7 +1657,9 @@ def _persist_order_once(
         # sale_unit: read from item dict (set during extraction) or fallback to DB
         _item_sale_unit = item.get("sale_unit")
         if not _item_sale_unit:
-            _mi = session.exec(select(MenuItem).where(MenuItem.name == item["pizza_name"])).first()
+            _mi = session.exec(
+                _menu_select(conversation.restaurant_id or "", MenuItem.name == item["pizza_name"])
+            ).first()
             _item_sale_unit = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
         _kg_size = item.get("size") if _item_sale_unit == "kg" else None
         _portion = _kg_size if _kg_size in ("piena", "mezza") else None
@@ -2540,9 +2552,10 @@ def chat(request: ChatRequest, session: SessionDep):
             added = []
             for pizza_name in fav_list:
                 menu_item = session.exec(
-                    select(MenuItem).where(
+                    _menu_select(
+                        restaurant_id,
                         MenuItem.name == pizza_name,
-                        MenuItem.available == True,
+                        MenuItem.available == True,  # noqa: E712
                     )
                 ).first()
                 if menu_item and not any(ei["pizza_name"] == pizza_name for ei in existing_items + added):
@@ -2770,7 +2783,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
     if not menu_items_for_llm:
         print("[Chat] Fallback al DB locale")
-        db_menu_items = session.exec(select(MenuItem)).all()
+        db_menu_items = session.exec(_menu_select(restaurant_id)).all()
         menu_items_for_llm = [
             {
                 "name": item.name,
@@ -2841,7 +2854,7 @@ def chat(request: ChatRequest, session: SessionDep):
         # Lookup sale_unit from DB so it's available throughout the conversation
         if item.get("pizza_name") and item["pizza_name"] != "Personalizzata":
             _mi = session.exec(
-                select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                _menu_select(restaurant_id, MenuItem.name == item["pizza_name"])
             ).first()
             item["sale_unit"] = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
         else:
@@ -3003,7 +3016,8 @@ def chat(request: ChatRequest, session: SessionDep):
             continue
 
         menu_item = session.exec(
-            select(MenuItem).where(
+            _menu_select(
+                restaurant_id,
                 MenuItem.name == item["pizza_name"],
                 MenuItem.pizza_type == item["pizza_type"],
             )
@@ -3013,7 +3027,7 @@ def chat(request: ChatRequest, session: SessionDep):
         # specifico, cerca per solo nome — se esiste la pizza è valida.
         if not menu_item:
             menu_item = session.exec(
-                select(MenuItem).where(MenuItem.name == item["pizza_name"])
+                _menu_select(restaurant_id, MenuItem.name == item["pizza_name"])
             ).first()
             if menu_item:
                 item["pizza_type"] = menu_item.pizza_type
