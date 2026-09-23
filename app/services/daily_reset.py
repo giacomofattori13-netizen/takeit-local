@@ -43,7 +43,9 @@ def is_daily_reset_enabled(restaurant: dict) -> bool:
     return _truthy(value)
 
 
-def _reset_restaurant(restaurant: dict) -> None:
+def _reset_restaurant(restaurant: dict) -> bool:
+    """Resetta un locale. False se una scrittura su Base44 fallisce: in quel caso
+    il DB locale non viene toccato e il chiamante non invalida le cache."""
     rid = restaurant.get("id", "")
     name = restaurant.get("name") or rid
     reenable = is_daily_reset_enabled(restaurant)
@@ -52,19 +54,29 @@ def _reset_restaurant(restaurant: dict) -> None:
     # 1. Svuota sold_out_ingredients (tutti i locali)
     sold_out = restaurant.get("sold_out_ingredients") or []
     if sold_out:
-        base44_client.update_restaurant({"sold_out_ingredients": []}, restaurant_id=rid)
+        if base44_client.update_restaurant({"sold_out_ingredients": []}, restaurant_id=rid) is None:
+            print(f"[DailyReset]   ERRORE: sold_out non svuotati su Base44 per {name!r}")
+            return False
         print(f"[DailyReset]   sold_out resettati: {sold_out}")
     else:
         print("[DailyReset]   Nessun ingrediente finito")
 
     if not reenable:
-        return
+        return True
 
     # 2. Riabilita MenuItem su Base44 (solo quelli di questo ristorante)
     b44_items = base44_client.get_menu_items(restaurant_id=rid)
     disabled = [i for i in b44_items if not i.get("available", True)]
-    for item in disabled:
-        base44_client.update_menu_item(str(item["id"]), {"available": True})
+    failed = [
+        item for item in disabled
+        if base44_client.update_menu_item(str(item["id"]), {"available": True}) is None
+    ]
+    if failed:
+        print(
+            f"[DailyReset]   ERRORE: {len(failed)}/{len(disabled)} MenuItem non riabilitati su Base44 "
+            f"per {name!r}: {[i.get('name') for i in failed]}"
+        )
+        return False
     if disabled:
         print(f"[DailyReset]   {len(disabled)} MenuItem riabilitati su Base44")
 
@@ -80,6 +92,7 @@ def _reset_restaurant(restaurant: dict) -> None:
         db.commit()
         if changed:
             print(f"[DailyReset]   {changed} voci DB riabilitate")
+    return True
 
 
 def _invalidate_caches(restaurant_id: str) -> None:
@@ -89,13 +102,14 @@ def _invalidate_caches(restaurant_id: str) -> None:
     print(f"[DailyReset]   Cache invalidata per restaurant_id={restaurant_id!r}")
 
 
-def perform_daily_reset() -> None:
+def perform_daily_reset() -> list[str]:
+    """Esegue il reset e ritorna gli id dei locali falliti ([] = tutto ok)."""
     print("[DailyReset] Inizio reset giornaliero")
 
     restaurants = base44_client.get_all_restaurants()
     if not restaurants:
         print("[DailyReset] Nessun ristorante trovato su Base44, skip")
-        return
+        return []
 
     reenable_count = sum(1 for r in restaurants if is_daily_reset_enabled(r))
     print(
@@ -103,14 +117,20 @@ def perform_daily_reset() -> None:
         f"menu riattivato per {reenable_count}"
     )
 
-    for restaurant in restaurants:
-        _reset_restaurant(restaurant)
+    failed = [r.get("id", "") for r in restaurants if not _reset_restaurant(r)]
 
-    # Cache di menu e ristorante invalidate per tutti i locali
+    # Cache di menu e ristorante invalidate per tutti i locali, tranne quelli
+    # in cui le scritture su Base44 sono fallite
     for restaurant in restaurants:
-        _invalidate_caches(restaurant.get("id", ""))
+        rid = restaurant.get("id", "")
+        if rid not in failed:
+            _invalidate_caches(rid)
 
-    print("[DailyReset] Reset completato")
+    if failed:
+        print(f"[DailyReset] Reset incompleto: scritture Base44 fallite per {failed}")
+    else:
+        print("[DailyReset] Reset completato")
+    return failed
 
 
 def _reset_time() -> tuple[int, int]:

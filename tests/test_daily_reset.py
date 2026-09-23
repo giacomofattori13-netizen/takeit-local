@@ -19,6 +19,8 @@ class FakeBase44:
         self.menu_items = {i["id"]: dict(i) for i in menu_items}
         self.restaurant_writes: list[tuple[str, dict]] = []
         self.menu_writes: list[tuple[str, dict]] = []
+        self.failing_restaurant_writes: set[str] = set()
+        self.failing_menu_writes: set[str] = set()
 
     def get_all_restaurants(self, timeout=10.0):
         return [dict(r) for r in self.restaurants.values()]
@@ -28,11 +30,15 @@ class FakeBase44:
 
     def update_restaurant(self, patch_, restaurant_id=None, timeout=10.0):
         self.restaurant_writes.append((restaurant_id, patch_))
+        if restaurant_id in self.failing_restaurant_writes:
+            return None
         self.restaurants[restaurant_id].update(patch_)
         return dict(self.restaurants[restaurant_id])
 
     def update_menu_item(self, item_id, patch_, timeout=10.0):
         self.menu_writes.append((item_id, patch_))
+        if item_id in self.failing_menu_writes:
+            return None
         self.menu_items[item_id].update(patch_)
         return dict(self.menu_items[item_id])
 
@@ -164,6 +170,37 @@ class PerformDailyResetTests(DailyResetTestCase):
             (CDS_ID, "Diavola"): False,
             (None, "Legacy"): False,
         })
+
+
+class DailyResetWriteFailureTests(DailyResetTestCase):
+    def test_failed_sold_out_write_skips_cache_and_success_log_for_that_restaurant(self):
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.failing_restaurant_writes.add(CDS_ID)
+
+        with patch("builtins.print") as printed:
+            failed = self._run(fake)
+
+        self.assertEqual(failed, [CDS_ID])
+        self.assertEqual(self.invalidated, [PAP_ID])
+        logs = " ".join(str(c.args[0]) for c in printed.call_args_list if c.args)
+        self.assertNotIn("Reset completato", logs)
+        self.assertIn("Reset incompleto", logs)
+
+    def test_failed_menu_item_write_leaves_local_db_and_cache_untouched(self):
+        self._add_db_rows([("Bufala al taglio", PAP_ID, False)])
+        fake = FakeBase44(_restaurants(), MENU)
+        fake.failing_menu_writes.add("m1")
+
+        failed = self._run(fake)
+
+        self.assertEqual(failed, [PAP_ID])
+        self.assertEqual(self._db_available(), {(PAP_ID, "Bufala al taglio"): False})
+        self.assertEqual(self.invalidated, [CDS_ID])
+
+    def test_all_writes_ok_returns_no_failures(self):
+        fake = FakeBase44(_restaurants(), MENU)
+
+        self.assertEqual(self._run(fake), [])
 
 
 if __name__ == "__main__":
