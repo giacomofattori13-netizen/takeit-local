@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -69,6 +70,7 @@ class OwnerCommandEndpointTests(unittest.TestCase):
                         "ingredients": ["pomodoro", "mozzarella"],
                         "dough_type": "classica",
                         "available": True,
+                        "restaurant_id": "rest-pap",
                     }
                 ],
                 f,
@@ -76,8 +78,21 @@ class OwnerCommandEndpointTests(unittest.TestCase):
 
         owner_command_module.MENU_JSON_PATH = self.menu_path
         owner_command_module.sync_menu_to_db = lambda: 1
+        self._patches = [
+            patch.object(owner_command_module, "read_menu_file_raw", return_value=[{"name": "Margherita", "restaurant_id": "rest-pap"}]),
+            patch.object(
+                owner_command_module.base44_client,
+                "get_menu_items",
+                return_value=[{"id": "m1", "name": "Margherita", "ingredients": ["pomodoro", "mozzarella"],
+                               "dough_type": "classica", "available": True, "restaurant_id": "rest-pap"}],
+            ),
+        ]
+        for p in self._patches:
+            p.start()
 
     def tearDown(self):
+        for p in self._patches:
+            p.stop()
         if self.previous_admin_key is None:
             os.environ.pop("ADMIN_API_KEY", None)
         else:

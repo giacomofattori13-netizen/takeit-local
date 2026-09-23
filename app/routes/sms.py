@@ -75,10 +75,13 @@ def _interpret_command(command_text: str) -> dict:
 # ── Action handlers ───────────────────────────────────────────────────────────
 
 def _get_restaurant_for_action(restaurant_id: str) -> dict | None:
-    """Fetch the restaurant dict for the given id, using cache or Base44."""
+    """Fetch the restaurant dict for the given id from Base44.
+
+    Con restaurant_id non si ripiega mai sul primo locale: il comando finirebbe
+    sul locale sbagliato."""
     from app.services.base44_client import get_restaurant, get_restaurant_by_id
     if restaurant_id:
-        return get_restaurant_by_id(restaurant_id) or get_restaurant()
+        return get_restaurant_by_id(restaurant_id)
     return get_restaurant()
 
 
@@ -162,12 +165,20 @@ def _toggle_item(item_name: str, *, available: bool, restaurant_id: str = "") ->
     if not matches:
         return f"Nessun piatto trovato con nome '{item_name}'."
 
-    for item in matches:
-        update_menu_item(str(item["id"]), {"available": available})
+    failed = [
+        item for item in matches
+        if update_menu_item(str(item["id"]), {"available": available}) is None
+    ]
+    if failed:
+        reset_menu_cache(restaurant_id=restaurant_id)
+        return f"Errore aggiornamento Base44 per '{item_name}': {len(failed)}/{len(matches)} varianti non aggiornate."
 
-    # Update local DB
+    # Update local DB (solo le righe di questo locale)
     with Session(engine) as db:
-        db_items = db.exec(select(DBMenuItem)).all()
+        statement = select(DBMenuItem)
+        if restaurant_id:
+            statement = statement.where(DBMenuItem.restaurant_id == restaurant_id)
+        db_items = db.exec(statement).all()
         changed = 0
         for di in db_items:
             if di.name.lower().strip() == item_name:
@@ -183,6 +194,8 @@ def _toggle_item(item_name: str, *, available: bool, restaurant_id: str = "") ->
         with open(MENU_JSON_PATH, encoding="utf-8") as f:
             menu_json = _json.load(f)
         for item in menu_json:
+            if restaurant_id and item.get("restaurant_id") != restaurant_id:
+                continue
             if item.get("name", "").lower().strip() == item_name:
                 item["available"] = available
         with open(MENU_JSON_PATH, "w", encoding="utf-8") as f:

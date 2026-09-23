@@ -6,7 +6,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ValidationError, field_validator
 
-from app.services.conversation_service import MENU_JSON_PATH
+from app.services import base44_client
+from app.services.conversation_service import MENU_JSON_PATH, read_menu_file_raw
 from app.services.menu_sync import sync_menu_to_db
 from app.security import require_admin_api_key
 
@@ -19,6 +20,7 @@ router = APIRouter(
 
 class OwnerCommandRequest(BaseModel):
     command: str
+    restaurant_id: str | None = None
 
 
 class OwnerAction(BaseModel):
@@ -134,17 +136,75 @@ Azioni possibili:
 Rispondi SOLO con JSON valido, nessun testo extra."""
 
 
-@router.post("/")
-def owner_command(request: OwnerCommandRequest):
+def _resolve_restaurant_id(requested: str | None) -> str:
+    """Locale su cui agire: quello richiesto, altrimenti l'unico presente in
+    menu_data.json (il menu che il comando modificava prima)."""
+    if requested and requested.strip():
+        return requested.strip()
+    file_ids = {str(i["restaurant_id"]) for i in read_menu_file_raw() if i.get("restaurant_id")}
+    if len(file_ids) == 1:
+        return file_ids.pop()
+    raise HTTPException(status_code=400, detail="restaurant_id obbligatorio")
+
+
+def _plan_changes(action: dict, items: list[dict]) -> tuple[list[tuple[dict, dict]], str, str]:
+    """Ritorna ([(MenuItem Base44, patch)], messaggio se nessuna voce, messaggio di esito)."""
+    name = action.get("action")
+    if name == "remove_ingredient":
+        ingredient = action.get("ingredient", "")
+        changes = [
+            (item, {"ingredients": [i for i in item.get("ingredients") or [] if i != ingredient]})
+            for item in items
+            if ingredient in (item.get("ingredients") or [])
+        ]
+        return changes, f"Ingrediente '{ingredient}' non trovato nel menu", f"Rimosso '{ingredient}' da {len(changes)} pizze"
+    if name == "disable_dough_type":
+        dough = action.get("dough_type", "")
+        changes = [
+            (item, {"available": False})
+            for item in items
+            if item.get("dough_type") == dough and item.get("available", True)
+        ]
+        return (
+            changes,
+            f"Nessuna pizza con impasto '{dough}' trovata o già disabilitata",
+            f"Disabilitate {len(changes)} pizze con impasto '{dough}'",
+        )
+    pizza = action.get("pizza_name", "")
+    changes = [
+        (item, {"available": False})
+        for item in items
+        if (item.get("name") or "").lower() == pizza.lower() and item.get("available", True)
+    ]
+    return changes, f"Pizza '{pizza}' non trovata o già disabilitata", f"Disabilitata pizza '{pizza}' ({len(changes)} varianti)"
+
+
+def _mirror_to_menu_file(restaurant_id: str, changes: list[tuple[dict, dict]]) -> None:
+    """Riporta le modifiche su menu_data.json (ripiego offline), solo per le voci del locale."""
     try:
         with open(MENU_JSON_PATH, encoding="utf-8") as f:
             menu = json.load(f)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Errore lettura menu: {e}")
+        print(f"[OwnerCommand] menu_data.json non aggiornato: {type(e).__name__}: {e}")
+        return
+    by_name = {(item.get("name") or "").lower(): patch for item, patch in changes}
+    for entry in menu:
+        patch = by_name.get((entry.get("name") or "").lower())
+        if patch and entry.get("restaurant_id") == restaurant_id:
+            entry.update(patch)
+    _write_menu(menu)
 
-    all_ingredients = sorted({ing for item in menu for ing in item.get("ingredients", [])})
-    all_dough_types = sorted({item.get("dough_type", "classica") for item in menu})
-    all_pizza_names = sorted({item["name"] for item in menu})
+
+@router.post("/")
+def owner_command(request: OwnerCommandRequest):
+    restaurant_id = _resolve_restaurant_id(request.restaurant_id)
+    menu = base44_client.get_menu_items(restaurant_id=restaurant_id)
+    if not menu:
+        raise HTTPException(status_code=503, detail=f"Menu Base44 non disponibile per restaurant_id={restaurant_id}")
+
+    all_ingredients = sorted({ing for item in menu for ing in item.get("ingredients") or []})
+    all_dough_types = sorted({item.get("dough_type") or "classica" for item in menu})
+    all_pizza_names = sorted({item["name"] for item in menu if item.get("name")})
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -183,63 +243,28 @@ def owner_command(request: OwnerCommandRequest):
 
     action = _parse_owner_action(_extract_message_text(message))
 
-    print(f"[OwnerCommand] Comando: '{request.command}' → {action}")
+    print(f"[OwnerCommand] Comando: '{request.command}' → {action} (restaurant_id={restaurant_id!r})")
 
-    if action.get("action") == "remove_ingredient":
-        ingredient = action.get("ingredient", "")
-        count = sum(
-            1 for item in menu
-            if ingredient in item.get("ingredients", [])
-        )
-        for item in menu:
-            if ingredient in item.get("ingredients", []):
-                item["ingredients"].remove(ingredient)
-
-        if count == 0:
-            return {"ok": False, "action": action, "details": f"Ingrediente '{ingredient}' non trovato nel menu"}
-
-        _write_menu(menu)
-        synced = sync_menu_to_db()
-        details = f"Rimosso '{ingredient}' da {count} pizze"
-        print(f"[OwnerCommand] {details}. DB: {synced} voci")
-        return {"ok": True, "action": action, "details": details, "synced_items": synced}
-
-    elif action.get("action") == "disable_dough_type":
-        dough = action.get("dough_type", "")
-        count = 0
-        for item in menu:
-            if item.get("dough_type") == dough and item.get("available", True):
-                item["available"] = False
-                count += 1
-
-        if count == 0:
-            return {"ok": False, "action": action, "details": f"Nessuna pizza con impasto '{dough}' trovata o già disabilitata"}
-
-        _write_menu(menu)
-        synced = sync_menu_to_db()
-        details = f"Disabilitate {count} pizze con impasto '{dough}'"
-        print(f"[OwnerCommand] {details}. DB: {synced} voci")
-        return {"ok": True, "action": action, "details": details, "synced_items": synced}
-
-    elif action.get("action") == "disable_pizza":
-        name = action.get("pizza_name", "")
-        count = 0
-        for item in menu:
-            if item["name"].lower() == name.lower() and item.get("available", True):
-                item["available"] = False
-                count += 1
-
-        if count == 0:
-            return {"ok": False, "action": action, "details": f"Pizza '{name}' non trovata o già disabilitata"}
-
-        _write_menu(menu)
-        synced = sync_menu_to_db()
-        details = f"Disabilitata pizza '{name}' ({count} varianti)"
-        print(f"[OwnerCommand] {details}. DB: {synced} voci")
-        return {"ok": True, "action": action, "details": details, "synced_items": synced}
-
-    else:
+    if action.get("action") not in ("remove_ingredient", "disable_dough_type", "disable_pizza"):
         return {"ok": False, "action": action, "details": action.get("reason", "Comando non riconosciuto")}
+
+    changes, not_found, details = _plan_changes(action, menu)
+    if not changes:
+        return {"ok": False, "action": action, "details": not_found}
+
+    # Base44 è la fonte del menu dell'agente: le modifiche vanno scritte lì.
+    failed = [item for item, patch in changes if base44_client.update_menu_item(str(item["id"]), patch) is None]
+    if not failed:
+        _mirror_to_menu_file(restaurant_id, changes)
+    synced = sync_menu_to_db()
+    if failed:
+        names = [item.get("name") for item in failed]
+        details = f"Errore Base44: {len(failed)}/{len(changes)} voci non aggiornate ({names})"
+        print(f"[OwnerCommand] {details}")
+        return {"ok": False, "action": action, "details": details, "synced_items": synced}
+
+    print(f"[OwnerCommand] {details}. DB: {synced} voci")
+    return {"ok": True, "action": action, "details": details, "synced_items": synced}
 
 
 def _write_menu(menu: list) -> None:
