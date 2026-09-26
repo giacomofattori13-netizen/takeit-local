@@ -626,7 +626,7 @@ class ChatLogicTests(unittest.TestCase):
 
         captured: dict = {}
 
-        def fake_post(url, *, params, json, headers, timeout):
+        def fake_post(url, *, json, headers, timeout):
             captured.update(json)
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -636,7 +636,7 @@ class ChatLogicTests(unittest.TestCase):
             return mock_resp
 
         with (
-            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
             patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
         ):
             svc.save_order_to_base44(
@@ -1030,7 +1030,7 @@ class ChatLogicTests(unittest.TestCase):
 
         captured: dict = {}
 
-        def fake_post(url, *, params, json, headers, timeout):
+        def fake_post(url, *, json, headers, timeout):
             captured.update(json)
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -1040,7 +1040,7 @@ class ChatLogicTests(unittest.TestCase):
             return mock_resp
 
         with (
-            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
             patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
         ):
             svc.save_order_to_base44(
@@ -1082,7 +1082,7 @@ class ChatLogicTests(unittest.TestCase):
 
         captured: dict = {}
 
-        def fake_post(url, *, params, json, headers, timeout):
+        def fake_post(url, *, json, headers, timeout):
             captured.update(json)
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -1092,7 +1092,7 @@ class ChatLogicTests(unittest.TestCase):
             return mock_resp
 
         with (
-            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
             patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
         ):
             svc.save_order_to_base44(
@@ -1134,7 +1134,7 @@ class ChatLogicTests(unittest.TestCase):
 
         captured: dict = {}
 
-        def fake_post(url, *, params, json, headers, timeout):
+        def fake_post(url, *, json, headers, timeout):
             captured.update(json)
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -1144,7 +1144,7 @@ class ChatLogicTests(unittest.TestCase):
             return mock_resp
 
         with (
-            patch.dict(os.environ, {"BASE44_API_KEY": "test-key"}),
+            patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
             patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
         ):
             svc.save_order_to_base44(

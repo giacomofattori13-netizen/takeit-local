@@ -14,10 +14,10 @@ class PhoneMaskingTests(unittest.TestCase):
     def setUp(self):
         self.previous_twilio_account_sid = os.environ.get("TWILIO_ACCOUNT_SID")
         self.previous_twilio_auth_token = os.environ.get("TWILIO_AUTH_TOKEN")
-        self.previous_base44_api_key = os.environ.get("BASE44_API_KEY")
+        self.previous_base44_api_key = os.environ.get("BASE44_TOKEN")
         os.environ.pop("TWILIO_ACCOUNT_SID", None)
         os.environ.pop("TWILIO_AUTH_TOKEN", None)
-        os.environ.pop("BASE44_API_KEY", None)
+        os.environ.pop("BASE44_TOKEN", None)
 
     def tearDown(self):
         if self.previous_twilio_account_sid is None:
@@ -31,9 +31,9 @@ class PhoneMaskingTests(unittest.TestCase):
             os.environ["TWILIO_AUTH_TOKEN"] = self.previous_twilio_auth_token
 
         if self.previous_base44_api_key is None:
-            os.environ.pop("BASE44_API_KEY", None)
+            os.environ.pop("BASE44_TOKEN", None)
         else:
-            os.environ["BASE44_API_KEY"] = self.previous_base44_api_key
+            os.environ["BASE44_TOKEN"] = self.previous_base44_api_key
 
     def test_mask_phone_hides_all_but_last_four_digits(self):
         masked = mask_phone("+39 333 123 4567")
@@ -88,10 +88,9 @@ class PhoneMaskingTests(unittest.TestCase):
             def json(self):
                 return {"id": "order-1"}
 
-        def fake_post(url, params, json, headers, timeout):
+        def fake_post(url, json, headers, timeout):
             calls.append({
                 "url": url,
-                "params": params,
                 "json": json,
                 "headers": headers,
                 "timeout": timeout,
@@ -99,7 +98,7 @@ class PhoneMaskingTests(unittest.TestCase):
             return FakeResponse()
 
         original_post = conversation_service.httpx.post
-        os.environ["BASE44_API_KEY"] = "test-key"
+        os.environ["BASE44_TOKEN"] = "test-key"
         conversation_service.httpx.post = fake_post
         output = io.StringIO()
         try:

@@ -17,17 +17,17 @@ def _response(body):
 
 class GetAllRestaurantsOrNoneTests(unittest.TestCase):
     def setUp(self):
-        self.previous_key = os.environ.get("BASE44_API_KEY")
-        os.environ["BASE44_API_KEY"] = "test-key"
+        self.previous_key = os.environ.get("BASE44_TOKEN")
+        os.environ["BASE44_TOKEN"] = "test-key"
 
     def tearDown(self):
         if self.previous_key is None:
-            os.environ.pop("BASE44_API_KEY", None)
+            os.environ.pop("BASE44_TOKEN", None)
         else:
-            os.environ["BASE44_API_KEY"] = self.previous_key
+            os.environ["BASE44_TOKEN"] = self.previous_key
 
     def test_missing_api_key_returns_none(self):
-        os.environ.pop("BASE44_API_KEY", None)
+        os.environ.pop("BASE44_TOKEN", None)
         with patch.object(base44_client.httpx, "get", side_effect=AssertionError("no HTTP without key")):
             self.assertIsNone(base44_client.get_all_restaurants_or_none())
 

@@ -17,6 +17,7 @@ from app.routes.logs import router as logs_router
 from app.routes.owner_command import router as owner_command_router
 from app.routes.sms import router as sms_router
 from app.routes.voice import close_tts_stream_client, router as voice_router, prewarm_audio_cache
+from app.services.base44_client import log_authenticated_user
 from app.services.daily_reset import start_daily_reset_thread
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import (
@@ -43,6 +44,8 @@ def on_startup():
         print("[Startup] Indice idempotenza ordini creato")
 
     recover_order_side_effects()
+
+    log_authenticated_user()
 
     synced = sync_menu_to_db()
     if synced:

@@ -15,6 +15,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.privacy import describe_text_for_log, mask_name, mask_phone
+from app.services.base44_client import auth_headers, base44_token
 from app.telemetry import record_latency
 
 load_dotenv()
@@ -425,9 +426,9 @@ def _parse_doughs_from_base44_body(body: Any) -> list[dict]:
 
 
 def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict]:
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Dough] BASE44_API_KEY non configurato, skip refresh")
+    token = base44_token()
+    if not token:
+        print("[Dough] BASE44_TOKEN non configurato, skip refresh")
         return []
 
     url = f"{BASE44_APP}/DoughType"
@@ -435,7 +436,7 @@ def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict
         timeout = timeout_seconds or _dough_refresh_timeout_seconds()
         response = httpx.get(
             url,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             timeout=timeout,
         )
         response.raise_for_status()
@@ -534,12 +535,12 @@ def get_next_order_number() -> int:
     Fallback: numero random a 4 cifre.
     """
     import random as _random
-    api_key = os.getenv("BASE44_API_KEY")
-    if api_key:
+    token = base44_token()
+    if token:
         try:
             response = httpx.get(
                 BASE44_ORDER_URL,
-                params={"api_key": api_key},
+                headers=auth_headers(),
                 timeout=10,
             )
             response.raise_for_status()
@@ -572,9 +573,9 @@ def save_order_to_base44(
     total_amount viene calcolato come somma dei total_price.
     dough_type viene mappato dal campo pizza_type se non già presente.
     """
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("WARNING: BASE44_API_KEY not set, skipping Base44 sync")
+    token = base44_token()
+    if not token:
+        print("WARNING: BASE44_TOKEN not set, skipping Base44 sync")
         return
 
     needs_review = ai_confidence < 0.8
@@ -632,9 +633,8 @@ def save_order_to_base44(
     try:
         response = httpx.post(
             BASE44_ORDER_URL,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             json=payload,
-            headers={"Content-Type": "application/json"},
             timeout=10,
         )
         print(f"[Base44] Status code: {response.status_code}")
@@ -880,14 +880,14 @@ def send_whatsapp_confirmation(
 
 def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict | None:
     """Fa la GET a Base44 e restituisce il dict del ristorante, o None in caso di errore."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Restaurant] BASE44_API_KEY non configurato, skip fetch")
+    token = base44_token()
+    if not token:
+        print("[Restaurant] BASE44_TOKEN non configurato, skip fetch")
         return None
     url = f"{BASE44_APP}/Restaurant"
     try:
         timeout = timeout_seconds or _restaurant_refresh_timeout_seconds()
-        response = httpx.get(url, params={"api_key": api_key}, timeout=timeout)
+        response = httpx.get(url, headers=auth_headers(), timeout=timeout)
         response.raise_for_status()
         body = response.json()
         print(f"[Restaurant] Body type={type(body).__name__} preview={str(body)[:300]!r}")
@@ -1471,16 +1471,16 @@ def _fetch_customers_by_phone(
     """Restituisce TUTTI i record Customer con quel numero di telefono."""
     masked_phone = mask_phone(phone)
     print(f"[Customer] Inizio lookup per {masked_phone}")
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Customer] BASE44_API_KEY non configurato, lookup saltato")
+    token = base44_token()
+    if not token:
+        print("[Customer] BASE44_TOKEN non configurato, lookup saltato")
         return []
 
     try:
         print(f"[Customer] GET {BASE44_CUSTOMER_URL} timeout={timeout_seconds}s")
         response = httpx.get(
             BASE44_CUSTOMER_URL,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             timeout=timeout_seconds,
         )
         print(f"[Customer] HTTP {response.status_code}")
@@ -1530,12 +1530,12 @@ def upsert_customer(
     Aggiorna: total_orders, last_order_date, favorite_pizzas, total_spend, average_spend.
     Crea con: is_repeat=False.
     """
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Customer] BASE44_API_KEY non configurato, skip upsert")
+    token = base44_token()
+    if not token:
+        print("[Customer] BASE44_TOKEN non configurato, skip upsert")
         return
 
-    auth_kwargs: dict = {"params": {"api_key": api_key}}
+    auth_kwargs: dict = {"headers": auth_headers()}
     today = datetime.date.today().isoformat()
 
     all_matches = _fetch_customers_by_phone(phone) if phone else []
@@ -1681,15 +1681,15 @@ def detect_reservation_intent(message: str) -> bool:
 
 def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
     """Recupera tutti i tavoli configurati su Base44. Restituisce [] in caso di errore."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    token = base44_token()
+    if not token:
         if required:
-            raise ReservationAvailabilityError("BASE44_API_KEY non configurato")
+            raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
     try:
         response = httpx.get(
             BASE44_TABLE_URL,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             timeout=5,
         )
         response.raise_for_status()
@@ -1707,15 +1707,15 @@ def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
 
 def _fetch_reservations_for_date(date: str, required: bool = False) -> list[dict]:
     """Recupera le prenotazioni per una data specifica."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
+    token = base44_token()
+    if not token:
         if required:
-            raise ReservationAvailabilityError("BASE44_API_KEY non configurato")
+            raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
     try:
         response = httpx.get(
             BASE44_RESERVATION_URL,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             timeout=5,
         )
         response.raise_for_status()
@@ -2020,9 +2020,9 @@ def save_reservation_to_base44(
     restaurant_id: str = "",
 ) -> str | None:
     """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore."""
-    api_key = os.getenv("BASE44_API_KEY")
-    if not api_key:
-        print("[Reservation] BASE44_API_KEY non configurato, skip salvataggio")
+    token = base44_token()
+    if not token:
+        print("[Reservation] BASE44_TOKEN non configurato, skip salvataggio")
         return None
 
     payload = {
@@ -2050,9 +2050,8 @@ def save_reservation_to_base44(
     try:
         response = httpx.post(
             BASE44_RESERVATION_URL,
-            params={"api_key": api_key},
+            headers=auth_headers(),
             json=payload,
-            headers={"Content-Type": "application/json"},
             timeout=10,
         )
         response.raise_for_status()

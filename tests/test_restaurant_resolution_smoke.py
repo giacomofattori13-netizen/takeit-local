@@ -43,7 +43,7 @@ RESTAURANTS = [
 
 
 def _fake_base44_get(restaurants):
-    def _get(url, params=None, timeout=None):
+    def _get(url, headers=None, timeout=None):
         response = MagicMock()
         response.raise_for_status.return_value = None
         if url.endswith("/Restaurant"):
@@ -76,7 +76,7 @@ class _EnvMixin:
 class VoiceIncomingSmokeTests(_EnvMixin, unittest.TestCase):
     ENV = {
         "SKIP_TWILIO_SIGNATURE_VALIDATION": "true",
-        "BASE44_API_KEY": "test-key",
+        "BASE44_TOKEN": "test-key",
         "DEFAULT_RESTAURANT_ID": None,
         "ELEVENLABS_API_KEY": None,
         "ELEVENLABS_VOICE_ID": None,
@@ -153,7 +153,7 @@ class VoiceIncomingSmokeTests(_EnvMixin, unittest.TestCase):
 
 class OwnerSmsSmokeTests(_EnvMixin, unittest.TestCase):
     ENV = {
-        "BASE44_API_KEY": "test-key",
+        "BASE44_TOKEN": "test-key",
         "OWNER_PHONE": OWNER_PHONE,
         "DEFAULT_RESTAURANT_ID": None,
     }
