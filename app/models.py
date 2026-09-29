@@ -20,6 +20,8 @@ class Order(SQLModel, table=True):
     pickup_time: str
     pickup_date: Optional[str] = None  # "YYYY-MM-DD" — preorder date (pizza al taglio)
     status: str = "new"
+    order_number: Optional[int] = None  # numero definitivo assegnato su Base44 (per ristorante e giorno)
+    base44_id: Optional[str] = None
 
 
 class OrderItem(SQLModel, table=True):

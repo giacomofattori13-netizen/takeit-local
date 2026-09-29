@@ -43,8 +43,9 @@ from app.services.conversation_service import (
     format_weight_display,
     load_restaurant,
     load_doughs,
-    save_order_to_base44,
     send_whatsapp_confirmation,
+    send_owner_alert,
+    build_order_not_saved_alert,
     get_dough_surcharge,
     is_dough_available,
     is_agent_active,
@@ -67,6 +68,7 @@ from app.services.conversation_service import (
     save_reservation_to_base44,
     send_reservation_sms,
 )
+from app.services.order_sync import rome_today, save_order_to_base44
 from app.telemetry import record_latency
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -980,16 +982,19 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
     if kind == "base44_order":
         rid = payload.get("restaurant_id") or os.getenv("DEFAULT_RESTAURANT_ID", "")
         print(f"[SideEffects] base44_order restaurant_id={rid!r}")
-        save_order_to_base44(
+        result = save_order_to_base44(
+            session_id=payload.get("session_id"),
+            restaurant_id=rid,
             customer_name=payload["customer_name"],
             customer_phone=payload["customer_phone"],
             pickup_time=payload["pickup_time"],
-            order_number=payload["order_number"],
             ai_confidence=payload["ai_confidence"],
             items=payload["items"],
-            restaurant_id=rid,
             pickup_date=payload.get("pickup_date"),
+            order_date=payload.get("order_date"),
         )
+        if payload.get("session_id"):
+            _store_order_number(payload["session_id"], result)
         return
 
     if kind == "whatsapp_confirmation":
@@ -1013,6 +1018,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
                 phone=payload["customer_phone"],
                 pizzas=payload["pizza_names"],
                 total_amount=payload["total_amount"],
+                restaurant_id=payload.get("restaurant_id") or "",
             )
         return
 
@@ -1039,7 +1045,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
 def _run_order_side_effects(payload: dict[str, Any]) -> None:
     """Compatibilità/test: esegue i side effect senza persistenza outbox."""
     started_at = time.perf_counter()
-    order_number = payload["order_number"]
+    order_number = payload.get("session_id") or payload.get("order_number")
     side_effects = [
         ("base44_order", payload),
         ("whatsapp_confirmation", payload),
@@ -1087,6 +1093,8 @@ def _process_order_side_effect_job(job_id: int) -> None:
             db_session.add(job)
             db_session.commit()
             print(f"[SideEffects] job={job_id} kind={job.kind} payload_json corrotto, fallito definitivamente: {job.last_error}")
+            if job.kind == "base44_order":
+                _alert_owner_order_not_saved({}, job.attempts, f"job={job_id} {job.last_error}")
             return
 
         try:
@@ -1101,6 +1109,8 @@ def _process_order_side_effect_job(job_id: int) -> None:
             if job.attempts >= _SIDE_EFFECT_MAX_ATTEMPTS:
                 job.status = "failed"
                 print(f"[SideEffects] job={job_id} kind={job.kind} fallito definitivamente: {job.last_error}")
+                if job.kind == "base44_order":
+                    _alert_owner_order_not_saved(payload, job.attempts, job.last_error)
             else:
                 job.status = "retry"
                 job.next_attempt_at = now + _side_effect_retry_delay(job.attempts)
@@ -1184,36 +1194,104 @@ def recover_order_side_effects(limit: int = 100) -> int:
     return scheduled
 
 
+def _alert_owner_order_not_saved(order: dict[str, Any], attempts: int, last_error: str | None) -> None:
+    """Un ordine confermato al cliente non è arrivato su Base44: avvisa subito il titolare."""
+    try:
+        status = send_owner_alert(build_order_not_saved_alert(order, attempts, last_error))
+        print(f"[SideEffects] avviso titolare ordine non salvato: {status}")
+    except Exception as exc:
+        print(f"[SideEffects] avviso titolare fallito: {type(exc).__name__}: {exc}")
+
+
+def _store_order_number(session_id: str, result: dict[str, Any]) -> None:
+    """Salva sull'Order locale il numero definitivo e l'id Base44."""
+    with Session(_db_engine) as db_session:
+        order = _get_order_for_session(db_session, session_id)
+        if order is None:
+            return
+        order.order_number = int(result["order_number"])
+        order.base44_id = str(result["id"])
+        db_session.add(order)
+        db_session.commit()
+
+
+def _finalize_new_order(
+    *,
+    session: Session,
+    order: Order,
+    conversation: ConversationSession,
+    merged_order: dict[str, Any],
+    enriched_items: list[dict[str, Any]],
+    total_amount: float,
+    restaurant_id: str,
+    ai_confidence: float,
+) -> None:
+    """Salva l'ordine su Base44 PRIMA della risposta al cliente, così il numero
+    è definitivo prima di qualsiasi conferma. Se Base44 non risponde, il salvataggio
+    passa al job con retry (e all'avviso al titolare se fallisce del tutto)."""
+    base44_payload: dict[str, Any] = {
+        "session_id": conversation.session_id,
+        "restaurant_id": restaurant_id or os.getenv("DEFAULT_RESTAURANT_ID", ""),
+        "customer_name": merged_order["customer_name"],
+        "customer_phone": conversation.customer_phone,
+        "pickup_time": merged_order["pickup_time"],
+        "ai_confidence": ai_confidence,
+        "items": copy.deepcopy(enriched_items),
+        "total_amount": total_amount,
+        "order_date": rome_today(),
+    }
+    if merged_order.get("pickup_date"):
+        base44_payload["pickup_date"] = merged_order["pickup_date"]
+    try:
+        result = save_order_to_base44(**{k: v for k, v in base44_payload.items() if k != "total_amount"})
+    except Exception as exc:
+        print(
+            f"[Order] Base44 non disponibile alla conferma ({type(exc).__name__}: {exc}): "
+            f"ordine locale id={order.id} passa al retry"
+        )
+        result = None
+
+    if result:
+        order.order_number = int(result["order_number"])
+        order.base44_id = str(result["id"])
+        session.add(order)
+        session.commit()
+
+    _enqueue_order_side_effects(
+        session=session,
+        local_order_id=order.id,
+        customer_name=merged_order["customer_name"],
+        customer_phone=conversation.customer_phone,
+        pickup_time=merged_order["pickup_time"],
+        items=enriched_items,
+        total_amount=total_amount,
+        pizza_names=list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"])),
+        restaurant_id=base44_payload["restaurant_id"],
+        base44_order_payload=None if result else base44_payload,
+    )
+
+
 def _enqueue_order_side_effects(
     *,
     session: Session,
+    local_order_id: int,
     customer_name: str,
     customer_phone: str | None,
     pickup_time: str,
-    order_number: int,
-    ai_confidence: float,
     items: list[dict[str, Any]],
     total_amount: float,
     pizza_names: list[str],
     restaurant_id: str = "",
-    pickup_date: str | None = None,
+    base44_order_payload: dict[str, Any] | None = None,
 ) -> None:
+    """Accoda i side effect dell'ordine. `base44_order_payload` è presente solo se
+    l'Order non è già stato creato su Base44 alla conferma."""
     now = time.time()
     item_payload = copy.deepcopy(items)
-    b44_order_payload: dict[str, Any] = {
-        "customer_name": customer_name,
-        "customer_phone": customer_phone,
-        "pickup_time": pickup_time,
-        "order_number": order_number,
-        "ai_confidence": ai_confidence,
-        "items": item_payload,
-    }
-    if restaurant_id:
-        b44_order_payload["restaurant_id"] = restaurant_id
-    if pickup_date:
-        b44_order_payload["pickup_date"] = pickup_date
-    job_specs = [
-        ("base44_order", b44_order_payload),
+    job_specs: list[tuple[str, dict[str, Any]]] = []
+    if base44_order_payload is not None:
+        job_specs.append(("base44_order", base44_order_payload))
+    job_specs += [
         ("whatsapp_confirmation", {
             "customer_name": customer_name,
             "customer_phone": customer_phone,
@@ -1228,12 +1306,13 @@ def _enqueue_order_side_effects(
             "customer_phone": customer_phone,
             "pizza_names": list(pizza_names),
             "total_amount": total_amount,
+            "restaurant_id": restaurant_id,
         }))
 
     jobs: list[OrderSideEffect] = []
     for kind, payload in job_specs:
         job = OrderSideEffect(
-            order_number=order_number,
+            order_number=local_order_id,  # riferimento all'Order locale, non il numero Base44
             kind=kind,
             payload_json=json.dumps(payload, ensure_ascii=False),
             status="pending",
@@ -1249,7 +1328,7 @@ def _enqueue_order_side_effects(
     for job in jobs:
         session.refresh(job)
         _schedule_order_side_effect_job(job.id)
-    print(f"[SideEffects] ordine #{order_number} accodato: {len(jobs)} job")
+    print(f"[SideEffects] ordine locale id={local_order_id} accodato: {len(jobs)} job")
 
 
 def _enqueue_reservation_sms_side_effect(
@@ -1702,7 +1781,9 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
     lookup_future = None
     if phone:
         print(f"[Customer] Avvio lookup in parallelo per {mask_phone(phone)}")
-        lookup_future = _CUSTOMER_LOOKUP_EXECUTOR.submit(lookup_customer, phone)
+        lookup_future = _CUSTOMER_LOOKUP_EXECUTOR.submit(
+            lookup_customer, phone, os.getenv("DEFAULT_RESTAURANT_ID", "")
+        )
 
     conversation = ConversationSession(
         session_id=new_session_id,
@@ -2301,19 +2382,15 @@ def chat(request: ChatRequest, session: SessionDep):
             enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
 
             if order_created:
-                pizza_names = list(dict.fromkeys(i["pizza_name"] for i in merged_order["items"]))
-                _enqueue_order_side_effects(
+                _finalize_new_order(
                     session=session,
-                    customer_name=merged_order["customer_name"],
-                    customer_phone=conversation.customer_phone,
-                    pickup_time=merged_order["pickup_time"],
-                    order_number=order.id,
-                    ai_confidence=0.95,
-                    items=enriched_items,
+                    order=order,
+                    conversation=conversation,
+                    merged_order=merged_order,
+                    enriched_items=enriched_items,
                     total_amount=order_total,
-                    pizza_names=pizza_names,
                     restaurant_id=restaurant_id,
-                    pickup_date=merged_order.get("pickup_date"),
+                    ai_confidence=0.95,
                 )
 
             name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
@@ -3117,19 +3194,15 @@ def chat(request: ChatRequest, session: SessionDep):
         enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
 
         if order_created:
-            pizza_names = list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"]))
-            _enqueue_order_side_effects(
+            _finalize_new_order(
                 session=session,
-                customer_name=merged_order["customer_name"],
-                customer_phone=conversation.customer_phone,
-                pickup_time=merged_order["pickup_time"],
-                order_number=order.id,
-                ai_confidence=0.9,
-                items=enriched_items,
+                order=order,
+                conversation=conversation,
+                merged_order=merged_order,
+                enriched_items=enriched_items,
                 total_amount=order_total,
-                pizza_names=pizza_names,
                 restaurant_id=restaurant_id,
-                pickup_date=merged_order.get("pickup_date"),
+                ai_confidence=0.9,
             )
 
     response_message = build_assistant_response(

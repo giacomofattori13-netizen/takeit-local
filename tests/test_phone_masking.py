@@ -3,10 +3,12 @@ import os
 import unittest
 from concurrent.futures import Future
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 import app.services.conversation_service as conversation_service
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.routes.chat import _resolve_customer_lookup_future
+from app.services import order_sync
 from app.services.conversation_service import send_whatsapp_confirmation
 
 
@@ -76,52 +78,35 @@ class PhoneMaskingTests(unittest.TestCase):
         self.assertNotIn("+393331234567", logs)
 
     def test_base44_order_logs_mask_customer_phone(self):
-        calls = []
+        created = []
 
-        class FakeResponse:
-            status_code = 200
-            text = '{"id": "order-1", "customer_phone": "+393331234567"}'
+        def fake_create(entity, data, timeout=10.0):
+            created.append(data)
+            return {"id": "order-1", "created_date": "2026-09-29T10:00:00Z", **data}
 
-            def raise_for_status(self):
-                return None
-
-            def json(self):
-                return {"id": "order-1"}
-
-        def fake_post(url, json, headers, timeout):
-            calls.append({
-                "url": url,
-                "json": json,
-                "headers": headers,
-                "timeout": timeout,
-            })
-            return FakeResponse()
-
-        original_post = conversation_service.httpx.post
         os.environ["BASE44_TOKEN"] = "test-key"
-        conversation_service.httpx.post = fake_post
         output = io.StringIO()
-        try:
-            with redirect_stdout(output):
-                conversation_service.save_order_to_base44(
-                    customer_name="Mario",
-                    customer_phone="+393331234567",
-                    pickup_time="20:00",
-                    order_number=42,
-                    ai_confidence=0.9,
-                    items=[{
-                        "pizza_name": "Margherita",
-                        "quantity": 1,
-                        "pizza_type": "Classica",
-                        "total_price": 7.0,
-                    }],
-                )
-        finally:
-            conversation_service.httpx.post = original_post
+        with patch.object(order_sync.base44_client, "query_entities", return_value=[]), \
+                patch.object(order_sync.base44_client, "create_entity", side_effect=fake_create), \
+                redirect_stdout(output):
+            order_sync.save_order_to_base44(
+                session_id="s-1",
+                restaurant_id="rest-1",
+                customer_name="Mario",
+                customer_phone="+393331234567",
+                pickup_time="20:00",
+                ai_confidence=0.9,
+                items=[{
+                    "pizza_name": "Margherita",
+                    "quantity": 1,
+                    "pizza_type": "Classica",
+                    "total_price": 7.0,
+                }],
+            )
 
         logs = output.getvalue()
-        self.assertEqual(calls[0]["json"]["customer_phone"], "+393331234567")
-        self.assertEqual(calls[0]["json"]["customer_name"], "Mario")
+        self.assertEqual(created[0]["customer_phone"], "+393331234567")
+        self.assertEqual(created[0]["customer_name"], "Mario")
         self.assertIn("********4567", logs)
         self.assertNotIn("+393331234567", logs)
         self.assertNotIn("Mario", logs)

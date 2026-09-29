@@ -7,6 +7,7 @@ the token must belong to a user allowed to read the app's data.
 The token is never logged.
 App ID: 69c54bc5c44250d7da397903
 """
+import json
 import os
 import re
 
@@ -51,6 +52,33 @@ def _mask_key(s) -> str:
 def _parse_entities(data) -> list[dict]:
     entities = data.get("entities", data) if isinstance(data, dict) else data
     return entities if isinstance(entities, list) else []
+
+
+def query_entities(entity: str, query: dict, timeout: float = 10.0) -> list[dict]:
+    """GET filtrata lato Base44 (parametro q). Solleva in caso di errore: il chiamante
+    deve poter distinguere "nessun record" da "Base44 non raggiungibile"."""
+    resp = httpx.get(
+        f"{_BASE}/{entity}",
+        headers=auth_headers(),
+        params={"q": json.dumps(query)},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return [e for e in _parse_entities(resp.json()) if isinstance(e, dict)]
+
+
+def create_entity(entity: str, data: dict, timeout: float = 10.0) -> dict:
+    """POST di un record. Solleva in caso di errore."""
+    resp = httpx.post(f"{_BASE}/{entity}", headers=auth_headers(), json=data, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def update_entity(entity: str, entity_id: str, patch: dict, timeout: float = 10.0) -> dict:
+    """PUT parziale di un record. Solleva in caso di errore."""
+    resp = httpx.put(f"{_BASE}/{entity}/{entity_id}", headers=auth_headers(), json=patch, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> list[dict]:
@@ -314,6 +342,18 @@ def update_call_log(log_id: str, patch: dict, timeout: float = 8.0) -> dict | No
     except Exception as e:
         print(f"[Base44] update_call_log id={log_id!r} error: {type(e).__name__}: {_mask_key(e)}")
         return None
+
+
+def find_call_log_by_sid(call_sid: str, timeout: float = 8.0) -> dict | None:
+    """Trova il CallLog della chiamata Twilio `call_sid` (None se assente o in errore)."""
+    if not base44_token() or not call_sid:
+        return None
+    try:
+        logs = query_entities("CallLog", {"call_sid": call_sid}, timeout=timeout)
+    except Exception as e:
+        print(f"[Base44] find_call_log_by_sid error: {type(e).__name__}: {_mask_key(e)}")
+        return None
+    return logs[0] if logs else None
 
 
 def create_owner_command(data: dict, timeout: float = 10.0) -> dict | None:

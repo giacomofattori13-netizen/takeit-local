@@ -266,14 +266,24 @@ class FullOrderNonRegressionTests(_DbTestCase):
             conversation = session.exec(select(ConversationSession)).one()
             if conversation.state != "awaiting_confirmation":
                 self.fail(f"turno 1 non arriva alla conferma: state={first.state!r} msg={first.response_message!r}")
-            final = chat_module.chat(ChatRequest(session_id=session_id, message="sì, confermo"), session)
+            saved = []
+            with patch.object(
+                chat_module,
+                "save_order_to_base44",
+                side_effect=lambda **kwargs: saved.append(kwargs) or {"id": "b44-order", "order_number": 3},
+            ):
+                final = chat_module.chat(ChatRequest(session_id=session_id, message="sì, confermo"), session)
             order = session.exec(select(Order)).one()
             order_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
             jobs = session.exec(select(OrderSideEffect).where(OrderSideEffect.kind == "base44_order")).all()
-            payload = json.loads(jobs[0].payload_json)
         self.assertEqual(final.state, "completed")
         self.assertEqual(final.order_id, order.id)
-        return order, order_items, payload
+        # L'Order è creato su Base44 alla conferma, con numero definitivo: nessun job di retry.
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(jobs, [])
+        self.assertEqual((order.order_number, order.base44_id), (3, "b44-order"))
+        self.assertEqual(saved[0]["session_id"], session_id)
+        return order, order_items, saved[0]
 
     def test_full_pap_order_by_weight_cold_and_hot_for_tomorrow(self):
         order, order_items, payload = self._run_order("pap-full", PAP_ID, [
@@ -301,7 +311,7 @@ class FullOrderNonRegressionTests(_DbTestCase):
         ])
 
         self.assertIsNone(order.pickup_date)
-        self.assertNotIn("pickup_date", payload)
+        self.assertIsNone(payload.get("pickup_date"))
         self.assertEqual(payload["restaurant_id"], CDS_ID)
         self.assertEqual([oi.sale_unit for oi in order_items], ["piece", "piece"])
         sent = {i["pizza_name"]: i for i in payload["items"]}

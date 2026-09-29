@@ -28,7 +28,6 @@ def _mask_b44(s) -> str:
     return _B44_KEY_RE.sub("api_key=***", str(s))
 
 
-BASE44_ORDER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Order"
 BASE44_CUSTOMER_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Customer"
 BASE44_RESERVATION_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Reservation"
 BASE44_TABLE_URL = "https://app.base44.com/api/apps/69c54bc5c44250d7da397903/entities/Table"
@@ -529,127 +528,6 @@ def is_dough_available(dough_code: str) -> bool:
     return True  # impasti non elencati sono considerati validi (es. default classica)
 
 
-def get_next_order_number() -> int:
-    """
-    Restituisce il prossimo numero ordine progressivo: conta gli Order su Base44 e aggiunge 1.
-    Fallback: numero random a 4 cifre.
-    """
-    import random as _random
-    token = base44_token()
-    if token:
-        try:
-            response = httpx.get(
-                BASE44_ORDER_URL,
-                headers=auth_headers(),
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-            entities = data.get("entities", []) if isinstance(data, dict) else data
-            count = len(entities) if isinstance(entities, list) else 0
-            next_num = count + 1
-            print(f"[Order] Ordini esistenti: {count} → prossimo numero: {next_num}")
-            return next_num
-        except Exception as e:
-            print(f"[Order] Errore conteggio ordini: {type(e).__name__}: {_mask_b44(e)} → uso fallback random")
-    fallback = _random.randint(1000, 9999)
-    print(f"[Order] Fallback numero ordine random: {fallback}")
-    return fallback
-
-
-def save_order_to_base44(
-    customer_name: str,
-    customer_phone: str | None,
-    pickup_time: str,
-    order_number: int,
-    ai_confidence: float,
-    items: list[dict],
-    restaurant_id: str = "",
-    pickup_date: str | None = None,
-) -> None:
-    """
-    Invia l'ordine a Base44.
-    Ogni item deve già contenere base_price, extras_price, total_price.
-    total_amount viene calcolato come somma dei total_price.
-    dough_type viene mappato dal campo pizza_type se non già presente.
-    """
-    token = base44_token()
-    if not token:
-        print("WARNING: BASE44_TOKEN not set, skipping Base44 sync")
-        return
-
-    needs_review = ai_confidence < 0.8
-    review_reason = "Bassa confidenza AI" if needs_review else None
-    total_amount = round(sum(item.get("total_price", 0.0) for item in items), 2)
-
-    base44_items = []
-    for item in items:
-        b44_item = {
-            "pizza_name": item["pizza_name"],
-            "quantity": item["quantity"],
-            "sale_unit": item.get("sale_unit", "piece"),
-            "dough_type": (
-                item.get("dough_type")
-                or _PIZZA_TYPE_TO_DOUGH.get(item.get("pizza_type", ""), "classica")
-            ),
-            "add_ingredients": item.get("add_ingredients", []),
-            "remove_ingredients": item.get("remove_ingredients", []),
-            "base_price": item.get("base_price", 0.0),
-            "extras_price": item.get("extras_price", 0.0),
-            "total_price": item.get("total_price", 0.0),
-        }
-        if item.get("sale_unit") == "kg":
-            b44_item["temperature"] = item.get("temperature") or "fredda"
-            kg_size = item.get("size", "normale")
-            if kg_size in ("piena", "mezza"):
-                b44_item["size"] = kg_size
-                b44_item["portion"] = kg_size
-        base44_items.append(b44_item)
-
-    payload = {
-        "order_number": order_number,
-        "customer_name": customer_name,
-        "customer_phone": customer_phone,
-        "status": "nuovo",
-        "source": "telefono",
-        "pickup_time": pickup_time,
-        "total_amount": total_amount,
-        "ai_confidence": ai_confidence,
-        "needs_review": needs_review,
-        "review_reason": review_reason,
-        "items": base44_items,
-    }
-    if restaurant_id:
-        payload["restaurant_id"] = restaurant_id
-    if pickup_date:
-        payload["pickup_date"] = pickup_date
-
-    print(
-        f"[Base44] Payload ordine=#{order_number} customer={mask_name(customer_name)} "
-        f"phone={mask_phone(customer_phone)} items={len(base44_items)} total={total_amount}"
-        f" pickup_date={pickup_date!r}"
-    )
-
-    try:
-        response = httpx.post(
-            BASE44_ORDER_URL,
-            headers=auth_headers(),
-            json=payload,
-            timeout=10,
-        )
-        print(f"[Base44] Status code: {response.status_code}")
-        print(f"[Base44] Response body_len={len(response.text)}")
-        response.raise_for_status()
-        print(f"[Base44] Ordine sincronizzato, id={response.json().get('id')}")
-    except httpx.HTTPStatusError as e:
-        print(f"[Base44] HTTP error {e.response.status_code}: body_len={len(e.response.text)}")
-        return
-    except Exception as e:
-        print(f"[Base44] Errore generico: {type(e).__name__}: {_mask_b44(e)}")
-        return
-
-
-
 def _normalize_phone(raw: str | None) -> str | None:
     """Normalizza un numero di telefono in formato E.164 (+39...).
     Ritorna None se il numero è assente, fisso, o non normalizzabile."""
@@ -876,6 +754,76 @@ def send_whatsapp_confirmation(
         return f"{sms_status}|{wa_status}"
 
     return sms_status
+
+
+def _send_twilio_message(to: str, body: str, from_number: str, account_sid: str, auth_token: str) -> str:
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
+    try:
+        resp = httpx.post(
+            url,
+            auth=(account_sid, auth_token),
+            data={"From": from_number, "To": to, "Body": body},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return f"inviato:{resp.status_code}"
+    except httpx.HTTPStatusError as e:
+        return f"errore:HTTP_{e.response.status_code}"
+    except Exception as e:
+        return f"errore:{type(e).__name__}"
+
+
+def build_order_not_saved_alert(order: dict, attempts: int, last_error: str | None) -> str:
+    """Testo dell'avviso al titolare per un ordine che non è stato salvato su Base44."""
+    pickup = order.get("pickup_time") or "?"
+    if order.get("pickup_date"):
+        pickup = f"{order['pickup_date']} {pickup}"
+    lines = [
+        "\u26a0\ufe0f ORDINE NON SALVATO nel gestionale",
+        f"Dopo {attempts} tentativi l'ordine non è arrivato su Base44: inseriscilo a mano.",
+        "",
+        f"Cliente: {order.get('customer_name') or '?'} {order.get('customer_phone') or ''}".rstrip(),
+        f"Ritiro: {pickup}",
+        *_build_pizza_lines(order.get("items") or []),
+        f"Totale: \u20ac{float(order.get('total_amount') or 0.0):.2f}",
+    ]
+    if order.get("restaurant_id"):
+        lines.append(f"Ristorante: {order['restaurant_id']}")
+    if last_error:
+        lines.append(f"Errore: {last_error[:120]}")
+    return "\n".join(lines)
+
+
+def send_owner_alert(body: str) -> str:
+    """Avvisa il titolare (OWNER_PHONE): WhatsApp, e SMS se WhatsApp non parte.
+
+    WhatsApp accetta testo libero solo entro 24 ore dall'ultimo messaggio del
+    titolare: fuori da quella finestra Twilio rifiuta l'invio e si passa all'SMS.
+    """
+    owner_phone = os.getenv("OWNER_PHONE", "").strip()
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if not owner_phone or not account_sid or not auth_token:
+        print("[OwnerAlert] OWNER_PHONE o credenziali Twilio mancanti: avviso NON inviato")
+        return "skip:configurazione_mancante"
+
+    statuses = []
+    wa_from = (os.getenv("TWILIO_WHATSAPP_FROM") or "").removeprefix("whatsapp:")
+    if wa_from:
+        wa_status = _send_twilio_message(
+            f"whatsapp:{owner_phone}", body, f"whatsapp:{wa_from}", account_sid, auth_token,
+        )
+        print(f"[OwnerAlert] WhatsApp a {mask_phone(owner_phone)}: {wa_status}")
+        if wa_status.startswith("inviato"):
+            return f"wa_{wa_status}"
+        statuses.append(f"wa_{wa_status}")
+
+    sms_from = (os.getenv("TWILIO_NUMBER") or "").removeprefix("whatsapp:")
+    if sms_from:
+        sms_status = _send_twilio_message(owner_phone, body, sms_from, account_sid, auth_token)
+        print(f"[OwnerAlert] SMS a {mask_phone(owner_phone)}: {sms_status}")
+        statuses.append(f"sms_{sms_status}")
+    return "|".join(statuses) or "skip:mittente_mancante"
 
 
 def _fetch_restaurant_from_base44(timeout_seconds: float | None = None) -> dict | None:
@@ -1434,23 +1382,25 @@ def get_next_open_day(restaurant_id: str = "") -> tuple[datetime.date, str]:
     return tomorrow, _WEEKDAY_IT[tomorrow.weekday()]
 
 
-def lookup_customer(phone: str) -> dict | None:
+def lookup_customer(phone: str, restaurant_id: str = "") -> dict | None:
     """
-    Cerca il cliente su Base44 per numero di telefono.
-    Scarica tutti i Customer e filtra in Python (Base44 non supporta query params).
-    Restituisce il primo match (o None). Usa lookup_all_customers per i duplicati.
+    Cerca il cliente del ristorante `restaurant_id` su Base44 per numero di telefono.
+    Lo stesso telefono su due locali corrisponde a due Customer distinti.
+    Restituisce il primo match (o None).
     """
-    cache_key = re.sub(r"[\s\-\(\)]", "", phone or "")
+    phone_key = re.sub(r"[\s\-\(\)]", "", phone or "")
+    cache_key = f"{restaurant_id}:{phone_key}" if restaurant_id else phone_key
     now = time.monotonic()
     with _customer_lookup_cache_lock:
         _prune_customer_lookup_cache(now)
         cached = _customer_lookup_cache.get(cache_key)
         if cached:
-            print(f"[Customer] Lookup cache hit per {mask_phone(cache_key)}")
+            print(f"[Customer] Lookup cache hit per {mask_phone(phone_key)}")
             return cached[1]
 
     matches = _fetch_customers_by_phone(
         phone,
+        restaurant_id=restaurant_id,
         timeout_seconds=_customer_lookup_http_timeout_seconds(),
     )
     customer = matches[0] if matches else None
@@ -1466,9 +1416,14 @@ def lookup_customer(phone: str) -> dict | None:
 
 def _fetch_customers_by_phone(
     phone: str,
+    restaurant_id: str = "",
     timeout_seconds: float = 10.0,
 ) -> list[dict]:
-    """Restituisce TUTTI i record Customer con quel numero di telefono."""
+    """Restituisce TUTTI i record Customer del ristorante con quel numero di telefono.
+
+    Il confronto su restaurant_id è esatto: un Customer senza restaurant_id
+    (creato prima della separazione per locale) non viene attribuito a nessun locale.
+    """
     masked_phone = mask_phone(phone)
     print(f"[Customer] Inizio lookup per {masked_phone}")
     token = base44_token()
@@ -1497,7 +1452,7 @@ def _fetch_customers_by_phone(
         for record in entities:
             rec_phone_raw = record.get("phone") or ""
             rec_phone = re.sub(r"[\s\-\(\)]", "", rec_phone_raw)
-            if rec_phone == phone_norm:
+            if rec_phone == phone_norm and (record.get("restaurant_id") or "") == restaurant_id:
                 matches.append(record)
         print(f"[Customer] Match trovati: {len(matches)}")
         return matches
@@ -1524,9 +1479,11 @@ def upsert_customer(
     phone: str | None,
     pizzas: list[str],
     total_amount: float = 0.0,
+    restaurant_id: str = "",
 ) -> None:
     """
-    Crea o aggiorna il cliente su Base44 dopo un ordine confermato.
+    Crea o aggiorna il cliente del ristorante su Base44 dopo un ordine confermato.
+    Deduplica solo tra i record dello stesso ristorante.
     Aggiorna: total_orders, last_order_date, favorite_pizzas, total_spend, average_spend.
     Crea con: is_repeat=False.
     """
@@ -1538,7 +1495,7 @@ def upsert_customer(
     auth_kwargs: dict = {"headers": auth_headers()}
     today = datetime.date.today().isoformat()
 
-    all_matches = _fetch_customers_by_phone(phone) if phone else []
+    all_matches = _fetch_customers_by_phone(phone, restaurant_id=restaurant_id) if phone else []
 
     # Deduplicazione: se ci sono più record con lo stesso phone, tieni quello
     # con più ordini e cancella gli altri, sommandone i dati.
@@ -1653,6 +1610,8 @@ def upsert_customer(
             "average_spend": round(total_amount, 2),
             "is_repeat": False,
         }
+        if restaurant_id:
+            payload["restaurant_id"] = restaurant_id
         try:
             response = httpx.post(
                 BASE44_CUSTOMER_URL,

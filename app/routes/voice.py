@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlmodel import Session
 
 from app.db import get_session, engine as _db_engine
-from app.models import ConversationSession
+from app.models import ConversationSession, Order
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
 from app.telemetry import record_latency
@@ -40,8 +40,9 @@ from app.routes.chat import (
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 # ── CallLog tracking ─────────────────────────────────────────────────────────
-# session_id → (call_log_id, started_at_epoch)  — in-memory, intentionally ephemeral
-_call_logs: dict[str, tuple[str, float]] = {}
+# Il CallLog su Base44 si ritrova tramite il CallSid di Twilio: né la memoria del
+# processo né il DB locale sopravvivono a un riavvio.
+_TWILIO_FINAL_CALL_STATUSES = {"completed", "busy", "no-answer", "failed", "canceled"}
 
 
 def _now_iso() -> str:
@@ -103,61 +104,124 @@ async def _call_log_create(
     session_id: str,
     restaurant_id: str,
     caller_phone: str | None,
+    call_sid: str = "",
 ) -> None:
-    """Fire-and-forget: create a CallLog with outcome=abbandonata as safety default."""
+    """Fire-and-forget: create a CallLog with outcome=abbandonata as safety default.
+
+    Se il chiamante riattacca, il CallLog viene chiuso da /voice/status tramite call_sid.
+    """
     _rid = restaurant_id or os.getenv("DEFAULT_RESTAURANT_ID", "")
     if not _rid:
         print(f"[CallLog] Skip create session={session_id!r}: restaurant_id mancante")
         return
-    started_epoch = time.time()
     data = {
         "restaurant_id": _rid,
         "started_at": _now_iso(),
         "caller_phone": caller_phone,
         "outcome": "abbandonata",
     }
+    if call_sid:
+        data["call_sid"] = call_sid
     try:
         from app.services.base44_client import create_call_log
         result = await asyncio.to_thread(create_call_log, data)
         if result and result.get("id"):
-            _call_logs[session_id] = (str(result["id"]), started_epoch)
-            print(f"[CallLog] Creato id={result['id']!r} session={session_id!r}")
+            print(f"[CallLog] Creato id={result['id']!r} session={session_id!r} call_sid={call_sid!r}")
         else:
             print(f"[CallLog] Creazione fallita (nessun id) session={session_id!r}")
     except Exception as exc:
         print(f"[CallLog] Errore creazione session={session_id!r}: {type(exc).__name__}: {exc}")
 
 
+def _duration_since(started_at: str | None) -> int | None:
+    if not started_at:
+        return None
+    try:
+        started = datetime.datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.timezone.utc)
+    return max(0, int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()))
+
+
+def _order_ref_for_session(session_id: str) -> tuple[str | None, int | None]:
+    """(id Base44, numero definitivo) dell'ordine della sessione, se già assegnati."""
+    from sqlmodel import select as _select
+
+    with Session(_db_engine) as db:
+        order = db.exec(_select(Order).where(Order.conversation_session_id == session_id)).first()
+    if order is None:
+        return None, None
+    return order.base44_id, order.order_number
+
+
 async def _call_log_update(
     session_id: str,
+    call_sid: str,
     outcome: str,
     *,
-    order_id: int | None = None,
     summary: str = "",
 ) -> None:
-    """Fire-and-forget: finalise a CallLog with the real outcome."""
-    entry = _call_logs.pop(session_id, None)
-    if not entry:
+    """Fire-and-forget: finalise the CallLog of `call_sid` with the real outcome."""
+    from app.services.base44_client import find_call_log_by_sid, update_call_log
+
+    record = await asyncio.to_thread(find_call_log_by_sid, call_sid)
+    if not record or not record.get("id"):
+        print(f"[CallLog] Nessun CallLog per call_sid={call_sid!r} session={session_id!r}")
         return
-    log_id, started_epoch = entry
-    ended_epoch = time.time()
-    patch: dict = {
-        "ended_at": _now_iso(),
-        "duration_seconds": max(0, int(ended_epoch - started_epoch)),
-        "outcome": outcome,
-    }
-    if order_id is not None:
-        patch["order_id"] = str(order_id)
+    patch: dict = {"ended_at": _now_iso(), "outcome": outcome}
+    duration = _duration_since(record.get("started_at"))
+    if duration is not None:
+        patch["duration_seconds"] = duration
+    if outcome == "ordine":
+        base44_order_id, order_number = await asyncio.to_thread(_order_ref_for_session, session_id)
+        if base44_order_id:
+            patch["order_id"] = base44_order_id
+        summary = (
+            f"Ordine #{order_number} confermato" if order_number
+            else "Ordine confermato (numero in assegnazione: Base44 non disponibile)"
+        )
     if summary:
         patch["summary"] = summary
     transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
     if transcript:
         patch["transcript"] = transcript
     try:
-        from app.services.base44_client import update_call_log
-        await asyncio.to_thread(update_call_log, log_id, patch)
+        await asyncio.to_thread(update_call_log, record["id"], patch)
     except Exception as exc:
-        print(f"[CallLog] Errore aggiornamento id={log_id!r}: {type(exc).__name__}: {exc}")
+        print(f"[CallLog] Errore aggiornamento id={record['id']!r}: {type(exc).__name__}: {exc}")
+
+
+async def _call_log_close_from_status(call_sid: str, call_status: str, call_duration: str) -> None:
+    """Chiude il CallLog quando Twilio segnala la fine della chiamata.
+
+    Se il CallLog è già chiuso (ordine confermato, nessun input) non lo tocca:
+    resta solo il caso del cliente che riattacca, che conserva outcome=abbandonata.
+    """
+    from app.services.base44_client import find_call_log_by_sid, update_call_log
+
+    record = await asyncio.to_thread(find_call_log_by_sid, call_sid)
+    if not record or not record.get("id"):
+        print(f"[CallLog] /status: nessun CallLog per call_sid={call_sid!r}")
+        return
+    if record.get("ended_at"):
+        return
+    patch: dict = {"ended_at": _now_iso()}
+    duration = int(call_duration) if call_duration.isdigit() else _duration_since(record.get("started_at"))
+    if duration is not None:
+        patch["duration_seconds"] = duration
+    patch["summary"] = f"Chiamata chiusa dal chiamante prima della fine (Twilio: {call_status})"
+    try:
+        await asyncio.to_thread(update_call_log, record["id"], patch)
+        print(f"[CallLog] /status: chiuso id={record['id']!r} call_sid={call_sid!r} status={call_status!r}")
+    except Exception as exc:
+        print(f"[CallLog] /status: errore id={record['id']!r}: {type(exc).__name__}: {exc}")
+
+
+async def _twilio_call_sid(request: Request) -> str:
+    form = await request.form()
+    return str(form.get("CallSid") or "")
 
 
 # Directory temporanea per i file MP3 generati da ElevenLabs
@@ -1040,9 +1104,9 @@ async def voice_process(request: Request, session_id: str = Query(...)):
         _has_order = result.order_id is not None
         asyncio.create_task(_call_log_update(
             session_id,
+            await _twilio_call_sid(request),
             "ordine" if _has_order else "nessun_ordine",
-            order_id=result.order_id,
-            summary=f"Ordine #{result.order_id} confermato" if _has_order else "Chiamata terminata senza ordine",
+            summary="" if _has_order else "Chiamata terminata senza ordine",
         ))
     else:
         asyncio.create_task(_prefetch_openai_connection())
@@ -1116,7 +1180,7 @@ async def voice_incoming(
     lookup_task = None
     if caller_phone:
         print(f"[Voice] Customer lookup per {mask_phone(caller_phone)}")
-        lookup_task = asyncio.create_task(asyncio.to_thread(lookup_customer, caller_phone))
+        lookup_task = asyncio.create_task(asyncio.to_thread(lookup_customer, caller_phone, restaurant_id or ""))
 
     session_id = str(uuid.uuid4())
     conversation = ConversationSession(
@@ -1132,7 +1196,7 @@ async def voice_incoming(
     print(f"[Voice] Sessione creata: {session_id}")
 
     # CallLog: crea con outcome=abbandonata di default (verrà aggiornato a fine chiamata)
-    asyncio.create_task(_call_log_create(session_id, restaurant_id, caller_phone))
+    asyncio.create_task(_call_log_create(session_id, restaurant_id, caller_phone, await _twilio_call_sid(request)))
 
     greeting = get_agent_greeting(restaurant_id=restaurant_id)
 
@@ -1186,6 +1250,24 @@ async def voice_incoming(
         customer_profile=bool(customer),
     )
     return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/status")
+async def voice_status(
+    request: Request,
+    CallSid: str = Form(default=""),
+    CallStatus: str = Form(default=""),
+    CallDuration: str = Form(default=""),
+):
+    """Status callback Twilio (da configurare sul numero: "Call status changes").
+
+    Chiude il CallLog delle chiamate che il cliente interrompe riattaccando.
+    """
+    await _verify_twilio_request(request)
+    print(f"[Voice] Status callback call_sid={CallSid!r} status={CallStatus!r} duration={CallDuration!r}")
+    if CallSid and CallStatus in _TWILIO_FINAL_CALL_STATUSES:
+        await _call_log_close_from_status(CallSid, CallStatus, CallDuration)
+    return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
 
 @router.post("/gather")
@@ -1250,7 +1332,7 @@ async def voice_gather(
                 session.add(_conv)
                 session.commit()
             asyncio.create_task(_call_log_update(
-                session_id, "nessun_ordine",
+                session_id, await _twilio_call_sid(request), "nessun_ordine",
                 summary="Chiamata terminata: nessun input ricevuto",
             ))
             return Response(content=twiml, media_type="application/xml")
@@ -1404,9 +1486,9 @@ async def voice_gather(
         _has_order = result.order_id is not None
         asyncio.create_task(_call_log_update(
             session_id,
+            await _twilio_call_sid(request),
             "ordine" if _has_order else "nessun_ordine",
-            order_id=result.order_id,
-            summary=f"Ordine #{result.order_id} confermato" if _has_order else "Chiamata terminata senza ordine",
+            summary="" if _has_order else "Chiamata terminata senza ordine",
         ))
     else:
         asyncio.create_task(_prefetch_openai_connection())

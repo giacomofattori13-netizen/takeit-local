@@ -98,6 +98,16 @@ STARTUP_COLUMN_MIGRATIONS: tuple[ColumnMigration, ...] = (
         "portion",
         "ALTER TABLE orderitem ADD COLUMN portion VARCHAR",
     ),
+    ColumnMigration(
+        "order",
+        "order_number",
+        'ALTER TABLE "order" ADD COLUMN order_number INTEGER',
+    ),
+    ColumnMigration(
+        "order",
+        "base44_id",
+        'ALTER TABLE "order" ADD COLUMN base44_id VARCHAR',
+    ),
 )
 
 ORDER_IDEMPOTENCY_INDEX_NAME = "ix_order_conversation_session_id_unique"

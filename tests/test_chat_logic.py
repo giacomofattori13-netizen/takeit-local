@@ -5,6 +5,7 @@ import unittest
 from sqlmodel import SQLModel, Session, create_engine, select
 
 import app.routes.chat as chat_module
+from app.services import order_sync
 from app.models import ConversationSession, MenuItem, Order, OrderItem, OrderSideEffect
 from app.routes.chat import (
     _extract_local_customer_name,
@@ -178,7 +179,7 @@ class ChatLogicTests(unittest.TestCase):
         original_upsert = chat_module.upsert_customer
 
         def failing_save(**kwargs):
-            calls.append(("save", kwargs["order_number"]))
+            calls.append(("save", kwargs["customer_name"]))
             raise RuntimeError("base44 down")
 
         def fake_send(**kwargs):
@@ -214,12 +215,12 @@ class ChatLogicTests(unittest.TestCase):
             chat_module.upsert_customer = original_upsert
 
         self.assertEqual(calls, [
-            ("save", 42),
+            ("save", "Mario"),
             ("send", 7.5),
             ("upsert", ["Margherita"]),
         ])
 
-    def test_enqueue_order_side_effects_persists_recoverable_jobs(self):
+    def _enqueue_jobs(self, base44_order_payload):
         engine = create_engine("sqlite://")
         SQLModel.metadata.create_all(engine)
         scheduled = []
@@ -233,11 +234,10 @@ class ChatLogicTests(unittest.TestCase):
             with Session(engine) as session:
                 chat_module._enqueue_order_side_effects(
                     session=session,
+                    local_order_id=42,
                     customer_name="Mario",
                     customer_phone="+393331234567",
                     pickup_time="20:00",
-                    order_number=42,
-                    ai_confidence=0.95,
                     items=[{
                         "pizza_name": "Margherita",
                         "pizza_type": "Normale",
@@ -248,10 +248,17 @@ class ChatLogicTests(unittest.TestCase):
                     }],
                     total_amount=7.5,
                     pizza_names=["Margherita"],
+                    restaurant_id="rest-pap",
+                    base44_order_payload=base44_order_payload,
                 )
                 jobs = session.exec(select(OrderSideEffect)).all()
         finally:
             chat_module._schedule_order_side_effect_job = original_schedule
+        return jobs, scheduled
+
+    def test_enqueue_order_side_effects_persists_recoverable_jobs(self):
+        """Base44 non disponibile alla conferma: anche l'Order passa dall'outbox con retry."""
+        jobs, scheduled = self._enqueue_jobs({"session_id": "s-1", "restaurant_id": "rest-pap"})
 
         self.assertEqual(
             {job.kind for job in jobs},
@@ -259,6 +266,14 @@ class ChatLogicTests(unittest.TestCase):
         )
         self.assertEqual({job.status for job in jobs}, {"pending"})
         self.assertEqual(len(scheduled), 3)
+        upsert = next(j for j in jobs if j.kind == "customer_upsert")
+        self.assertEqual(json.loads(upsert.payload_json)["restaurant_id"], "rest-pap")
+
+    def test_enqueue_order_side_effects_skips_base44_job_when_order_already_saved(self):
+        jobs, scheduled = self._enqueue_jobs(None)
+
+        self.assertEqual({job.kind for job in jobs}, {"whatsapp_confirmation", "customer_upsert"})
+        self.assertEqual(len(scheduled), 2)
 
     def test_schedule_delayed_side_effect_uses_timer_not_worker(self):
         events = []
@@ -632,18 +647,20 @@ class ChatLogicTests(unittest.TestCase):
             mock_resp.status_code = 200
             mock_resp.text = '{"id": "test-id"}'
             mock_resp.raise_for_status = lambda: None
-            mock_resp.json.return_value = {"id": "test-id"}
+            mock_resp.json.return_value = {"id": "test-id", **json}
             return mock_resp
 
         with (
             patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
-            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.query_entities", return_value=[]),
         ):
-            svc.save_order_to_base44(
+            order_sync.save_order_to_base44(
+                session_id=None,
+                restaurant_id="rest-test",
                 customer_name="Elena",
                 customer_phone="+393331234567",
                 pickup_time="19:30",
-                order_number=2001,
                 ai_confidence=0.95,
                 items=enriched_items,
                 pickup_date=merged["pickup_date"],
@@ -1036,18 +1053,19 @@ class ChatLogicTests(unittest.TestCase):
             mock_resp.status_code = 200
             mock_resp.text = '{"id": "test-id"}'
             mock_resp.raise_for_status = lambda: None
-            mock_resp.json.return_value = {"id": "test-id"}
+            mock_resp.json.return_value = {"id": "test-id", **json}
             return mock_resp
 
         with (
             patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
-            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.query_entities", return_value=[]),
         ):
-            svc.save_order_to_base44(
+            order_sync.save_order_to_base44(
+                session_id=None,
                 customer_name="Mario",
                 customer_phone="+393331234567",
                 pickup_time="19:00",
-                order_number=1001,
                 ai_confidence=0.95,
                 items=[kg_item],
                 restaurant_id="6a22d781b615baedb412be35",
@@ -1088,18 +1106,20 @@ class ChatLogicTests(unittest.TestCase):
             mock_resp.status_code = 200
             mock_resp.text = '{"id": "test-id"}'
             mock_resp.raise_for_status = lambda: None
-            mock_resp.json.return_value = {"id": "test-id"}
+            mock_resp.json.return_value = {"id": "test-id", **json}
             return mock_resp
 
         with (
             patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
-            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.query_entities", return_value=[]),
         ):
-            svc.save_order_to_base44(
+            order_sync.save_order_to_base44(
+                session_id=None,
+                restaurant_id="rest-test",
                 customer_name="Laura",
                 customer_phone=None,
                 pickup_time="13:00",
-                order_number=1002,
                 ai_confidence=0.99,
                 items=[piece_item],
                 pickup_date=None,
@@ -1140,18 +1160,20 @@ class ChatLogicTests(unittest.TestCase):
             mock_resp.status_code = 200
             mock_resp.text = '{"id": "test-id"}'
             mock_resp.raise_for_status = lambda: None
-            mock_resp.json.return_value = {"id": "test-id"}
+            mock_resp.json.return_value = {"id": "test-id", **json}
             return mock_resp
 
         with (
             patch.dict(os.environ, {"BASE44_TOKEN": "test-key"}),
-            patch("app.services.conversation_service.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.httpx.post", side_effect=fake_post),
+            patch("app.services.base44_client.query_entities", return_value=[]),
         ):
-            svc.save_order_to_base44(
+            order_sync.save_order_to_base44(
+                session_id=None,
+                restaurant_id="rest-test",
                 customer_name="Luca",
                 customer_phone=None,
                 pickup_time="18:30",
-                order_number=1003,
                 ai_confidence=0.90,
                 items=[kg_item],
                 pickup_date="2026-07-24",
