@@ -928,10 +928,11 @@ def _start_restaurant_refresh_background(reason: str, restaurant_id: str = "") -
 
 
 def load_restaurant(restaurant_id: str = "") -> dict:
-    """Restituisce i dati ristorante senza bloccare il turno cliente su Base44.
+    """Restituisce i dati ristorante. Base44 è l'unica fonte di verità.
 
-    Usa stale-while-revalidate: cache/file locale rispondono subito; Base44 aggiorna
-    in background quando il TTL scade o al primo cold load.
+    Cache fresca: risposta immediata. Cache stale: risposta immediata e refresh Base44
+    in background. Cache fredda: fetch Base44 bloccante (timeout breve); il file
+    locale si usa solo se Base44 non risponde, ed è subito stale per ritentare Base44.
     """
     now = time.monotonic()
     cached = _restaurant_cache.get(restaurant_id)
@@ -946,13 +947,19 @@ def load_restaurant(restaurant_id: str = "") -> dict:
         _start_restaurant_refresh_background("cache_stale", restaurant_id)
         return cached
 
+    # Cache fredda: Base44 è l'unica fonte di verità, quindi si prova prima lui
+    # (bloccante, timeout breve). Il file locale è solo riserva se Base44 non risponde.
+    fresh = _refresh_restaurant_cache_blocking(restaurant_id)
+    if fresh is not None:
+        return fresh
+
     # File fallback: serve restaurant_id="" (legacy) and also the restaurant_id
-    # that matches the id field in the file (so that cold-cache calls with a
-    # specific restaurant_id still get reservations_enabled / opening_hours right).
+    # that matches the id field in the file. Cached as already stale, so the next
+    # call serves it while retrying Base44 in background.
     local = _load_restaurant_from_file()
     if local and (not restaurant_id or local.get("id") == restaurant_id):
         cached = _cache_restaurant_data(local, "file", restaurant_id)
-        _start_restaurant_refresh_background("cold_file_fallback", restaurant_id)
+        _restaurant_cache_ts[restaurant_id] = time.monotonic() - RESTAURANT_CACHE_TTL - 1
         return cached
 
     _start_restaurant_refresh_background("cold_empty", restaurant_id)

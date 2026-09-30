@@ -35,27 +35,39 @@ class RestaurantCacheTests(unittest.TestCase):
         self.assertIs(result, cached)
         self.assertEqual(scheduled, ["cache_stale"])
 
-    def test_cold_load_uses_local_file_before_background_refresh(self):
-        local = {"agent_active": False, "opening_hours": {"lunedi": []}}
+    def test_cold_load_prefers_base44_over_local_file(self):
+        fresh = {"id": "rest-pap", "opening_hours": {"monday": "closed"}, "phone_orders_next_day_only": True}
+        local = {"id": "rest-pap", "opening_hours": {"monday": "00:00-23:59"}}
+
+        with (
+            patch.object(service, "_fetch_restaurant_from_base44_for", return_value=fresh),
+            patch.object(service, "_load_restaurant_from_file", return_value=local) as load_file,
+        ):
+            result = service.load_restaurant("rest-pap")
+
+        self.assertEqual(result, fresh)
+        load_file.assert_not_called()
+
+    def test_cold_load_uses_local_file_only_when_base44_fails(self):
+        local = {"id": "rest-pap", "opening_hours": {"monday": "closed"}}
         scheduled: list[str] = []
 
         with (
+            patch.object(service, "_fetch_restaurant_from_base44_for", return_value=None),
             patch.object(service, "_load_restaurant_from_file", return_value=local),
-            patch.object(
-                service,
-                "_fetch_restaurant_from_base44",
-                side_effect=AssertionError("Base44 must not block cold local load"),
-            ),
             patch.object(
                 service,
                 "_start_restaurant_refresh_background",
                 side_effect=lambda reason, restaurant_id="": scheduled.append(reason) or True,
             ),
         ):
-            result = service.load_restaurant()
+            first = service.load_restaurant("rest-pap")
+            second = service.load_restaurant("rest-pap")
 
-        self.assertEqual(result, local)
-        self.assertEqual(scheduled, ["cold_file_fallback"])
+        self.assertEqual(first, local)
+        self.assertEqual(second, local)
+        # Il file è subito stale: la chiamata successiva ritenta Base44 in background.
+        self.assertEqual(scheduled, ["cache_stale"])
 
     def test_startup_refresh_updates_cache_when_base44_is_available(self):
         fresh = {"agent_active": True, "agent_greeting": "Buonasera"}
