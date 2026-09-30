@@ -302,6 +302,30 @@ class PreorderFlowTests(_FlowHarness):
         self.assertEqual(r.state, "collecting_pickup_time")
         self.assertIn("dalle 17:00 alle 21:00", r.response_message)
 
+    def test_refused_pickup_time_during_portion_question_keeps_the_question_open(self):
+        self.say("mezzo chilo di bufala", {**NOTHING, "intent": "add_items", "items": [_bufala()]})
+        r = self.say("alle 15", {**NOTHING, "intent": "set_pickup_time", "pickup_time": "15:00"})
+        self.assertEqual(r.state, "collecting_kg_portion")
+        self.assertEqual(self.conversation().state, "collecting_kg_portion")
+        self.assertIn("dalle 17:00 alle 21:00", r.response_message)
+        self.assertTrue(r.response_message.endswith(chat_module._kg_slot_question(r.merged_order["items"], "portion")))
+        self.assertIsNone(self.conversation().pickup_time)
+
+        # La risposta alla porzione vale ancora, e l'orario viene chiesto dopo
+        r = self.say("intera e calda")
+        self.assertEqual(r.state, "collecting_name")
+        r = self.say("Giacomo")
+        self.assertEqual(r.state, "collecting_pickup_time")
+
+    def test_refused_pickup_time_outside_kg_questions_asks_the_time_again(self):
+        self.say(
+            "mezzo chilo di bufala intera calda",
+            {**NOTHING, "intent": "add_items", "items": [_bufala(size="piena", temperature="calda")]},
+        )
+        r = self.say("alle 15", {**NOTHING, "intent": "set_pickup_time", "pickup_time": "15:00"})
+        self.assertEqual(r.state, "collecting_pickup_time")
+        self.assertIn("dalle 17:00 alle 21:00", r.response_message)
+
     def test_validate_pickup_time_uses_the_pickup_day_hours(self):
         with patch.object(service, "load_restaurant", side_effect=lambda restaurant_id="": RESTAURANTS[PAP_ID]):
             check = lambda t, d=TUESDAY: service.validate_pickup_time(t, PAP_ID, pickup_date=d)[0]  # noqa: E731

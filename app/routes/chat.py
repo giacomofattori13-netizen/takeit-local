@@ -1485,7 +1485,12 @@ def build_assistant_response(
 
     # Pickup time closed-hours error — ritorna solo il messaggio di errore,
     # senza accodare missing_messages (che già contiene pickup_time_error).
+    # Se è aperta la domanda su porzione o caldo/freddo, la ripete: l'orario
+    # verrà chiesto dopo.
     if pickup_time_error:
+        if state in _KG_SLOT_STATES:
+            error = pickup_time_error.removesuffix(" A che ora passa?")
+            return f"{error} {_kg_slot_question(merged_order['items'], _KG_SLOT_STATES[state])}"
         return pickup_time_error
 
     # Missing/invalid items
@@ -3256,8 +3261,6 @@ def chat(request: ChatRequest, session: SessionDep):
     valid_items = []
     invalid_items = []
     missing_messages = []
-    if pickup_time_error:
-        missing_messages.append(pickup_time_error)
 
     # Precarica nomi items nascosti per ingredienti finiti (una sola chiamata per turno)
     _sold_out_names = get_sold_out_item_names(restaurant_id=restaurant_id)
@@ -3343,6 +3346,12 @@ def chat(request: ChatRequest, session: SessionDep):
         completed=conversation.completed,
         intended_quantity=conversation.intended_quantity,
     )
+    # Orario rifiutato: non riporta a collecting_items. Una domanda su porzione o
+    # caldo/freddo resta aperta; altrimenti si richiede l'orario.
+    if pickup_time_error:
+        if not missing_messages and state not in _KG_SLOT_STATES and state != "completed":
+            state = "collecting_pickup_time"
+        missing_messages.append(pickup_time_error)
     # Override esplicito: se intended_quantity è dichiarato e non raggiunto,
     # forza collecting_items indipendentemente da ciò che determine_state ha calcolato.
     if conversation.intended_quantity and state not in ("collecting_items", "completed"):
