@@ -709,11 +709,9 @@ class ChatLogicTests(unittest.TestCase):
         })
         self.assertEqual(result_ok["customer_name"], "Giulia Bianchi")
 
-    def test_two_kg_items_both_get_portion_and_temperature_default(self):
-        """Ordering two al-taglio flavors in one turn, with no explicit portion,
-        must default BOTH items to a sensible portion ('piena') and temperature
-        ('fredda') — not just the first one — and ask the courtesy question once
-        for both, naming both pizzas."""
+    def test_two_kg_items_without_portion_are_asked_not_defaulted(self):
+        """Two al-taglio flavors in one turn, no portion/temperature said: nothing is
+        defaulted, and the portion question names both pizzas."""
         import datetime
         from app.schemas import ChatRequest
 
@@ -804,32 +802,12 @@ class ChatLogicTests(unittest.TestCase):
 
         self.assertEqual(len(saved_items), 2)
         for item in saved_items:
-            self.assertEqual(item.get("size"), "piena", msg=f"{item['pizza_name']} missing portion default")
-            self.assertEqual(item.get("temperature"), "fredda")
-        # Courtesy question mentions both pizzas, asked once
+            self.assertEqual(item.get("size"), "normale", msg=f"{item['pizza_name']}: portion defaulted")
+            self.assertEqual(item.get("temperature"), "", msg=f"{item['pizza_name']}: temperature defaulted")
+        self.assertEqual(response.state, "collecting_kg_portion")
         self.assertIn("Bufala al taglio", response.response_message)
         self.assertIn("Porchetta al taglio", response.response_message)
-
-        # Confirm the defaults actually reach the persisted OrderItem rows too
-        # (this is where the original bug surfaced: portion null on Base44/local DB).
-        with Session(engine) as session:
-            conv = session.exec(
-                select(ConversationSession).where(ConversationSession.session_id == "two-kg-items")
-            ).one()
-            merged = {
-                "customer_name": "Elena",
-                "pickup_time": "20:00",
-                "items": saved_items,
-            }
-            conv.customer_name = "Elena"
-            conv.pickup_time = "20:00"
-            order, _ = chat_module._persist_order_once(session, conv, merged)
-            order_items = session.exec(select(OrderItem).where(OrderItem.order_id == order.id)).all()
-
-        self.assertEqual(len(order_items), 2)
-        for oi in order_items:
-            self.assertEqual(oi.portion, "piena", msg=f"{oi.pizza_name} missing persisted portion")
-            self.assertEqual(oi.temperature, "fredda")
+        self.assertIn("trancio pieno", response.response_message)
 
     def test_kg_slot_answer_does_not_pollute_customer_name(self):
         """Reproduces the reported bug: after a kg item is added (name still
@@ -901,10 +879,10 @@ class ChatLogicTests(unittest.TestCase):
                     ChatRequest(session_id="kg-name-guard", message="una bufala al taglio, due etti"),
                     session,
                 )
-                self.assertEqual(first.state, "collecting_name")
+                self.assertEqual(first.state, "collecting_kg_portion")
 
-                # Customer replies to the (misheard) portion/temperature question
-                # instead of the name question — this must NOT become the name.
+                # The answer to the portion question also carries the temperature:
+                # both are applied, and it must NOT become the customer name.
                 second = chat_module.chat(
                     ChatRequest(session_id="kg-name-guard", message="Intero è fredda"),
                     session,
@@ -1214,6 +1192,7 @@ class ChatLogicTests(unittest.TestCase):
         with (
             patch.object(chat_module, "is_agent_active", return_value=True),
             patch.object(chat_module, "is_reservations_enabled", return_value=False),
+            patch.object(chat_module, "is_phone_orders_next_day_only", return_value=True),
             patch.object(chat_module, "get_next_open_day", return_value=(tomorrow, "giovedì")),
             patch.object(chat_module, "get_proposable_menu", return_value=[{"name": "Bufala al taglio"}]),
             patch.object(chat_module, "get_sold_out_item_names", return_value=set()),
@@ -1237,7 +1216,9 @@ class ChatLogicTests(unittest.TestCase):
             )
 
         self.assertEqual(response.state, "awaiting_confirmation")
-        self.assertIn("per domani giovedì alle 19:30", response.response_message)
+        weekday = chat_module._WEEKDAY_IT[tomorrow.weekday()]
+        self.assertIn(f"Ritiro per domani, {weekday} alle 19:30, a nome Elena", response.response_message)
+        self.assertIn("500g di bufala al taglio, trancio pieno, fredda", response.response_message)
         self.assertIn("Confermo?", response.response_message)
 
 

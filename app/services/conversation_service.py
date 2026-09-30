@@ -573,10 +573,10 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
         sale_unit = item.get("sale_unit", "piece")
 
         if sale_unit == "kg":
-            temperature = item.get("temperature") or "fredda"
-            temp_str = " (calda)" if temperature == "calda" else " (fredda)"
+            temperature = item.get("temperature")
+            temp_str = f" ({temperature})" if temperature in ("calda", "fredda") else " (caldo/freddo da definire)"
             kg_size = item.get("size", "normale")
-            size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else ""
+            size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else " — porzione da definire"
             lines.append(f"- {format_weight_display(float(qty))} {name}{size_str}{temp_str}")
             continue
 
@@ -988,6 +988,16 @@ def is_reservations_enabled(restaurant_id: str = "") -> bool:
     return result
 
 
+def is_phone_orders_next_day_only(restaurant_id: str = "") -> bool:
+    """True se gli ordini telefonici del locale sono solo preordini per il prossimo
+    giorno di apertura (Restaurant.phone_orders_next_day_only, default False)."""
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
+    value = restaurant.get("phone_orders_next_day_only", False)
+    if isinstance(value, str):
+        value = value.lower() in ("true", "1", "yes", "si", "sì")
+    return bool(value)
+
+
 def fetch_and_save_restaurant(restaurant_id: str = "") -> dict:
     """Alias usato all'avvio in main.py: prova un refresh Base44 breve, poi fallback locale."""
     fresh = _refresh_restaurant_cache_blocking(restaurant_id)
@@ -1287,10 +1297,15 @@ def resolve_pickup_time(raw: str) -> str:
     return result
 
 
-def validate_pickup_time(pickup_time: str, restaurant_id: str = "") -> tuple[bool, str | None, str | None]:
+def validate_pickup_time(
+    pickup_time: str,
+    restaurant_id: str = "",
+    pickup_date: datetime.date | None = None,
+) -> tuple[bool, str | None, str | None]:
     """
     Controlla se pickup_time rientra negli orari di apertura del giorno corrente
     ed è nel futuro rispetto all'orario attuale (timezone Europe/Rome).
+    Con pickup_date (preordine) controlla invece l'orario di apertura di quel giorno.
 
     opening_hours atteso: {"monday": "closed"|"HH:MM-HH:MM", "tuesday": ..., ...}
 
@@ -1312,6 +1327,9 @@ def validate_pickup_time(pickup_time: str, restaurant_id: str = "") -> tuple[boo
         pickup_minutes = _parse_minutes(pickup_time)
     except (ValueError, IndexError):
         return True, None, None
+
+    if pickup_date is not None:
+        return _validate_pickup_on_day(pickup_minutes, pickup_time, opening_hours, pickup_date)
 
     today_name = _WEEKDAY_NAMES[datetime.date.today().weekday()]
     today_slot = opening_hours.get(today_name, "")
@@ -1359,6 +1377,41 @@ def validate_pickup_time(pickup_time: str, restaurant_id: str = "") -> tuple[boo
         return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
 
     return True, None, None
+
+
+def _validate_pickup_on_day(
+    pickup_minutes: int,
+    pickup_time: str,
+    opening_hours: dict,
+    pickup_date: datetime.date,
+) -> tuple[bool, str | None, str | None]:
+    """Validazione per un giorno futuro: solo l'orario di apertura di quel giorno."""
+    day_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[pickup_date.weekday()], ""))
+    if day_range is None:
+        return False, None, None
+    open_min, close_min = day_range
+    if pickup_minutes < open_min:
+        h, m = divmod(open_min, 60)
+        return False, f"{h:02d}:{m:02d}", None
+    if pickup_minutes > close_min - 15:
+        last_slot = max(close_min - 15, open_min)
+        close_h, close_m = divmod(close_min, 60)
+        last_h, last_m = divmod(last_slot, 60)
+        print(f"[Hours] Preordine {pickup_date} alle {pickup_time}: oltre la chiusura {close_h:02d}:{close_m:02d}")
+        return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
+    return True, None, None
+
+
+def get_opening_range_text(restaurant_id: str, day: datetime.date) -> str | None:
+    """'dalle 17:00 alle 21:00' per il giorno indicato, None se chiuso o senza orari."""
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+    if not isinstance(opening_hours, dict):
+        return None
+    day_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[day.weekday()], ""))
+    if day_range is None:
+        return None
+    (oh, om), (ch, cm) = divmod(day_range[0], 60), divmod(day_range[1], 60)
+    return f"dalle {oh:02d}:{om:02d} alle {ch:02d}:{cm:02d}"
 
 
 def get_next_open_day(restaurant_id: str = "") -> tuple[datetime.date, str]:
@@ -2251,7 +2304,7 @@ DIMENSIONE TRANCIO (solo per voci "[al kg]"):
 - Le voci al kg hanno due formati di taglio: "piena" (trancio 15×20 cm) e "mezza" (trancio 7.5×10 cm).
 - Se il cliente dice "piena", "intera", "grande" → size="piena".
 - Se dice "mezza", "mezza porzione", "piccola" → size="mezza".
-- Se NON specificata, usa size="normale" (il backend chiederà piena o mezza).
+- Se NON specificata, usa size="normale" (il backend chiederà piena o mezza). Non indovinarla mai.
 - NON confondere "mezza" come dimensione trancio con "mezza" come orario (es. "alle otto e mezza").
 - Esempi:
   * "300g di porchetta piena" → pizza_name="Porchetta", quantity=0.3, size="piena"
@@ -2277,7 +2330,7 @@ Intent rules:
 TEMPERATURA PER PIZZE AL KG:
 - Le voci segnate "[al kg]" nel menu possono essere servite fredde (da asporto) o calde (scaldate subito).
 - Se il cliente specifica la temperatura per una voce al kg, usa temperature="fredda" o temperature="calda".
-- Se NON specificata, usa temperature="" (il backend usa il default della sessione).
+- Se NON specificata, usa temperature="" (il backend la chiederà al cliente). Non indovinarla mai.
 - Se il cliente dice "fredde"/"fredda"/"da portar via"/"da asporto" → temperature="fredda".
 - Se dice "calde"/"calda"/"scaldata"/"da mangiare subito" → temperature="calda".
 - Se risponde SOLO con una preferenza temperatura senza pizze (es. "calde per favore") → intent="set_kg_temperature", items=[].

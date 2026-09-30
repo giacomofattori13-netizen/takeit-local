@@ -31,6 +31,9 @@ from app.services.conversation_service import (
     resolve_restaurant_from_phone,
 )
 from app.routes.chat import (
+    _KG_SLOT_STATES,
+    _extract_kg_size,
+    _extract_temperature,
     _extract_local_customer_name,
     _extract_local_pickup_time,
     _extract_party_size,
@@ -319,6 +322,10 @@ def _needs_filler(speech: str, state: str) -> bool:
         return _extract_local_customer_name(speech) is None
     if state == "collecting_pickup_time":
         return _extract_local_pickup_time(speech) is None
+    if state in _KG_SLOT_STATES:
+        # Risposta breve riconosciuta → fast path locale; altrimenti passa dall'LLM
+        field = _extract_kg_size if _KG_SLOT_STATES[state] == "portion" else _extract_temperature
+        return len(speech.split()) > 5 or field(speech) is None
     if state == "collecting_reservation_party":
         return _extract_party_size(speech) is not None
     if state == "awaiting_reservation_confirmation":

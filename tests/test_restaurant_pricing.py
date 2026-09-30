@@ -221,6 +221,7 @@ class FullOrderNonRegressionTests(_DbTestCase):
             patch.object(chat_module, "ensure_restaurant_config", return_value=True),
             patch.object(chat_module, "is_agent_active", return_value=True),
             patch.object(chat_module, "is_reservations_enabled", side_effect=lambda restaurant_id="": restaurant_id != PAP_ID),
+            patch.object(chat_module, "is_phone_orders_next_day_only", side_effect=lambda restaurant_id="": restaurant_id == PAP_ID),
             patch.object(chat_module, "get_next_open_day", return_value=(self.tomorrow, "domani")),
             patch.object(chat_module, "load_restaurant", side_effect=lambda restaurant_id="": restaurants.get(restaurant_id, {})),
             patch.object(chat_module, "get_proposable_menu", side_effect=lambda restaurant_id="": _menu_for(restaurant_id)),
@@ -287,8 +288,8 @@ class FullOrderNonRegressionTests(_DbTestCase):
 
     def test_full_pap_order_by_weight_cold_and_hot_for_tomorrow(self):
         order, order_items, payload = self._run_order("pap-full", PAP_ID, [
-            self._item("Margherita", 0.5, temperature="fredda"),
-            self._item("Bufala al taglio", 0.3, temperature="calda"),
+            self._item("Margherita", 0.5, temperature="fredda", size="piena"),
+            self._item("Bufala al taglio", 0.3, temperature="calda", size="mezza"),
         ])
 
         self.assertEqual(order.pickup_date, self.tomorrow.isoformat())

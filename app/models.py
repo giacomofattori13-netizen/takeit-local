@@ -68,7 +68,8 @@ class ConversationSession(SQLModel, table=True):
     no_input_count: int = 0
     reservation_json: str = "{}"
     restaurant_id: Optional[str] = None
-    kg_temperature: Optional[str] = None
+    kg_temperature: Optional[str] = None  # non più usato: la temperatura si chiede per ordine
+    pickup_date: Optional[str] = None  # "YYYY-MM-DD": giorno di ritiro del preordine, fissato una volta per sessione
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

@@ -52,9 +52,15 @@ def _next_number(orders: list[dict]) -> int:
 
 
 def build_order_items(items: list[dict]) -> list[dict]:
-    """Item nel formato di Order.items su Base44."""
+    """Item nel formato di Order.items su Base44.
+
+    Per le voci al kg temperatura e porzione compaiono solo se il cliente le ha
+    dette: nessun valore predefinito (un campo assente finisce in needs_review).
+    """
     base44_items = []
     for item in items:
+        is_kg = item.get("sale_unit") == "kg"
+        size = item.get("size") or "normale"
         b44_item = {
             "pizza_name": item["pizza_name"],
             "quantity": item["quantity"],
@@ -63,17 +69,19 @@ def build_order_items(items: list[dict]) -> list[dict]:
                 item.get("dough_type")
                 or _PIZZA_TYPE_TO_DOUGH.get(item.get("pizza_type", ""), "classica")
             ),
-            "size": item.get("size") or "normale",
             "add_ingredients": item.get("add_ingredients", []),
             "remove_ingredients": item.get("remove_ingredients", []),
             "base_price": item.get("base_price", 0.0),
             "extras_price": item.get("extras_price", 0.0),
             "total_price": item.get("total_price", 0.0),
         }
-        if item.get("sale_unit") == "kg":
-            b44_item["temperature"] = item.get("temperature") or "fredda"
-            if b44_item["size"] in ("piena", "mezza"):
-                b44_item["portion"] = b44_item["size"]
+        if not is_kg:
+            b44_item["size"] = size
+        elif size in ("piena", "mezza"):
+            b44_item["size"] = size
+            b44_item["portion"] = size
+        if is_kg and item.get("temperature") in ("calda", "fredda"):
+            b44_item["temperature"] = item["temperature"]
         base44_items.append(b44_item)
     return base44_items
 
@@ -122,6 +130,7 @@ def save_order_to_base44(
     items: list[dict],
     pickup_date: str | None = None,
     order_date: str | None = None,
+    review_reasons: list[str] | None = None,
 ) -> dict:
     """Crea l'Order su Base44 e ritorna {"id", "order_number"} con numero definitivo.
 
@@ -147,7 +156,9 @@ def save_order_to_base44(
             order_date = record.get("order_date") or order_date
             print(f"[OrderSync] Order già presente per session={session_id!r}: id={record.get('id')!r}")
         else:
-            ai_needs_review = ai_confidence < 0.8
+            reasons = list(review_reasons or [])
+            if ai_confidence < 0.8:
+                reasons.insert(0, "Bassa confidenza AI")
             base44_items = build_order_items(items)
             payload = {
                 "order_number": _next_number(_list_orders(restaurant_id, order_date)),
@@ -160,8 +171,8 @@ def save_order_to_base44(
                 "pickup_time": pickup_time,
                 "total_amount": round(sum(i.get("total_price", 0.0) for i in items), 2),
                 "ai_confidence": ai_confidence,
-                "needs_review": ai_needs_review,
-                "review_reason": "Bassa confidenza AI" if ai_needs_review else None,
+                "needs_review": bool(reasons),
+                "review_reason": "; ".join(reasons) if reasons else None,
                 "items": base44_items,
             }
             if session_id:

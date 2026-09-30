@@ -15,12 +15,13 @@
   "price_per_kg_hot": 19.9,
   "price_per_kg_cold": 18.5,
   "opening_hours": {
-    "monday": "00:00-23:59",
-    "tuesday": "00:00-23:59",
-    "wednesday": "00:00-23:59",
-    "thursday": "00:00-23:59",
-    "friday": "00:00-23:59",
-    "saturday": "00:00-23:59",
-    "sunday": "00:00-23:59"
-  }
+    "monday": "closed",
+    "tuesday": "17:00-21:00",
+    "wednesday": "17:00-21:00",
+    "thursday": "17:00-21:00",
+    "friday": "17:00-21:00",
+    "saturday": "17:00-21:00",
+    "sunday": "17:00-21:00"
+  },
+  "phone_orders_next_day_only": true
 }
