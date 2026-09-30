@@ -231,7 +231,11 @@ async def _twilio_call_sid(request: Request) -> str:
 AUDIO_DIR = Path("/tmp/takeit_audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-_GATHER_ATTRS = 'input="speech" language="it-IT" speechTimeout="auto"'
+# actionOnEmptyResult: anche senza parlato riconosciuto Twilio chiama /voice/gather
+# (ramo no-input), invece di passare al verbo successivo e chiudere la chiamata.
+_GATHER_ATTRS = (
+    'input="speech" language="it-IT" speechTimeout="auto" timeout="5" actionOnEmptyResult="true"'
+)
 _POLLY_FALLBACK = "Polly.Giorgio"
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
