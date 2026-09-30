@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 import app.routes.voice as voice_module
-from tests.test_next_day_preorder_flow import CorteDelSoleUnaffectedTests, PreorderFlowTests
+import tests.test_next_day_preorder_flow as flow
 
 _TERMINAL_STATES = {"completed", "unavailable"}
 
@@ -73,8 +73,8 @@ def _checking_say(test_class):
     return Checked
 
 
-PreorderFlowTwimlTests = _checking_say(PreorderFlowTests)
-CorteDelSoleTwimlTests = _checking_say(CorteDelSoleUnaffectedTests)
+PreorderFlowTwimlTests = _checking_say(flow.PreorderFlowTests)
+CorteDelSoleTwimlTests = _checking_say(flow.CorteDelSoleUnaffectedTests)
 
 
 if __name__ == "__main__":

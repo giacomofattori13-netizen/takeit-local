@@ -38,6 +38,7 @@ class ExtractionValidationTests(unittest.TestCase):
             "pizza_name": "Margherita",
             "dough_type": "integrale",
             "quantity": 2,
+            "order_unit": "",
             "size": "normale",
             "add_ingredients": ["patatine"],
             "remove_ingredients": ["olive"],

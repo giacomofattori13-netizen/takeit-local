@@ -116,17 +116,35 @@ class OrderSyncTests(unittest.TestCase):
         self.assertEqual(self._save("s-pap")["order_number"], 1)
         self.assertEqual(self._save("s-cds", restaurant_id="rest-cds")["order_number"], 6)
 
-    def test_payload_keeps_al_taglio_fields(self):
+    def test_weight_order_is_saved_in_kg_without_portion(self):
         fake = FakeBase44()
         self._patch(fake)
 
-        self._save("s-1", pickup_date="2026-09-30")
+        self._save("s-1", pickup_date="2026-09-30", items=[{**ITEM, "order_unit": "kg"}])
 
         sent = fake.records[-1]
+        item = sent["items"][0]
         self.assertEqual(sent["pickup_date"], "2026-09-30")
-        self.assertEqual(sent["items"][0]["temperature"], "calda")
-        self.assertEqual(sent["items"][0]["portion"], "mezza")
-        self.assertEqual(sent["items"][0]["size"], "mezza")
+        self.assertEqual((item["order_unit"], item["quantity"], item["temperature"]), ("kg", ITEM["quantity"], "calda"))
+        self.assertNotIn("portion", item)
+        self.assertNotIn("slices", item)
+        self.assertIsNotNone(sent["total_amount"])
+
+    def test_slice_order_is_saved_with_count_and_portion_and_empty_total(self):
+        fake = FakeBase44()
+        self._patch(fake)
+
+        slices = {**ITEM, "order_unit": "tranci", "quantity": 2, "size": "mezza", "total_price": None}
+        self._save("s-1", items=[slices])
+
+        sent = fake.records[-1]
+        item = sent["items"][0]
+        self.assertEqual(
+            (item["order_unit"], item["slices"], item["portion"], item["size"], item["temperature"]),
+            ("tranci", 2, "mezza", "mezza", "calda"),
+        )
+        self.assertIsNone(item["total_price"])
+        self.assertIsNone(sent["total_amount"])  # prezzo a peso al ritiro
 
     def test_retry_for_same_session_does_not_create_a_second_order(self):
         fake = FakeBase44()

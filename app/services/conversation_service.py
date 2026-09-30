@@ -555,6 +555,39 @@ def format_weight_display(kg: float) -> str:
     return f"{kg_val:g} kg"
 
 
+_SLICE_PORTION = {"piena": ("intero", "interi"), "mezza": ("mezzo", "mezzi")}
+_SLICE_TEMPERATURE = {"calda": ("caldo", "caldi"), "fredda": ("freddo", "freddi")}
+
+
+def _format_slice_line(item: dict) -> str:
+    """Voce al taglio: "- 2 tranci interi Bufala (freddi)" o "- 500g Bufala (calda)"."""
+    name = item.get("pizza_name", "")
+    quantity = float(item.get("quantity") or 0)
+    temperature = item.get("temperature")
+    unit = item.get("order_unit")
+    if unit not in ("kg", "tranci"):
+        unit = "kg" if quantity > 0 else ""
+    if unit == "tranci":
+        count = int(round(quantity))
+        plural = count != 1
+        portion = _SLICE_PORTION.get(item.get("size"))
+        portion_str = portion[plural] if portion else "(porzione da definire)"
+        temp = _SLICE_TEMPERATURE.get(temperature)
+        temp_str = temp[plural] if temp else "caldo/freddo da definire"
+        return f"- {count} {'tranci' if plural else 'trancio'} {portion_str} {name} ({temp_str})"
+    temp_str = temperature if temperature in ("calda", "fredda") else "caldo/freddo da definire"
+    if unit == "kg":
+        return f"- {format_weight_display(quantity)} {name} ({temp_str})"
+    return f"- {name} — quantità da definire ({temp_str})"
+
+
+def format_total_line(total_amount: float | None) -> str:
+    """'Totale: €12.50' oppure, se ci sono tranci, 'Prezzo a peso al ritiro'."""
+    if total_amount is None:
+        return "Prezzo a peso al ritiro"
+    return f"Totale: \u20ac{float(total_amount):.2f}"
+
+
 def _build_pizza_lines(items: list[dict]) -> list[str]:
     """Costruisce le righe descrittive delle pizze per i messaggi di conferma.
 
@@ -564,7 +597,8 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
             + patatine fritte    (solo se presenti)
             - mozzarella         (solo se presenti)
 
-        - 500g Porchetta         (per items al kg)
+        - 500g Porchetta (calda)            (al taglio, a peso)
+        - 2 tranci interi Bufala (freddi)   (al taglio, a tranci)
     """
     lines = []
     for item in items:
@@ -573,11 +607,7 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
         sale_unit = item.get("sale_unit", "piece")
 
         if sale_unit == "kg":
-            temperature = item.get("temperature")
-            temp_str = f" ({temperature})" if temperature in ("calda", "fredda") else " (caldo/freddo da definire)"
-            kg_size = item.get("size", "normale")
-            size_str = f" — {kg_size}" if kg_size in ("piena", "mezza") else " — porzione da definire"
-            lines.append(f"- {format_weight_display(float(qty))} {name}{size_str}{temp_str}")
+            lines.append(_format_slice_line(item))
             continue
 
         dough = item.get("dough_type", "classica")
@@ -599,7 +629,7 @@ def _send_sms(
     phone: str,
     items: list[dict],
     pickup_time: str,
-    total_amount: float,
+    total_amount: float | None,
     account_sid: str,
     auth_token: str,
 ) -> str:
@@ -618,7 +648,6 @@ def _send_sms(
     pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
     pizza_lines = _build_pizza_lines(items)
     pizza_block = "\n".join(pizza_lines)
-    total_str = f"\u20ac{total_amount:.2f}"
     time_str = pickup_time or "da definire"
     contact_line = f"Per modifiche chiama il {pizzeria_phone}" if pizzeria_phone else ""
 
@@ -628,7 +657,7 @@ def _send_sms(
         "",
         pizza_block,
         "",
-        f"Totale: {total_str} \u2014 Ritiro alle {time_str}",
+        f"{format_total_line(total_amount)} \u2014 Ritiro alle {time_str}",
     ]
     if contact_line:
         parts.append(contact_line)
@@ -710,7 +739,7 @@ def send_whatsapp_confirmation(
     customer_phone: str | None,
     pickup_time: str,
     items: list[dict],
-    total_amount: float,
+    total_amount: float | None,
 ) -> str:
     """Invia la conferma ordine: SMS come canale principale, WhatsApp come fallback opzionale.
     Restituisce una stringa di stato con i risultati dei canali usati."""
@@ -785,7 +814,7 @@ def build_order_not_saved_alert(order: dict, attempts: int, last_error: str | No
         f"Cliente: {order.get('customer_name') or '?'} {order.get('customer_phone') or ''}".rstrip(),
         f"Ritiro: {pickup}",
         *_build_pizza_lines(order.get("items") or []),
-        f"Totale: \u20ac{float(order.get('total_amount') or 0.0):.2f}",
+        format_total_line(order.get("total_amount")),
     ]
     if order.get("restaurant_id"):
         lines.append(f"Ristorante: {order['restaurant_id']}")
@@ -1538,7 +1567,7 @@ def upsert_customer(
     full_name: str,
     phone: str | None,
     pizzas: list[str],
-    total_amount: float = 0.0,
+    total_amount: float | None = 0.0,
     restaurant_id: str = "",
 ) -> None:
     """
@@ -1632,7 +1661,7 @@ def upsert_customer(
         merged_pizzas = list(dict.fromkeys(prev + [p for p in pizzas if p not in prev]))
 
         new_total_orders = int(existing.get("total_orders") or 0) + 1
-        new_total_spend = round(float(existing.get("total_spend") or 0.0) + total_amount, 2)
+        new_total_spend = round(float(existing.get("total_spend") or 0.0) + float(total_amount or 0.0), 2)
         new_average_spend = round(new_total_spend / new_total_orders, 2)
 
         payload = {
@@ -1666,8 +1695,8 @@ def upsert_customer(
             "last_order_date": today,
             "total_orders": 1,
             "favorite_pizzas": pizzas,
-            "total_spend": round(total_amount, 2),
-            "average_spend": round(total_amount, 2),
+            "total_spend": round(float(total_amount or 0.0), 2),
+            "average_spend": round(float(total_amount or 0.0), 2),
             "is_repeat": False,
         }
         if restaurant_id:
@@ -2207,7 +2236,8 @@ Return ONLY valid JSON with this exact structure:
       "size": string,
       "add_ingredients": [string],
       "remove_ingredients": [string],
-      "temperature": "fredda" | "calda" | ""
+      "temperature": "fredda" | "calda" | "",
+      "order_unit": "kg" | "tranci" | ""
     }}
   ]
 }}
@@ -2222,6 +2252,8 @@ Allowed intent values:
 - "cancel_order"
 - "clear_cart"
 - "set_kg_temperature"
+- "set_kg_size"
+- "ask_kg_price"
 - "unknown"
 
 Rules:
@@ -2253,12 +2285,17 @@ Rules:
 - QUANTITÀ E UNITÀ DI VENDITA:
   * Voci SENZA "[al kg]": quantity è un intero ≥ 1 (numero di pezzi/trance).
     "due trance" → quantity=2, "una" → quantity=1.
-  * Voci con "[al kg, €X/kg]": quantity è il peso in kg (numero decimale).
-    Conversioni: "un etto"→0.1, "due etti"→0.2, "tre etti"→0.3, "quattro etti"→0.4,
-    "cinque etti"→0.5, "mezzo chilo"→0.5, "un chilo"→1.0, "un chilo e mezzo"→1.5,
-    "due chili"→2.0, "100 grammi"→0.1, "200 grammi"→0.2, "500 grammi"→0.5.
-    Se il peso NON è specificato dal cliente per una voce al kg, usa quantity=0
-    (il backend chiederà al cliente quanta ne vuole).
+  * Voci con "[al kg, €X/kg]" (pizza al taglio): il cliente ordina A PESO oppure A TRANCI.
+    - A peso (etti, grammi, chili): order_unit="kg", quantity = peso in kg (decimale).
+      Conversioni: "un etto"→0.1, "due etti"→0.2, "tre etti"→0.3, "quattro etti"→0.4,
+      "cinque etti"→0.5, "mezzo chilo"→0.5, "un chilo"→1.0, "un chilo e mezzo"→1.5,
+      "due chili"→2.0, "100 grammi"→0.1, "200 grammi"→0.2, "500 grammi"→0.5.
+    - A tranci (numero di tranci/pezzi, spesso con intero/mezzo): order_unit="tranci",
+      quantity = numero di tranci (intero).
+      "due tranci di bufala"→quantity=2; "tre interi di porchetta"→quantity=3, size="piena";
+      "un mezzo trancio di bufala"→quantity=1, size="mezza".
+    - Se il cliente dice solo il gusto, senza peso né numero di tranci: order_unit="",
+      quantity=0 (il backend chiederà quanti tranci, interi o mezzi).
 - quantity deve essere ≥ 0.
 - Always use the exact pizza name as it appears in the MENU.
 - If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.
@@ -2307,17 +2344,20 @@ Rules:
   * "una margherita doppia pasta integrale" → pizza_name="Margherita", size="doppio", dough_type="integrale"
   * "una margherita" → pizza_name="Margherita", size="normale"
 
-DIMENSIONE TRANCIO (solo per voci "[al kg]"):
-- Le voci al kg hanno due formati di taglio: "piena" (trancio 15×20 cm) e "mezza" (trancio 7.5×10 cm).
-- Se il cliente dice "piena", "intera", "grande" → size="piena".
-- Se dice "mezza", "mezza porzione", "piccola" → size="mezza".
-- Se NON specificata, usa size="normale" (il backend chiederà piena o mezza). Non indovinarla mai.
-- NON confondere "mezza" come dimensione trancio con "mezza" come orario (es. "alle otto e mezza").
+PORZIONE DEL TRANCIO (solo per voci "[al kg]" ordinate A TRANCI):
+- Ogni trancio può essere intero (size="piena") o mezzo (size="mezza").
+- "intero", "intera", "interi", "inter", "tutto", "pieno", "piena" → size="piena".
+- "mezzo", "mezza", "mezzi", "metà" → size="mezza".
+- Se NON specificata, usa size="normale" (il backend chiederà intero o mezzo). Non indovinarla mai.
+- Per gli ordini A PESO la porzione non serve: size="normale".
+- NON confondere "mezzo" del peso ("mezzo chilo", "un chilo e mezzo") o dell'orario ("alle otto e mezza") con la porzione.
 - Esempi:
-  * "300g di porchetta piena" → pizza_name="Porchetta", quantity=0.3, size="piena"
-  * "200g di pizza bianca mezza" → pizza_name="Pizza Bianca", quantity=0.2, size="mezza"
-  * "mezzo chilo di porchetta" → quantity=0.5, size="normale" ("mezzo" qui è il peso, non la dimensione)
-- Se risponde SOLO con "piena" o "mezza" senza pizze nuove → intent="set_kg_size", items=[].
+  * "due tranci interi di bufala" → pizza_name="Bufala", order_unit="tranci", quantity=2, size="piena"
+  * "tre mezzi di porchetta" → pizza_name="Porchetta", order_unit="tranci", quantity=3, size="mezza"
+  * "mezzo chilo di porchetta" → order_unit="kg", quantity=0.5, size="normale"
+  * "tre etti di bufala" → order_unit="kg", quantity=0.3, size="normale"
+  * "della bufala" → order_unit="", quantity=0, size="normale"
+- Se risponde SOLO con intero/mezzo senza pizze nuove → intent="set_kg_size", items=[].
 - NON usare "piena"/"mezza" nel pizza_name o in add_ingredients — va SOLO nel campo size.
 
 Intent rules:
@@ -2329,17 +2369,17 @@ Intent rules:
 - Use "replace_items" when the user wants to replace previous pizzas with new ones.
 - Use "cancel_order" when the user wants to cancel the whole order including name and time (annulla l'ordine, voglio annullare).
 - Use "clear_cart" when the user wants to reset only the pizzas and start over, keeping name and pickup time (cancella tutto e ricominciamo, ricominciamo da capo, azzera le pizze, voglio ricominciare).
-- Use "set_kg_temperature" when the user is answering a temperature question (fredda/calda/da portar via/da mangiare) with NO new pizza items. Return items=[].
-- Use "set_kg_size" when the user is answering a slice-size question (piena/mezza/intera/metà porzione) for a kg item with NO new pizza items. Return items=[].
+- Use "set_kg_temperature" when the user is answering a temperature question (calda/caldo/caldi, fredda/freddo/freddi) with NO new pizza items. Return items=[].
+- Use "set_kg_size" when the user is answering a slice question (quanti tranci, intero/mezzo) for a kg item with NO new pizza items. Return items=[].
 - Use "ask_kg_price" when the user is asking about the price of a kg item (quanto costa, quanto viene, che prezzo, il prezzo) with NO new pizza items. Return items=[].
 - Use "unknown" if the message is unclear.
 
 TEMPERATURA PER PIZZE AL KG:
-- Le voci segnate "[al kg]" nel menu possono essere servite fredde (da asporto) o calde (scaldate subito).
+- Le voci segnate "[al kg]" nel menu possono essere fredde o calde.
 - Se il cliente specifica la temperatura per una voce al kg, usa temperature="fredda" o temperature="calda".
 - Se NON specificata, usa temperature="" (il backend la chiederà al cliente). Non indovinarla mai.
-- Se il cliente dice "fredde"/"fredda"/"da portar via"/"da asporto" → temperature="fredda".
-- Se dice "calde"/"calda"/"scaldata"/"da mangiare subito" → temperature="calda".
+- "fredda"/"freddo"/"fredde"/"freddi"/"da asporto" → temperature="fredda".
+- "calda"/"caldo"/"calde"/"caldi"/"scaldata" → temperature="calda".
 - Se risponde SOLO con una preferenza temperatura senza pizze (es. "calde per favore") → intent="set_kg_temperature", items=[].
 
 Remove_items rules:
@@ -2387,8 +2427,8 @@ def _build_slim_system_prompt(
             "PRIMARY GOAL: extract customer_name. "
             "The customer is providing their name. They may also add/modify pizzas.\n"
             "IMPORTANT: the message may actually be answering an earlier question about "
-            "the al-taglio order (weight, portion size 'piena'/'mezza', temperature "
-            "'calda'/'fredda') rather than giving their name. If the message contains "
+            "the al-taglio order (weight or number of slices, portion 'intero'/'mezzo', "
+            "temperature 'calda'/'fredda') rather than giving their name. If the message contains "
             "words like 'intero', 'mezza', 'piena', 'calda', 'fredda', 'etti', 'chilo', "
             "'grammi', 'trancio', 'porzione' and does NOT look like a real person's name, "
             "set customer_name=null instead of guessing."
@@ -2562,8 +2602,10 @@ class _ExtractedItem(BaseModel):
     size: str = "normale"
     add_ingredients: list[str] = Field(default_factory=list)
     remove_ingredients: list[str] = Field(default_factory=list)
-    # For kg items: "fredda"|"calda"|"" (empty = use session default)
+    # For kg items: "fredda"|"calda"|"" (empty = ask the customer)
     temperature: str = ""
+    # For kg items: "kg" (quantity = weight) | "tranci" (quantity = slices) | "" (not said)
+    order_unit: str = ""
 
     @field_validator("pizza_name", "dough_type", "size", mode="before")
     @classmethod
@@ -2580,6 +2622,16 @@ class _ExtractedItem(BaseModel):
             return "calda"
         if re.search(r"fredd", t):
             return "fredda"
+        return ""
+
+    @field_validator("order_unit", mode="before")
+    @classmethod
+    def _coerce_order_unit(cls, value: Any) -> str:
+        unit = "" if value is None else str(value).lower().strip()
+        if unit in ("kg", "peso", "chili", "grammi"):
+            return "kg"
+        if unit in ("tranci", "trancio", "pezzi", "slices"):
+            return "tranci"
         return ""
 
     @field_validator("quantity", mode="before")

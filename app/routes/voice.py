@@ -32,6 +32,7 @@ from app.services.conversation_service import (
 )
 from app.routes.chat import (
     _KG_SLOT_STATES,
+    _extract_kg_quantity,
     _extract_kg_size,
     _extract_temperature,
     _extract_local_customer_name,
@@ -267,11 +268,16 @@ _tts_stream_client: httpx.AsyncClient | None = None
 
 # Frasi pre-generate all'avvio del server
 _CACHED_PHRASES = [
-    "Certo, dimmi pure!",
+    "Certo, mi dica pure!",
     "Ok!",
-    "Che nome metto?",
+    # Domande sulla pizza al taglio (vedi _kg_slot_question)
+    "Quanti tranci, interi o mezzi? Caldi o freddi?",
+    "Interi o mezzi? Caldi o freddi?",
+    "Interi o mezzi?",
+    "Caldi o freddi?",
+    "Calda o fredda?",
+    "A che nome?",
     "Per che ora?",
-    "Perfetto, confermo?",
     _NO_INPUT_MSG,
     _FILLER_PHRASE,
 ]
@@ -315,7 +321,7 @@ def _needs_filler(speech: str, state: str) -> bool:
     collecting_items → True solo se il testo sembra contenere dati di ordine
     reali (nome pizza, ingrediente, frase complessa). False per risposte
     semplici tipo 'sì/no' o intenzioni generiche tipo 'voglio ordinare' dove
-    il filler suonerebbe strano prima di 'Certo, dimmi pure!'.
+    il filler suonerebbe strano prima di 'Certo, mi dica pure!'.
 
     Stati prenotazione con rete/Base44 → filler solo quando il testo può far
     partire davvero disponibilità o conferma.
@@ -327,9 +333,14 @@ def _needs_filler(speech: str, state: str) -> bool:
     if state == "collecting_pickup_time":
         return _extract_local_pickup_time(speech) is None
     if state in _KG_SLOT_STATES:
-        # Risposta breve riconosciuta → fast path locale; altrimenti passa dall'LLM
-        field = _extract_kg_size if _KG_SLOT_STATES[state] == "portion" else _extract_temperature
-        return len(speech.split()) > 5 or field(speech) is None
+        # Risposta breve con quantità, porzione o caldo/freddo → fast path locale;
+        # altrimenti passa dall'LLM
+        recognised = (
+            _extract_kg_quantity(speech, bare_number_ok=_KG_SLOT_STATES[state] == "quantity")
+            or _extract_kg_size(speech)
+            or _extract_temperature(speech)
+        )
+        return len(speech.split()) > 5 or not recognised
     if state == "collecting_reservation_party":
         return _extract_party_size(speech) is not None
     if state == "awaiting_reservation_confirmation":
@@ -1224,7 +1235,7 @@ async def voice_incoming(
             print(f"[Voice] Cliente trovato: {mask_name(found_name)}")
             # Saluta direttamente per nome — il numero è conferma sufficiente
             first_name = found_name.split()[0]
-            greeting = f"Ciao {first_name}! Come posso aiutarti?"
+            greeting = f"Salve {first_name}! Come posso aiutarla?"
             if changed:
                 session.add(conversation)
                 session.commit()

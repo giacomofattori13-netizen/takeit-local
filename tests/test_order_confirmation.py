@@ -157,7 +157,7 @@ class OrderConfirmationTests(unittest.TestCase):
         self.assertIn("ORDINE NON SALVATO", body)
         self.assertIn("Giacomo +393331234567", body)
         self.assertIn("Ritiro: 2026-09-30 20:00", body)
-        self.assertIn("200g Bufala — mezza (calda)", body)
+        self.assertIn("- 200g Bufala (calda)", body)
         self.assertIn("€3.70", body)
         self.assertIn("HTTP 503", body)
 

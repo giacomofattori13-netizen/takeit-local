@@ -40,7 +40,6 @@ from app.services.conversation_service import (
     load_menu_from_base44,
     get_proposable_menu,
     get_sold_out_item_names,
-    format_weight_display,
     load_restaurant,
     load_doughs,
     send_whatsapp_confirmation,
@@ -263,19 +262,73 @@ def apply_intent_to_items(
 
     return existing_items
 
-_KG_PORTION_TEXT = {"piena": "trancio pieno", "mezza": "mezza porzione"}
+# Voci al taglio (sale_unit="kg"): il cliente ordina a peso (order_unit="kg",
+# quantity = kg) oppure a tranci (order_unit="tranci", quantity = numero di tranci,
+# size = porzione "piena"/"mezza"). order_unit vuoto = quantità non ancora detta.
+_COUNT_WORDS = {1: "un", 2: "due", 3: "tre", 4: "quattro", 5: "cinque", 6: "sei",
+                7: "sette", 8: "otto", 9: "nove", 10: "dieci"}
+_PORTION_WORDS = {"piena": ("intero", "interi"), "mezza": ("mezzo", "mezzi")}
+_SLICE_TEMPERATURE_WORDS = {"calda": ("caldo", "caldi"), "fredda": ("freddo", "freddi")}
+
+
+def kg_order_unit(item: dict) -> str:
+    """'kg', 'tranci' o '' (quantità non detta). Le voci salvate prima di
+    order_unit con un peso valgono come ordini a peso."""
+    unit = item.get("order_unit")
+    if unit in ("kg", "tranci"):
+        return unit
+    return "kg" if float(item.get("quantity") or 0) > 0 else ""
+
+
+def slice_count(item: dict) -> int:
+    return int(round(float(item.get("quantity") or 0)))
+
+
+def format_weight_spoken(kg: float) -> str:
+    """0.1 → 'un etto', 0.3 → 'tre etti', 0.5 → 'mezzo chilo', 1.5 → 'un chilo e mezzo'."""
+    grams = round(kg * 1000)
+    if grams == 500:
+        return "mezzo chilo"
+    if grams % 1000 == 0:
+        kilos = grams // 1000
+        return "un chilo" if kilos == 1 else f"{_COUNT_WORDS.get(kilos, kilos)} chili"
+    if grams % 1000 == 500:
+        kilos = grams // 1000
+        return f"{'un chilo' if kilos == 1 else f'{_COUNT_WORDS.get(kilos, kilos)} chili'} e mezzo"
+    if grams < 1000 and grams % 100 == 0:
+        hectos = grams // 100
+        return "un etto" if hectos == 1 else f"{_COUNT_WORDS.get(hectos, hectos)} etti"
+    return f"{grams} grammi"
 
 
 def format_kg_item(item: dict) -> str:
-    """Voce al kg per il cliente: peso, gusto, porzione e caldo/freddo.
+    """Voce al taglio per il cliente: quantità (peso o tranci con porzione),
+    gusto e caldo/freddo.
 
     Mostra esattamente ciò che viene salvato: un campo non detto dal cliente
     compare come "da definire", mai con un valore predefinito.
     """
-    portion = _KG_PORTION_TEXT.get(item.get("size"), "porzione da definire")
+    name = item["pizza_name"].lower()
+    unit = kg_order_unit(item)
     temperature = item.get("temperature")
-    temp_text = temperature if temperature in ("calda", "fredda") else "caldo o freddo da definire"
-    line = f"{format_weight_display(float(item['quantity']))} di {item['pizza_name'].lower()}, {portion}, {temp_text}"
+    if unit == "tranci":
+        count = slice_count(item)
+        plural = count != 1
+        noun = "tranci" if plural else "trancio"
+        portion = _PORTION_WORDS.get(item.get("size"))
+        if portion:
+            line = f"{_COUNT_WORDS.get(count, count)} {noun} {portion[plural]} di {name}"
+        else:
+            line = f"{_COUNT_WORDS.get(count, count)} {noun} di {name}, porzione da definire"
+        temp = _SLICE_TEMPERATURE_WORDS.get(temperature)
+        temp_text = temp[plural] if temp else "caldo o freddo da definire"
+    elif unit == "kg":
+        line = f"{format_weight_spoken(float(item['quantity']))} di {name}"
+        temp_text = temperature if temperature in ("calda", "fredda") else "caldo o freddo da definire"
+    else:
+        line = f"{name}, quantità da definire"
+        temp_text = temperature if temperature in ("calda", "fredda") else "caldo o freddo da definire"
+    line = f"{line}, {temp_text}"
     if item.get("add_ingredients"):
         line += " con " + ", ".join(item["add_ingredients"])
     if item.get("remove_ingredients"):
@@ -907,7 +960,7 @@ def enrich_items_with_pricing(
     session: Session,
     items: list[dict[str, Any]],
     restaurant_id: str = "",
-) -> tuple[list[dict[str, Any]], float]:
+) -> tuple[list[dict[str, Any]], float | None]:
     """Aggiunge base/extras/total price agli item usando una sola logica condivisa."""
     margherita = session.exec(
         _menu_select(restaurant_id, MenuItem.name == "Margherita")
@@ -944,6 +997,8 @@ def enrich_items_with_pricing(
         quantity = float(item.get("quantity") or 1)
 
         if item_sale_unit == "kg":
+            # Al taglio 0 = quantità non capita (needs_review): resta 0, mai 1
+            quantity = float(item.get("quantity") or 0)
             # Al peso: usa tariffa Restaurant se disponibile, altrimenti MenuItem.price.
             # Caldo/freddo non indicato (ordine in needs_review): tariffa fredda come stima.
             if item.get("temperature") == "calda" and price_per_kg_hot is not None:
@@ -953,7 +1008,9 @@ def enrich_items_with_pricing(
             else:
                 effective_price = base_price  # fallback: MenuItem.price
             extras_price = 0.0
-            total_price = round(effective_price * quantity, 2)
+            # A tranci (o quantità non capita) il peso non è noto: totale vuoto,
+            # prezzo a peso al ritiro
+            total_price = round(effective_price * quantity, 2) if kg_order_unit(item) == "kg" else None
             base_price = effective_price
         else:
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
@@ -979,8 +1036,15 @@ def enrich_items_with_pricing(
             "total_price": total_price,
         })
 
-    total_amount = round(sum(item.get("total_price", 0.0) for item in enriched_items), 2)
-    return enriched_items, total_amount
+    return enriched_items, order_total_amount(enriched_items)
+
+
+def order_total_amount(items: list[dict[str, Any]]) -> float | None:
+    """Somma dei totali; None se una voce non ha prezzo (tranci: si pesa al ritiro)."""
+    totals = [item.get("total_price") for item in items]
+    if any(total is None for total in totals):
+        return None
+    return round(sum(totals), 2)
 
 
 def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
@@ -1228,7 +1292,7 @@ def _finalize_new_order(
     conversation: ConversationSession,
     merged_order: dict[str, Any],
     enriched_items: list[dict[str, Any]],
-    total_amount: float,
+    total_amount: float | None,
     restaurant_id: str,
     ai_confidence: float,
     review_reasons: list[str] | None = None,
@@ -1288,7 +1352,7 @@ def _enqueue_order_side_effects(
     customer_phone: str | None,
     pickup_time: str,
     items: list[dict[str, Any]],
-    total_amount: float,
+    total_amount: float | None,
     pizza_names: list[str],
     restaurant_id: str = "",
     base44_order_payload: dict[str, Any] | None = None,
@@ -1410,6 +1474,22 @@ def _build_sold_out_item_message(
     return f"{pizza_name} è temporaneamente esaurita."
 
 
+def _format_euro(amount: float) -> str:
+    return f"{amount:.2f}".replace(".", ",") + " euro"
+
+
+def _kg_price_answer(restaurant_id: str = "") -> str:
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
+    cold = restaurant.get("price_per_kg_cold")
+    hot = restaurant.get("price_per_kg_hot")
+    if cold and hot:
+        return (
+            f"Al taglio costa {_format_euro(float(cold))} al chilo fredda e "
+            f"{_format_euro(float(hot))} calda. Il totale lo facciamo alla bilancia."
+        )
+    return "Il prezzo è al chilo: il totale lo facciamo alla bilancia."
+
+
 def determine_state(
     merged_order: dict,
     missing_messages: list[str],
@@ -1433,12 +1513,11 @@ def determine_state(
         if current_count < intended_quantity:
             return "collecting_items"
 
-    # Voci al kg: porzione e caldo/freddo sono obbligatorie e mai predefinite
-    if _kg_items_missing(merged_order["items"], "portion"):
-        return "collecting_kg_portion"
-
-    if _kg_items_missing(merged_order["items"], "temperature"):
-        return "collecting_kg_temperature"
+    # Voci al taglio: quantità (peso o tranci), porzione dei tranci e caldo/freddo
+    # sono obbligatorie e mai predefinite
+    for slot in _KG_SLOTS:
+        if _kg_items_missing(merged_order["items"], slot):
+            return _KG_STATE_BY_SLOT[slot]
 
     if not merged_order.get("customer_name"):
         return "collecting_name"
@@ -1473,15 +1552,19 @@ def build_assistant_response(
     not_found_names: list[str] | None = None,
     intended_quantity: int | None = None,
     day_phrase: str | None = None,
+    restaurant_id: str = "",
 ) -> str:
     """`day_phrase` ("domani, giovedì") è presente solo per i preordini."""
     customer_name = merged_order.get("customer_name")
     pickup_time = merged_order.get("pickup_time")
     items_text = format_items_for_customer(merged_order["items"])
 
-    # Prezzo al peso: deflect senza mostrare cifre
+    # Prezzo al taglio: tariffe al kg, il totale si fa alla bilancia
     if intent == "ask_kg_price":
-        return "Il prezzo è al peso, glielo diciamo al ritiro quando pesiamo i tranci."
+        answer = _kg_price_answer(restaurant_id)
+        if state in _KG_SLOT_STATES:
+            return f"{answer} {_kg_slot_question(merged_order.get('items', []))}"
+        return answer
 
     # Pickup time closed-hours error — ritorna solo il messaggio di errore,
     # senza accodare missing_messages (che già contiene pickup_time_error).
@@ -1499,10 +1582,10 @@ def build_assistant_response(
 
     # Cancellation / cart reset
     if intent == "cancel_order":
-        return "Va bene, ordine annullato. Dimmi pure se vuoi ricominciare."
+        return "Va bene, ordine annullato. Mi dica pure se vuole ricominciare."
 
     if intent == "clear_cart":
-        return "Ho cancellato tutto, dimmi pure cosa vuole!"
+        return "Ho cancellato tutto, mi dica pure cosa desidera!"
 
     if intent == "remove_items":
         parts = []
@@ -1515,9 +1598,9 @@ def build_assistant_response(
 
     # Order completed
     if state == "completed" and order_saved:
-        name_part = f" {customer_name}" if customer_name else ""
+        name_part = f", {customer_name}" if customer_name else ""
         if _is_mobile_phone(customer_phone):
-            return f"Perfetto{name_part}! Ti arriverà una conferma su WhatsApp."
+            return f"Perfetto{name_part}! Le arriverà la conferma su WhatsApp."
         else:
             return f"Perfetto{name_part}, a presto!"
 
@@ -1542,7 +1625,7 @@ def build_assistant_response(
     if intent in ("add_items", "modify_items", "replace_items"):
         if not new_valid_items:
             # Il cliente ha dichiarato una quantità senza specificare le pizze
-            return "Certo, dimmi pure!"
+            return "Certo, mi dica pure!"
         # Se c'è una quantità dichiarata e non ancora raggiunta, chiedi esplicitamente la prossima
         if intended_quantity is not None:
             items_count = sum(int(item.get("quantity", 1)) for item in merged_order.get("items", []))
@@ -1555,15 +1638,15 @@ def build_assistant_response(
                         return f"Perfetto! E la {ordinal} pizza?"
                     return "Perfetto! E l'ultima pizza?"
                 else:
-                    return f"Perfetto! Ne mancano ancora {remaining}, dimmi pure."
+                    return f"Perfetto! Ne mancano ancora {remaining}, mi dica pure."
         return random.choice(["Ok!", "Aggiunto!", "Perfetto!", "Certo!"])
 
     # Segnale "ho finito" senza items: chiedi nome e ora
     if not merged_order["items"]:
-        return "Certo, dimmi pure!"
+        return "Certo, mi dica pure!"
 
     # Natural ordering intent (e.g. "vorrei ordinare")
-    return "Certo, dimmi pure!"
+    return "Certo, mi dica pure!"
 
 def has_invalid_items(session: Session, items: list[dict]) -> bool:
     for item in items:
@@ -1829,7 +1912,7 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
             if found_name:
                 # Saluta direttamente per nome — il numero è conferma sufficiente
                 first_name = found_name.split()[0]
-                greeting = f"Ciao {first_name}! Come posso aiutarti?"
+                greeting = f"Salve {first_name}! Come posso aiutarla?"
                 conversation.customer_name = found_name
                 # Salva le pizze preferite per il flusso "solite"
                 raw_fav = customer.get("favorite_pizzas") or []
@@ -1853,68 +1936,163 @@ def start_chat(body: ChatStartRequest, session: SessionDep):
 def _extract_temperature(message: str) -> str | None:
     """Return 'calda' or 'fredda' from a bare temperature response, or None."""
     m = message.lower()
-    if re.search(r'\bcald[aeo]\b|scaldat|mangiare\s+subito', m):
+    if re.search(r'\bcald[aeio]\b|scaldat|mangiare\s+subito', m):
         return "calda"
-    if re.search(r'\bfredd[aeo]\b|portar?\s+via|asporto', m):
+    if re.search(r'\bfredd[aeio]\b|portar?\s+via|asporto', m):
         return "fredda"
     return None
 
 
+# "mezzo" in un peso ("mezzo chilo", "un chilo e mezzo") o in un orario ("e mezza")
+# non è una porzione.
+_NOT_PORTION_MEZZO_RE = re.compile(r"\bmezz[oa]\s+(?:chil[oi]|kg|etto)\b|\be\s+mezz[oa]\b")
+
+
 def _extract_kg_size(message: str) -> str | None:
-    """Return 'piena' or 'mezza' from a bare slice-size response, or None."""
-    m = message.lower()
-    if re.search(r'\bpien[ao]\b|\binter[ao]\b|\bgrande\b', m):
+    """Return 'piena' or 'mezza' from a slice-portion answer, or None.
+
+    intera/intero/inter/tutto/pieno/piena → piena; mezza/mezzo/metà → mezza.
+    """
+    m = _NOT_PORTION_MEZZO_RE.sub(" ", message.lower())
+    if re.search(r'\binter[aoie]?\b|\bpien[aoie]\b|\btutt[oa]\b|\bgrand[ei]\b', m):
         return "piena"
-    if re.search(r'\bmezz[ao]\s+(?:tranci[oo]|porzion[ei])\b|\bmezza\s+(?:pizza|fett[ao])\b|\bmetà\b', m):
-        return "mezza"
-    # risposta secca "mezza" senza altri contesti numerici (evita "mezza" come orario)
-    if re.fullmatch(r'\s*mezz[ao]\s*', m):
+    if re.search(r'\bmezz[aoie]\b|\bmetà\b|\bmeta\b', m):
         return "mezza"
     return None
 
 
-# ── Porzione e caldo/freddo per le voci al kg ────────────────────────────────
+_KG_NUMBER_WORDS = {
+    "un": 1, "uno": 1, "una": 1, "due": 2, "tre": 3, "quattro": 4, "cinque": 5,
+    "sei": 6, "sette": 7, "otto": 8, "nove": 9, "dieci": 10,
+}
+_KG_NUM = r"(\d+(?:[.,]\d+)?|un|uno|una|due|tre|quattro|cinque|sei|sette|otto|nove|dieci)"
+
+
+def _kg_number(token: str) -> float:
+    return float(_KG_NUMBER_WORDS.get(token, token.replace(",", ".") if token[0].isdigit() else 0))
+
+
+def _extract_kg_quantity(message: str, bare_number_ok: bool = False) -> tuple[str, float] | None:
+    """('kg', peso in kg) o ('tranci', numero) da una risposta sulla quantità.
+
+    bare_number_ok: un numero da solo ("due", "tre interi") vale come numero di
+    tranci; solo quando l'agente ha appena chiesto "Quanti tranci?".
+    """
+    m = message.lower()
+    if re.search(r"\bmezzo\s+(?:chilo|kg)\b", m):
+        return "kg", 0.5
+    match = re.search(rf"\b{_KG_NUM}\s*(?:chil[oi]|kg)\b(\s+e\s+mezzo)?", m)
+    if match:
+        return "kg", _kg_number(match.group(1)) + (0.5 if match.group(2) else 0.0)
+    match = re.search(rf"\b{_KG_NUM}\s*(?:ett[oi]|hg)\b", m)
+    if match:
+        return "kg", round(_kg_number(match.group(1)) * 0.1, 3)
+    match = re.search(r"\b(\d+)\s*(?:grammi|gr|g)\b", m)
+    if match:
+        return "kg", int(match.group(1)) / 1000
+    match = re.search(rf"\b{_KG_NUM}\s+(?:tranci|trancio|pezzi|pezzo|fette|fetta)\b", m)
+    if match:
+        return "tranci", _kg_number(match.group(1))
+    if bare_number_ok:
+        match = re.match(rf"^\s*{_KG_NUM}\b", m)
+        if match and _kg_number(match.group(1)) >= 1:
+            return "tranci", _kg_number(match.group(1))
+    return None
+
+
+def _normalize_kg_order_unit(item: dict, message: str) -> None:
+    """Fissa order_unit di una voce al taglio appena estratta dall'LLM.
+
+    Se l'LLM non lo indica: un peso o dei tranci detti nel messaggio decidono;
+    una porzione detta senza numero vale come tranci (numero da chiedere); una
+    quantità senza unità vale come peso, come prima di order_unit.
+    """
+    unit = item.get("order_unit") if item.get("order_unit") in ("kg", "tranci") else ""
+    quantity = float(item.get("quantity") or 0)
+    if not unit and quantity > 0:
+        said = _extract_kg_quantity(message)
+        unit = said[0] if said else "kg"
+    if not unit and item.get("size") in ("piena", "mezza"):
+        unit = "tranci"
+    item["order_unit"] = unit
+    if unit == "kg":
+        item["size"] = "normale"
+    if unit == "tranci" and quantity > 0:
+        item["quantity"] = float(int(round(quantity)))
+
+
+# ── Quantità, porzione e caldo/freddo per le voci al taglio ──────────────────
 # Nessun valore predefinito: se il cliente non li dice, l'agente li chiede.
+# La porzione (intero/mezzo) serve solo per gli ordini a tranci, non a peso.
 # Dopo KG_SLOT_MAX_ATTEMPTS risposte non capite il campo resta vuoto e l'ordine
 # viene salvato con needs_review (vedi _kg_review_reasons).
-_KG_SLOT_STATES = {"collecting_kg_portion": "portion", "collecting_kg_temperature": "temperature"}
-_KG_SLOT_FIELDS = {"portion": ("size", ("piena", "mezza")), "temperature": ("temperature", ("calda", "fredda"))}
+_KG_SLOTS = ("quantity", "portion", "temperature")
+_KG_SLOT_STATES = {
+    "collecting_kg_quantity": "quantity",
+    "collecting_kg_portion": "portion",
+    "collecting_kg_temperature": "temperature",
+}
+_KG_STATE_BY_SLOT = {slot: state for state, slot in _KG_SLOT_STATES.items()}
 KG_SLOT_MAX_ATTEMPTS = 2
 
 
+def _kg_slot_missing(item: dict, slot: str) -> bool:
+    if item.get("sale_unit") != "kg" or item.get(f"_{slot}_unresolved"):
+        return False
+    unit = kg_order_unit(item)
+    if slot == "quantity":
+        return unit == "" or float(item.get("quantity") or 0) <= 0
+    if slot == "portion":
+        return unit == "tranci" and item.get("size") not in ("piena", "mezza")
+    return item.get("temperature") not in ("calda", "fredda")
+
+
 def _kg_items_missing(items: list[dict], slot: str) -> list[dict]:
-    """Voci al kg a cui manca il campo `slot` e per cui va ancora chiesto."""
-    field, allowed = _KG_SLOT_FIELDS[slot]
-    return [
-        item for item in items
-        if item.get("sale_unit") == "kg"
-        and item.get(field) not in allowed
-        and not item.get(f"_{slot}_unresolved")
-    ]
+    """Voci al taglio a cui manca il campo `slot` e per cui va ancora chiesto."""
+    return [item for item in items if _kg_slot_missing(item, slot)]
 
 
-def _apply_kg_value(items: list[dict], slot: str, value: str) -> bool:
-    """Assegna `value` a tutte le voci al kg che non hanno ancora il campo."""
-    field, allowed = _KG_SLOT_FIELDS[slot]
-    applied = False
-    for item in items:
-        if item.get("sale_unit") == "kg" and item.get(field) not in allowed:
-            item[field] = value
-            item.pop(f"_{slot}_attempts", None)
-            item.pop(f"_{slot}_unresolved", None)
-            applied = True
-    return applied
+def _clear_kg_attempts(item: dict, slot: str) -> None:
+    item.pop(f"_{slot}_attempts", None)
+    item.pop(f"_{slot}_unresolved", None)
 
 
-def _apply_kg_answers_from_message(items: list[dict], message: str) -> set[str]:
-    """Porzione e caldo/freddo detti nel messaggio → voci al kg che li aspettano."""
+def _apply_kg_answers_from_message(
+    items: list[dict], message: str, bare_number_ok: bool = False
+) -> set[str]:
+    """Quantità, porzione e caldo/freddo detti nel messaggio → voci che li aspettano.
+    Ogni campo riconosciuto si applica anche se la risposta è parziale."""
     applied: set[str] = set()
+    quantity = _extract_kg_quantity(message, bare_number_ok=bare_number_ok)
+    if quantity:
+        unit, value = quantity
+        for item in _kg_items_missing(items, "quantity"):
+            item["order_unit"] = unit
+            item["quantity"] = value
+            if unit == "kg":
+                item["size"] = "normale"
+            _clear_kg_attempts(item, "quantity")
+            applied.add("quantity")
     size = _extract_kg_size(message)
-    if size and _apply_kg_value(items, "portion", size):
-        applied.add("portion")
+    if size:
+        for item in items:
+            if (
+                item.get("sale_unit") == "kg"
+                and kg_order_unit(item) != "kg"
+                and item.get("size") not in ("piena", "mezza")
+                and not item.get("_portion_unresolved")
+            ):
+                # "Interi" senza numero: è un ordine a tranci, il numero si chiede dopo
+                item["order_unit"] = "tranci"
+                item["size"] = size
+                _clear_kg_attempts(item, "portion")
+                applied.add("portion")
     temperature = _extract_temperature(message)
-    if temperature and _apply_kg_value(items, "temperature", temperature):
-        applied.add("temperature")
+    if temperature:
+        for item in _kg_items_missing(items, "temperature"):
+            item["temperature"] = temperature
+            _clear_kg_attempts(item, "temperature")
+            applied.add("temperature")
     return applied
 
 
@@ -1929,29 +2107,66 @@ def _register_kg_miss(items: list[dict], slot: str) -> None:
             print(f"[KgSlot] {slot} non capito dopo {attempts} tentativi per {item.get('pizza_name')!r}: needs_review")
 
 
+_KG_REVIEW_LABELS = {
+    "quantity": "Quantità (peso o numero di tranci)",
+    "portion": "Porzione (intero/mezzo)",
+    "temperature": "Caldo/freddo",
+}
+
+
 def _kg_review_reasons(items: list[dict]) -> list[str]:
     reasons = []
-    for slot, label in (("portion", "Porzione (piena/mezza)"), ("temperature", "Caldo/freddo")):
+    for slot in _KG_SLOTS:
         names = [item["pizza_name"] for item in items if item.get(f"_{slot}_unresolved")]
         if names:
             reasons.append(
-                f"{label} non capito dopo {KG_SLOT_MAX_ATTEMPTS} tentativi per {_format_pizza_list(names)}: "
-                "chiedere al cliente"
+                f"{_KG_REVIEW_LABELS[slot]} non capito dopo {KG_SLOT_MAX_ATTEMPTS} tentativi per "
+                f"{_format_pizza_list(names)}: chiedere al cliente"
             )
     return reasons
 
 
-def _kg_slot_question(items: list[dict], slot: str) -> str:
-    missing = _kg_items_missing(items, slot)
-    names = _format_pizza_list([item["pizza_name"] for item in missing])
-    retry = any(int(item.get(f"_{slot}_attempts") or 0) > 0 for item in missing)
-    if slot == "portion":
-        question = f"Per {names}, trancio pieno (15×20) o mezza porzione (7,5×10)?"
-    elif len(missing) == 1:
-        question = f"Per {names}, fredda da portar via o calda da mangiare subito?"
-    else:
-        question = f"Per {names}, fredde da portar via o calde da mangiare subito?"
-    return f"Scusi, non ho capito. {question}" if retry else question
+def _kg_temperature_question(items: list[dict]) -> str:
+    if all(kg_order_unit(item) == "kg" for item in items):
+        return "Calda o fredda?"
+    if len(items) == 1 and kg_order_unit(items[0]) == "tranci" and slice_count(items[0]) == 1:
+        return "Caldo o freddo?"
+    return "Caldi o freddi?"
+
+
+def _kg_slot_question(items: list[dict], slot: str | None = None) -> str:
+    """Una sola domanda breve per tutto ciò che manca alle voci al taglio,
+    es. "Quanti tranci, interi o mezzi? Caldi o freddi?". Il nome del prodotto
+    compare solo se nel carrello ci sono più voci al taglio."""
+    missing = {s: _kg_items_missing(items, s) for s in _KG_SLOTS}
+    parts = []
+    if missing["quantity"]:
+        if all(item.get("size") in ("piena", "mezza") for item in missing["quantity"]):
+            parts.append("Quanti tranci?")
+        else:
+            parts.append("Quanti tranci, interi o mezzi?")
+    elif missing["portion"]:
+        single = len(missing["portion"]) == 1 and slice_count(missing["portion"][0]) == 1
+        parts.append("Intero o mezzo?" if single else "Interi o mezzi?")
+    if missing["temperature"]:
+        parts.append(_kg_temperature_question(missing["temperature"]))
+    question = " ".join(parts)
+    if not question:
+        return ""
+
+    first_slot = next(s for s in _KG_SLOTS if missing[s])
+    retry = any(int(item.get(f"_{first_slot}_attempts") or 0) > 0 for item in missing[first_slot])
+
+    asked = list(dict.fromkeys(
+        item["pizza_name"].lower() for s in _KG_SLOTS for item in missing[s]
+    ))
+    kg_names = {item["pizza_name"] for item in items if item.get("sale_unit") == "kg"}
+    if len(kg_names) > 1:
+        target = f"la {asked[0]}" if len(asked) == 1 else _format_pizza_list(asked)
+        question = f"Per {target}, {question[0].lower()}{question[1:]}"
+    if retry:
+        question = f"Scusi, {question[0].lower()}{question[1:]}"
+    return question
 
 
 def pickup_day_phrase(pickup_date: datetime.date) -> str:
@@ -1967,18 +2182,26 @@ def _pickup_day_intro(day_phrase: str) -> str:
     return f"Domani siamo chiusi, il ritiro è per {day_phrase}."
 
 
+def _spoken_pickup_time(pickup_time: str | None) -> str:
+    """'20:00' → '20', '20:30' → '20:30'."""
+    match = re.fullmatch(r"(\d{1,2}):00", pickup_time or "")
+    return str(int(match.group(1))) if match else str(pickup_time)
+
+
 def build_confirmation_recap(merged_order: dict, day_phrase: str | None = None) -> str:
-    """Riepilogo finale: giorno, ora, nome, gusti, quantità, porzione, caldo/freddo.
+    """Riepilogo finale unico e breve: quantità, porzione, gusto, caldo/freddo,
+    giorno, ora e nome. Es. "Allora: due tranci interi di bufala, freddi, per
+    domani giovedì alle 20, a nome Giacomo. Confermo?"
 
     Costruito dagli stessi item che vengono salvati, quindi coincide con l'ordine.
     """
     items = merged_order.get("items", [])
     items_text = "; ".join(format_single_item_for_customer(item) for item in items)
-    when = f"per {day_phrase} alle {merged_order.get('pickup_time')}" if day_phrase else f"alle {merged_order.get('pickup_time')}"
+    at = f"alle {_spoken_pickup_time(merged_order.get('pickup_time'))}"
+    when = f"per {day_phrase.replace(',', '')} {at}" if day_phrase else at
     name = merged_order.get("customer_name")
     name_part = f", a nome {name}" if name else ""
-    price_note = " Il prezzo esatto dipende dal peso." if any(i.get("sale_unit") == "kg" for i in items) else ""
-    return f"Riepilogo: {items_text}. Ritiro {when}{name_part}.{price_note} Confermo?"
+    return f"Allora: {items_text}, {when}{name_part}. Confermo?"
 
 
 _TODAY_ORDER_RE = re.compile(
@@ -2322,7 +2545,7 @@ def chat(request: ChatRequest, session: SessionDep):
                             conversation.customer_name, date_it, next_slot,
                             party, res_data.get("table_name"),
                         )
-                        msg = f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. Riepilogo: {summary}. Confermo?"
+                        msg = f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. Allora: {summary}. Confermo?"
                     print(f"[Reservation] Slot esaurito, propongo {next_slot}")
                 else:
                     conversation.state = "collecting_reservation_date"
@@ -2356,7 +2579,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 int(res_data.get("party_size") or 1),
                 res_data.get("table_name"),
             )
-            msg = f"Riepilogo: {summary}. Confermo?"
+            msg = f"Allora: {summary}. Confermo?"
             return _res_response("awaiting_reservation_confirmation", msg)
 
     if conversation.state == "collecting_reservation_name":
@@ -2373,7 +2596,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 int(res_data.get("party_size") or 1),
                 res_data.get("table_name"),
             )
-            msg = f"Riepilogo: {summary}. Confermo?"
+            msg = f"Allora: {summary}. Confermo?"
             print(f"[Reservation] Nome: {mask_name(local_name)}")
             _log_chat_timing(request.session_id, "reservation_name", request_started_at)
             return _res_response("awaiting_reservation_confirmation", msg)
@@ -2427,7 +2650,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     )
                     msg = (
                         f"Mi dispiace, nel frattempo quello slot è stato preso. "
-                        f"Ho disponibilità alle {next_slot}. Riepilogo: {summary}. Confermo?"
+                        f"Ho disponibilità alle {next_slot}. Allora: {summary}. Confermo?"
                     )
                     _log_chat_timing(request.session_id, "reservation_recheck_moved", request_started_at)
                     return _res_response("awaiting_reservation_confirmation", msg)
@@ -2488,7 +2711,7 @@ def chat(request: ChatRequest, session: SessionDep):
             date_it = _format_reservation_date_it(res_data.get("date", ""))
             name_part = f" {conversation.customer_name}" if conversation.customer_name else ""
             if _is_mobile_phone(conversation.customer_phone):
-                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. Ti mando un SMS di conferma."
+                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. Le mando un SMS di conferma."
             else:
                 resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. A presto!"
             _log_chat_timing(request.session_id, "reservation_confirmed", request_started_at)
@@ -2593,9 +2816,9 @@ def chat(request: ChatRequest, session: SessionDep):
                     review_reasons=_kg_review_reasons(merged_order["items"]),
                 )
 
-            name_part = f" {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
+            name_part = f", {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
             _resp = (
-                f"Perfetto{name_part}! Ti arriverà una conferma su WhatsApp."
+                f"Perfetto{name_part}! Le arriverà la conferma su WhatsApp."
                 if _is_mobile_phone(conversation.customer_phone)
                 else f"Perfetto{name_part}, a presto!"
             )
@@ -2610,7 +2833,7 @@ def chat(request: ChatRequest, session: SessionDep):
             session.add(conversation)
             session.commit()
             merged_order["items"] = []
-            _resp = "Va bene, ordine annullato. Dimmi pure se vuoi ricominciare."
+            _resp = "Va bene, ordine annullato. Mi dica pure se vuole ricominciare."
             _extracted_stub = {"intent": "cancel_order", "items": [], "customer_name": None, "pickup_time": None}
 
         else:
@@ -2808,14 +3031,16 @@ def chat(request: ChatRequest, session: SessionDep):
                 state=state,
             )
 
-    # Porzione / caldo-freddo: risposta breve riconosciuta localmente → niente LLM.
-    # Applica anche l'altro campo se detto nella stessa frase ("intera e calda"),
-    # così non viene richiesto. Frasi più ricche passano dall'LLM (nome, orario...).
+    # Quantità / porzione / caldo-freddo: risposta breve riconosciuta localmente →
+    # niente LLM. Applica tutti i campi detti nella frase ("due interi caldi") e
+    # chiede solo quelli che mancano. Frasi più ricche passano dall'LLM.
     if conversation.state in _KG_SLOT_STATES and len(request.message.split()) <= 5:
         existing_items = json.loads(conversation.items_json)
         slot = _KG_SLOT_STATES[conversation.state]
-        applied = _apply_kg_answers_from_message(existing_items, request.message)
-        if slot in applied:
+        applied = _apply_kg_answers_from_message(
+            existing_items, request.message, bare_number_ok=slot == "quantity",
+        )
+        if applied:
             conversation.items_json = json.dumps(existing_items, ensure_ascii=False)
             merged_order = {
                 "customer_name": conversation.customer_name,
@@ -2872,7 +3097,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
     fav_pizzas_session = json.loads(conversation.favorite_pizzas_json or "[]")
 
-    # Gestore: il cliente risponde alla domanda "Ti faccio le solite?"
+    # Gestore: il cliente risponde alla domanda "Le preparo le solite?"
     if conversation.state == "confirming_usual":
         fav_list = fav_pizzas_session[:3]
         _yes_usual = any(w in message_lower for w in [
@@ -2958,7 +3183,7 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.state = "collecting_items"
             session.add(conversation)
             session.commit()
-            _resp_usual = "Dimmi pure cosa vuoi!"
+            _resp_usual = "Mi dica pure cosa desidera!"
             _merged_now = {
                 "customer_name": conversation.customer_name,
                 "pickup_time": conversation.pickup_time,
@@ -2992,7 +3217,7 @@ def chat(request: ChatRequest, session: SessionDep):
         else:
             # Risposta ambigua: ripeti la domanda senza chiamare l'LLM
             pizza_list_str = _format_pizza_list(fav_list)
-            _resp_usual = f"Ti faccio le solite? {pizza_list_str}"
+            _resp_usual = f"Le preparo le solite? {pizza_list_str}"
             _merged_now = {
                 "customer_name": conversation.customer_name,
                 "pickup_time": conversation.pickup_time,
@@ -3041,7 +3266,7 @@ def chat(request: ChatRequest, session: SessionDep):
         _usual_limit = _declared_qty if _declared_qty else 2
         fav_list = fav_pizzas_session[:_usual_limit]
         pizza_list_str = _format_pizza_list(fav_list)
-        _resp_usual = f"Ti faccio le solite? {pizza_list_str}"
+        _resp_usual = f"Le preparo le solite? {pizza_list_str}"
         print(f"[Usual] declared_qty={_declared_qty} → propongo {len(fav_list)} pizze")
         _merged_now = {
             "customer_name": conversation.customer_name,
@@ -3160,12 +3385,14 @@ def chat(request: ChatRequest, session: SessionDep):
             item["sale_unit"] = "piece"
     intent = extracted.get("intent", "unknown")
 
-    # Voci al kg nuove: si tengono solo porzione e caldo/freddo detti dal cliente.
-    # Nessun default: i campi mancanti vengono chiesti (determine_state).
+    # Voci al taglio nuove: si tengono solo quantità, porzione e caldo/freddo detti
+    # dal cliente. Nessun default: i campi mancanti vengono chiesti (determine_state).
     _prior_state = conversation.state
     for item in new_items:
-        if item.get("sale_unit") == "kg" and item.get("temperature") not in ("calda", "fredda"):
-            item["temperature"] = ""
+        if item.get("sale_unit") == "kg":
+            _normalize_kg_order_unit(item, request.message)
+            if item.get("temperature") not in ("calda", "fredda"):
+                item["temperature"] = ""
 
     # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
@@ -3227,7 +3454,9 @@ def chat(request: ChatRequest, session: SessionDep):
             for ei in merged_items:
                 if (ei["pizza_name"] == ni["pizza_name"]
                         and ei["pizza_type"] == ni["pizza_type"]
-                        and ei.get("size", "normale") == ni.get("size", "normale")):
+                        and ei.get("size", "normale") == ni.get("size", "normale")
+                        and ei.get("order_unit", "") == ni.get("order_unit", "")
+                        and ei.get("temperature", "") == ni.get("temperature", "")):
                     ei["quantity"] += ni["quantity"]
                     # Aggiorna ingredienti solo se il nuovo item ne dichiara
                     if ni_add:
@@ -3244,8 +3473,15 @@ def chat(request: ChatRequest, session: SessionDep):
     # nello stesso messaggio valgono solo i valori estratti per ciascuna voce
     # ("2 etti di porchetta calda" non rende calda anche la bufala di prima).
     if not new_items:
-        _kg_applied = _apply_kg_answers_from_message(merged_items, request.message)
-        if _prior_state in _KG_SLOT_STATES and _KG_SLOT_STATES[_prior_state] not in _kg_applied:
+        _kg_applied = _apply_kg_answers_from_message(
+            merged_items, request.message, bare_number_ok=_prior_state == "collecting_kg_quantity",
+        )
+        if (
+            _prior_state in _KG_SLOT_STATES
+            and intent != "ask_kg_price"  # una domanda sul prezzo non è una risposta mancata
+            and not pickup_time_error  # orario rifiutato: la domanda si ripete dopo l'errore
+            and _KG_SLOT_STATES[_prior_state] not in _kg_applied
+        ):
             _register_kg_miss(merged_items, _KG_SLOT_STATES[_prior_state])
 
     merged_order = {
@@ -3293,14 +3529,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 msg = _build_sold_out_item_message(session, item["pizza_name"], _sold_out_names)
                 missing_messages.append(msg)
                 invalid_items.append(item)
-            elif menu_item.sale_unit == "kg" and float(item.get("quantity", 1)) == 0:
-                missing_messages.append(
-                    f"Quanta {item['pizza_name'].lower()} desidera? "
-                    "(ad esempio: '200 grammi', 'mezzo chilo')"
-                )
-                invalid_items.append(item)
             elif menu_item.sale_unit == "kg":
-                # Voci al peso: nessun controllo impasto/size
+                # Voci al taglio: quantità mancante chiesta come slot (determine_state)
                 item["sale_unit"] = "kg"
                 valid_items.append(item)
             else:
@@ -3374,6 +3604,7 @@ def chat(request: ChatRequest, session: SessionDep):
         not_found_names=not_found_names,
         intended_quantity=conversation.intended_quantity,
         day_phrase=_day_phrase,
+        restaurant_id=restaurant_id,
     )
 
     session.add(conversation)

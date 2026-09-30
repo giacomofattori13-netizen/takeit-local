@@ -615,7 +615,8 @@ class ChatLogicTests(unittest.TestCase):
                 "items": [{
                     "pizza_name": "Margherita al taglio",
                     "pizza_type": "Normale",
-                    "quantity": 0.5,
+                    "quantity": 2,
+                    "order_unit": "tranci",
                     "sale_unit": "kg",
                     "size": "mezza",
                     "temperature": "calda",
@@ -804,10 +805,12 @@ class ChatLogicTests(unittest.TestCase):
         for item in saved_items:
             self.assertEqual(item.get("size"), "normale", msg=f"{item['pizza_name']}: portion defaulted")
             self.assertEqual(item.get("temperature"), "", msg=f"{item['pizza_name']}: temperature defaulted")
-        self.assertEqual(response.state, "collecting_kg_portion")
-        self.assertIn("Bufala al taglio", response.response_message)
-        self.assertIn("Porchetta al taglio", response.response_message)
-        self.assertIn("trancio pieno", response.response_message)
+        # A peso la porzione non serve: si chiede solo caldo/freddo, per entrambe
+        self.assertEqual(response.state, "collecting_kg_temperature")
+        self.assertEqual(
+            response.response_message,
+            "Per bufala al taglio e porchetta al taglio, calda o fredda?",
+        )
 
     def test_kg_slot_answer_does_not_pollute_customer_name(self):
         """Reproduces the reported bug: after a kg item is added (name still
@@ -879,10 +882,10 @@ class ChatLogicTests(unittest.TestCase):
                     ChatRequest(session_id="kg-name-guard", message="una bufala al taglio, due etti"),
                     session,
                 )
-                self.assertEqual(first.state, "collecting_kg_portion")
+                self.assertEqual(first.state, "collecting_kg_temperature")
 
-                # The answer to the portion question also carries the temperature:
-                # both are applied, and it must NOT become the customer name.
+                # The answer to the temperature question also carries a portion word:
+                # it must NOT become the customer name.
                 second = chat_module.chat(
                     ChatRequest(session_id="kg-name-guard", message="Intero è fredda"),
                     session,
@@ -1011,7 +1014,8 @@ class ChatLogicTests(unittest.TestCase):
 
         kg_item = {
             "pizza_name": "Margherita al taglio",
-            "quantity": 0.5,
+            "quantity": 2,
+            "order_unit": "tranci",
             "sale_unit": "kg",
             "size": "mezza",
             "temperature": "calda",
@@ -1058,6 +1062,7 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(sent.get("temperature"), "calda")
         self.assertEqual(sent.get("portion"), "mezza")
         self.assertEqual(sent.get("size"), "mezza")
+        self.assertEqual((sent.get("order_unit"), sent.get("slices")), ("tranci", 2))
 
     def test_save_order_to_base44_piece_item_no_kg_fields(self):
         """save_order_to_base44 does not add temperature or portion for piece items."""
@@ -1119,6 +1124,7 @@ class ChatLogicTests(unittest.TestCase):
         kg_item = {
             "pizza_name": "Capricciosa al taglio",
             "quantity": 1.0,
+            "order_unit": "tranci",
             "sale_unit": "kg",
             "size": "piena",
             "temperature": "fredda",
@@ -1217,8 +1223,10 @@ class ChatLogicTests(unittest.TestCase):
 
         self.assertEqual(response.state, "awaiting_confirmation")
         weekday = chat_module._WEEKDAY_IT[tomorrow.weekday()]
-        self.assertIn(f"Ritiro per domani, {weekday} alle 19:30, a nome Elena", response.response_message)
-        self.assertIn("500g di bufala al taglio, trancio pieno, fredda", response.response_message)
+        self.assertEqual(
+            response.response_message,
+            f"Allora: mezzo chilo di bufala al taglio, fredda, per domani {weekday} alle 19:30, a nome Elena. Confermo?",
+        )
         self.assertIn("Confermo?", response.response_message)
 
 

@@ -73,17 +73,36 @@ def build_order_items(items: list[dict]) -> list[dict]:
             "remove_ingredients": item.get("remove_ingredients", []),
             "base_price": item.get("base_price", 0.0),
             "extras_price": item.get("extras_price", 0.0),
+            # None per i tranci: prezzo a peso al ritiro
             "total_price": item.get("total_price", 0.0),
         }
         if not is_kg:
             b44_item["size"] = size
-        elif size in ("piena", "mezza"):
-            b44_item["size"] = size
-            b44_item["portion"] = size
+        else:
+            # Al taglio: a peso (order_unit="kg", quantity = kg) oppure a tranci
+            # (order_unit="tranci", slices = numero, portion = piena/mezza).
+            unit = item.get("order_unit")
+            if unit not in ("kg", "tranci"):
+                unit = "kg" if float(item.get("quantity") or 0) > 0 else ""
+            if unit:
+                b44_item["order_unit"] = unit
+            if unit == "tranci":
+                b44_item["slices"] = int(round(float(item.get("quantity") or 0)))
+                if size in ("piena", "mezza"):
+                    b44_item["size"] = size
+                    b44_item["portion"] = size
         if is_kg and item.get("temperature") in ("calda", "fredda"):
             b44_item["temperature"] = item["temperature"]
         base44_items.append(b44_item)
     return base44_items
+
+
+def _total_amount(items: list[dict]) -> float | None:
+    """Totale dell'ordine; None (vuoto) se una voce a tranci si pesa al ritiro."""
+    totals = [item.get("total_price", 0.0) for item in items]
+    if any(total is None for total in totals):
+        return None
+    return round(sum(totals), 2)
 
 
 def _list_orders(restaurant_id: str, order_date: str, **extra) -> list[dict]:
@@ -169,7 +188,7 @@ def save_order_to_base44(
                 "status": "nuovo",
                 "source": "telefono",
                 "pickup_time": pickup_time,
-                "total_amount": round(sum(i.get("total_price", 0.0) for i in items), 2),
+                "total_amount": _total_amount(items),
                 "ai_confidence": ai_confidence,
                 "needs_review": bool(reasons),
                 "review_reason": "; ".join(reasons) if reasons else None,
