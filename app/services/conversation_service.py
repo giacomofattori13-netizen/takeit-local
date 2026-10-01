@@ -1275,14 +1275,70 @@ def _round_up_to_15(total_minutes: int) -> int:
     return ((total_minutes + 14) // 15) * 15
 
 
-def resolve_pickup_time(raw: str) -> str:
+DEFAULT_MIN_PREP_MINUTES = 20
+
+
+def _rome_now() -> datetime.datetime:
+    return datetime.datetime.now(tz=ZoneInfo("Europe/Rome"))
+
+
+def get_min_prep_minutes(restaurant_id: str = "") -> int:
+    """Tempo minimo di preparazione dell'asporto (Restaurant.min_prep_minutes, default 20)."""
+    raw = load_restaurant(restaurant_id=restaurant_id).get("min_prep_minutes")
+    try:
+        minutes = int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_PREP_MINUTES
+    return minutes if minutes >= 0 else DEFAULT_MIN_PREP_MINUTES
+
+
+def earliest_pickup_minutes_today(restaurant_id: str = "") -> int | None:
+    """Primo orario di ritiro ancora possibile oggi (minuti dalla mezzanotte, ora di Roma),
+    oppure None se oggi il locale è chiuso o non restano orari utili.
+
+    Il primo ritiro è ora attuale + min_prep_minutes, arrotondato ai 15 minuti e mai
+    prima dell'apertura; l'ultimo è la chiusura meno 15 minuti. Senza orari configurati
+    non c'è limite: si usa ora attuale + preparazione.
+    """
+    now = _rome_now()
+    earliest = _round_up_to_15(now.hour * 60 + now.minute + get_min_prep_minutes(restaurant_id))
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+    if not opening_hours or not isinstance(opening_hours, dict):
+        return earliest if earliest < 24 * 60 else None
+    today_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[now.weekday()], ""))
+    if today_range is None:
+        return None
+    open_min, close_min = today_range
+    earliest = max(earliest, open_min)
+    return earliest if earliest <= max(close_min - 15, open_min) else None
+
+
+def reservation_slots_left_today(restaurant_id: str = "") -> bool:
+    """True se oggi c'è ancora almeno un orario prenotabile (dopo l'ora attuale,
+    prima della chiusura)."""
+    now = _rome_now()
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+    if not opening_hours or not isinstance(opening_hours, dict):
+        return True
+    today_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[now.weekday()], ""))
+    if today_range is None:
+        return False
+    open_min, close_min = today_range
+    if close_min <= open_min:  # chiusura dopo mezzanotte
+        return True
+    first_slot = max(_round_up_to_15(now.hour * 60 + now.minute + 1), open_min)
+    return first_slot < close_min
+
+
+def resolve_pickup_time(raw: str, restaurant_id: str | None = None) -> str:
     """
     Normalizza un orario di ritiro grezzo in "HH:MM" (timezone Europe/Rome).
 
     Regole applicate:
     1. Orario ambiguo (ore 1-12): scegli il più vicino nel futuro tra AM e PM.
-    2. "prima_possibile" / "prima possibile" / "subito": ora corrente + 20 min,
-       arrotondato al prossimo multiplo di 15 min.
+    2. "prima_possibile" / "prima possibile" / "subito": primo ritiro possibile oggi
+       (ora corrente + tempo minimo di preparazione del locale, mai prima
+       dell'apertura), arrotondato al prossimo multiplo di 15 min.
     3. Arrotonda sempre ai 15 minuti più vicini.
     """
     rome = ZoneInfo("Europe/Rome")
@@ -1294,7 +1350,8 @@ def resolve_pickup_time(raw: str) -> str:
         re.search(r"prima.{0,10}possibile|appena.{0,5}possibile", lowered)
         or lowered in ("prima_possibile", "asap", "subito")
     ):
-        target_total = _round_up_to_15(now_total + 20)
+        earliest = earliest_pickup_minutes_today(restaurant_id) if restaurant_id is not None else None
+        target_total = earliest if earliest is not None else _round_up_to_15(now_total + DEFAULT_MIN_PREP_MINUTES)
         if target_total >= 24 * 60:
             target_total -= 24 * 60
         h, m = divmod(target_total, 60)
@@ -1351,9 +1408,8 @@ def validate_pickup_time(
     - closing_time: orario di chiusura (HH:MM), valorizzato solo quando il problema
       è che l'orario richiesto supera la chiusura di oggi
     """
-    rome = ZoneInfo("Europe/Rome")
-    now = datetime.datetime.now(tz=rome)
-    now_total = now.hour * 60 + now.minute
+    now = _rome_now()
+    today = now.date()
 
     opening_hours = get_opening_hours(restaurant_id=restaurant_id)
     if not opening_hours or not isinstance(opening_hours, dict):
@@ -1364,17 +1420,17 @@ def validate_pickup_time(
     except (ValueError, IndexError):
         return True, None, None
 
-    if pickup_date is not None:
+    if pickup_date is not None and pickup_date != today:
         return _validate_pickup_on_day(pickup_minutes, pickup_time, opening_hours, pickup_date)
 
-    today_name = _WEEKDAY_NAMES[datetime.date.today().weekday()]
+    today_name = _WEEKDAY_NAMES[today.weekday()]
     today_slot = opening_hours.get(today_name, "")
     today_range = _parse_opening_range(today_slot)
 
     if today_range is None:
         # Oggi chiusi — cerca il prossimo giorno aperto
         for i in range(1, 7):
-            next_day = _WEEKDAY_NAMES[(datetime.date.today().weekday() + i) % 7]
+            next_day = _WEEKDAY_NAMES[(today.weekday() + i) % 7]
             next_slot = opening_hours.get(next_day, "")
             next_range = _parse_opening_range(next_slot)
             if next_range:
@@ -1384,10 +1440,15 @@ def validate_pickup_time(
         return False, None, None
 
     open_min, close_min = today_range
+    # Primo ritiro possibile: ora attuale + tempo di preparazione (None = finiti per oggi)
+    earliest = earliest_pickup_minutes_today(restaurant_id)
+    if earliest is None:
+        print(f"[Hours] Nessun orario di ritiro rimasto oggi per {pickup_time}")
+        return False, None, None
 
     # Prima dell'apertura
     if pickup_minutes < open_min:
-        h, m = divmod(open_min, 60)
+        h, m = divmod(earliest, 60)
         return False, f"{h:02d}:{m:02d}", None
 
     # Dopo la chiusura → suggerisci l'ultimo slot (chiusura - 15 min).
@@ -1399,18 +1460,11 @@ def validate_pickup_time(
         print(f"[Hours] Richiesta {pickup_time} dopo chiusura {close_h:02d}:{close_m:02d}")
         return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
 
-    # Dentro gli orari — ma già passato per oggi
-    if pickup_minutes < now_total:
-        next_slot = _round_up_to_15(now_total)
-        if next_slot <= close_min:
-            h, m = divmod(next_slot, 60)
-            print(f"[Hours] Orario {pickup_time} già passato, prossimo slot: {h:02d}:{m:02d}")
-            return False, f"{h:02d}:{m:02d}", None
-        # Nessun slot rimasto oggi
-        last_slot = max(close_min - 15, open_min)
-        close_h, close_m = divmod(close_min, 60)
-        last_h, last_m = divmod(last_slot, 60)
-        return False, f"{last_h:02d}:{last_m:02d}", f"{close_h:02d}:{close_m:02d}"
+    # Dentro gli orari — ma prima del tempo minimo di preparazione
+    if pickup_minutes < earliest:
+        h, m = divmod(earliest, 60)
+        print(f"[Hours] Orario {pickup_time} troppo vicino, primo ritiro possibile: {h:02d}:{m:02d}")
+        return False, f"{h:02d}:{m:02d}", None
 
     return True, None, None
 
