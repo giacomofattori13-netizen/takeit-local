@@ -15,6 +15,7 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.privacy import describe_text_for_log, mask_name, mask_phone
+from app.services import base44_client
 from app.services.base44_client import auth_headers, base44_token
 from app.telemetry import record_latency
 
@@ -1781,22 +1782,26 @@ def detect_reservation_intent(message: str) -> bool:
     return bool(_RESERVATION_INTENT_PATTERNS.search(message))
 
 
-def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
-    """Recupera tutti i tavoli configurati su Base44. Restituisce [] in caso di errore."""
+def _fetch_tables_from_base44(required: bool = False, restaurant_id: str = "") -> list[dict]:
+    """Recupera i tavoli del ristorante su Base44 (tutti se restaurant_id è vuoto,
+    flusso legacy). Restituisce [] in caso di errore, o solleva se `required`."""
     token = base44_token()
     if not token:
         if required:
             raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
     try:
-        response = httpx.get(
-            BASE44_TABLE_URL,
-            headers=auth_headers(),
-            timeout=5,
-        )
-        response.raise_for_status()
-        data = response.json()
-        entities = data.get("entities", []) if isinstance(data, dict) else data
+        if restaurant_id:
+            entities = base44_client.query_entities("Table", {"restaurant_id": restaurant_id}, timeout=5)
+        else:
+            response = httpx.get(
+                BASE44_TABLE_URL,
+                headers=auth_headers(),
+                timeout=5,
+            )
+            response.raise_for_status()
+            data = response.json()
+            entities = data.get("entities", []) if isinstance(data, dict) else data
         tables = [t for t in (entities if isinstance(entities, list) else []) if t.get("status") != "maintenance"]
         print(f"[Table] Recuperati {len(tables)} tavoli da Base44")
         return tables
@@ -1807,24 +1812,19 @@ def _fetch_tables_from_base44(required: bool = False) -> list[dict]:
         return []
 
 
-def _fetch_reservations_for_date(date: str, required: bool = False) -> list[dict]:
-    """Recupera le prenotazioni per una data specifica."""
+def _fetch_reservations_for_date(date: str, required: bool = False, restaurant_id: str = "") -> list[dict]:
+    """Prenotazioni confermate di una data, filtrate su Base44 (data, stato e ristorante)
+    invece di leggere tutte le prenotazioni in una volta."""
     token = base44_token()
     if not token:
         if required:
             raise ReservationAvailabilityError("BASE44_TOKEN non configurato")
         return []
+    query = {"date": date, "status": "confermata"}
+    if restaurant_id:
+        query["restaurant_id"] = restaurant_id
     try:
-        response = httpx.get(
-            BASE44_RESERVATION_URL,
-            headers=auth_headers(),
-            timeout=5,
-        )
-        response.raise_for_status()
-        data = response.json()
-        entities = data.get("entities", []) if isinstance(data, dict) else data
-        if not isinstance(entities, list):
-            return []
+        entities = base44_client.query_entities("Reservation", query, timeout=5)
         return [r for r in entities if r.get("date") == date and r.get("status") == "confermata"]
     except Exception as e:
         print(f"[Reservation] Errore fetch prenotazioni: {type(e).__name__}: {_mask_b44(e)}")
@@ -2019,6 +2019,40 @@ def assign_table(
     return None
 
 
+def is_table_assignment_enabled(restaurant_id: str = "") -> bool:
+    """Restaurant.table_assignment_enabled (default True). Se False l'agente non assegna
+    tavoli e controlla solo i coperti della data contro max_covers."""
+    value = load_restaurant(restaurant_id=restaurant_id).get("table_assignment_enabled", True)
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.lower() not in ("false", "0", "no")
+    return bool(value)
+
+
+def get_large_party_settings(restaurant_id: str = "") -> tuple[int | None, str | None]:
+    """(max_party_size_auto, handoff_phone) del ristorante; None se non configurati."""
+    restaurant = load_restaurant(restaurant_id=restaurant_id)
+    try:
+        limit = int(float(restaurant.get("max_party_size_auto")))
+    except (TypeError, ValueError):
+        limit = None
+    phone = (restaurant.get("handoff_phone") or "").strip() or None
+    return limit, phone
+
+
+def customer_reservation_notes(customer: dict | None) -> str:
+    """Note da copiare nella prenotazione di un cliente già noto."""
+    if not customer:
+        return ""
+    parts = []
+    if (customer.get("usual_table") or "").strip():
+        parts.append(f"Tavolo abituale: {customer['usual_table'].strip()}")
+    if (customer.get("usual_notes") or "").strip():
+        parts.append(f"Note abituali: {customer['usual_notes'].strip()}")
+    return " · ".join(parts)
+
+
 def check_reservation_availability(
     date: str, time: str, party_size: int, restaurant_id: str = ""
 ) -> tuple[bool, str | None, dict | None]:
@@ -2032,11 +2066,27 @@ def check_reservation_availability(
     restaurant = load_restaurant(restaurant_id=restaurant_id)
     slot_minutes = int(restaurant.get("reservation_slot_minutes") or 90)
 
+    if not is_table_assignment_enabled(restaurant_id):
+        # Niente tavoli né turni: coperti confermati della data contro max_covers
+        reservations = _fetch_reservations_for_date(date, required=True, restaurant_id=restaurant_id)
+        max_covers = restaurant.get("max_covers")
+        if not max_covers:
+            return True, None, None
+        booked = sum(int(r.get("party_size") or 0) for r in reservations)
+        available = booked + party_size <= int(max_covers)
+        print(
+            f"[Reservation] Coperti {date}: {booked} confermati + {party_size} richiesti "
+            f"/ max {int(max_covers)} → {'ok' if available else 'al completo'}"
+        )
+        return available, None, None
+
     # Tavoli e prenotazioni sono indipendenti: li carichiamo in parallelo per dimezzare
     # la latenza Base44 (worst-case 5s → ~5s invece di ~10s su errore di rete lento).
     with ThreadPoolExecutor(max_workers=2) as _pool:
-        _f_reservations = _pool.submit(_fetch_reservations_for_date, date, required=True)
-        _f_tables = _pool.submit(_fetch_tables_from_base44, required=True)
+        _f_reservations = _pool.submit(
+            _fetch_reservations_for_date, date, required=True, restaurant_id=restaurant_id,
+        )
+        _f_tables = _pool.submit(_fetch_tables_from_base44, required=True, restaurant_id=restaurant_id)
         all_reservations = _f_reservations.result()   # ri-lancia ReservationAvailabilityError se avvenuto
         tables = _f_tables.result()                   # idem
     tables_configured = bool(tables)
@@ -2079,7 +2129,7 @@ def check_reservation_availability(
         next_start = req_start + delta * slot_minutes
         next_h, next_m = divmod(next_start, 60)
         next_time = f"{next_h:02d}:{next_m:02d}"
-        next_time_valid, _ = validate_reservation_time(date, next_time)
+        next_time_valid, _ = validate_reservation_time(date, next_time, restaurant_id=restaurant_id)
         if not next_time_valid:
             continue
         if tables_configured:
@@ -2120,8 +2170,14 @@ def save_reservation_to_base44(
     combined_tables: list[str] | None = None,
     extended: bool = False,
     restaurant_id: str = "",
+    preferred_room: str | None = None,
+    status: str = "confermata",
+    review_reason: str | None = None,
 ) -> str | None:
-    """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore."""
+    """Salva la prenotazione su Base44. Ritorna l'id creato o None in caso di errore.
+
+    status "da_confermare" (gruppi oltre max_party_size_auto non passati al locale)
+    viene salvato con needs_review=True e il motivo in review_reason."""
     token = base44_token()
     if not token:
         print("[Reservation] BASE44_TOKEN non configurato, skip salvataggio")
@@ -2133,7 +2189,7 @@ def save_reservation_to_base44(
         "date": date,
         "time": time,
         "party_size": party_size,
-        "status": "confermata",
+        "status": status,
         "source": "telefono",
         "notes": notes,
         "session_id": session_id,
@@ -2144,8 +2200,13 @@ def save_reservation_to_base44(
     }
     if restaurant_id:
         payload["restaurant_id"] = restaurant_id
+    if preferred_room:
+        payload["preferred_room"] = preferred_room
+    if status != "confermata" or review_reason:
+        payload["needs_review"] = True
+        payload["review_reason"] = review_reason or ""
     print(
-        f"[Reservation] Salvo: customer={mask_name(customer_name)} "
+        f"[Reservation] Salvo: customer={mask_name(customer_name)} status={status} "
         f"phone={mask_phone(customer_phone)} date={date} time={time} party={party_size} "
         f"table={table_name!r} session={session_id}"
     )

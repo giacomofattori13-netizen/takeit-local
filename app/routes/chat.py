@@ -70,6 +70,8 @@ from app.services.conversation_service import (
     check_reservation_availability,
     validate_reservation_time,
     save_reservation_to_base44,
+    get_large_party_settings,
+    customer_reservation_notes,
     send_reservation_sms,
 )
 from app.services.order_sync import rome_today, save_order_to_base44
@@ -934,17 +936,77 @@ def _apply_reservation_table_info(res_data: dict, table_info: dict | None) -> No
     res_data["extended"] = table_info.get("extended", False)
 
 
+RESERVATION_PREFERENCE_ACK = "Lo segnalo, cerchiamo di accontentarla."
+
+# Preferenza di sala detta dal cliente: si segnala, mai garantita.
+_ROOM_PREFERENCE_RE = re.compile(
+    r"(?:\b(?:in|nella|nel|alla|al|sulla|sul|vicino\s+alla|vicino\s+al)\s+|\ball')?"
+    r"(?:\bsala\s+\w+|\bsaletta\b|\bveranda\b|\bterrazz[ao]\b|\bgiardino\b|\bdehors\b"
+    r"|\ball'?aperto\b|\bfuori\b|\bdentro\b|\binterno\b|\bfinestra\b|\bcamino\b)",
+    re.IGNORECASE,
+)
+# Richieste particolari da riportare nelle note della prenotazione.
+_RESERVATION_NOTE_RE = re.compile(
+    r"\b(seggiolon\w*|passeggin\w*|carrozzin\w*|sedia\s+a\s+rotelle|compleann\w*|anniversari\w*"
+    r"|allergi\w*|intolleran\w*|celiac\w*|senza\s+glutine|vegan\w*|vegetarian\w*|cane|bambin\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_reservation_preferences(message: str) -> tuple[str | None, str | None]:
+    """(preferenza di sala, nota) dette dal cliente nel messaggio, se ci sono."""
+    room_match = _ROOM_PREFERENCE_RE.search(message)
+    room = room_match.group(0).strip() if room_match else None
+    note = message.strip() if _RESERVATION_NOTE_RE.search(message) else None
+    return room, note
+
+
 def _format_reservation_summary(
     name: str,
     date_it: str,
     time_str: str,
     party: int,
     table_name: str | None,
+    preferred_room: str | None = None,
 ) -> str:
-    """Produce 'Nome, giorno data alle HH:MM, N persona/persone[, Tavolo X]'."""
+    """Produce 'Nome, giorno data alle HH:MM, N persona/persone[, Tavolo X][, preferenza]'."""
     table_part = f", {table_name}" if table_name else ""
+    room_part = f", preferenza {preferred_room}: lo segnalo, cerchiamo di accontentarla" if preferred_room else ""
     persons = "persona" if party == 1 else "persone"
-    return f"{name}, {date_it} alle {time_str}, {party} {persons}{table_part}"
+    return f"{name}, {date_it} alle {time_str}, {party} {persons}{table_part}{room_part}"
+
+
+def _reservation_notes_text(res_data: dict) -> str:
+    return " · ".join(res_data.get("notes") or [])
+
+
+def _normalize_callback_phone(message: str, caller_phone: str | None) -> str | None:
+    """Numero a cui richiamare: quello della chiamata se il cliente conferma,
+    altrimenti le cifre dette (con +39 per i numeri italiani senza prefisso)."""
+    digits = re.sub(r"[^\d+]", "", message)
+    if len(re.sub(r"\D", "", digits)) >= 8:
+        if digits.startswith("+"):
+            return digits
+        if digits.startswith("00"):
+            return "+" + digits[2:]
+        return "+39" + digits
+    if caller_phone and re.search(r"\b(s[iì]|ok|va bene|certo|esatto|quest[oa]|stesso)\b", message.lower()):
+        return caller_phone
+    return None
+
+
+def large_group_callback_prompt(conversation: ConversationSession, intro: str) -> tuple[str, str]:
+    """Il locale non ha risposto (o non c'è un numero di trasferimento): l'agente
+    raccoglie i dati per farsi richiamare. Aggiorna lo stato e restituisce
+    (stato, messaggio)."""
+    if not conversation.customer_name:
+        state, question = "collecting_reservation_callback_name", "A nome di chi?"
+    elif conversation.customer_phone:
+        state, question = "collecting_reservation_callback_phone", "La richiamiamo al numero da cui sta chiamando?"
+    else:
+        state, question = "collecting_reservation_callback_phone", "A che numero possiamo richiamarla?"
+    conversation.state = state
+    return state, f"{intro} Prendo i dati e la richiamiamo noi per confermare. {question}"
 
 
 def _build_pickup_time_error(
@@ -2399,7 +2461,42 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # ── FLUSSO PRENOTAZIONE ───────────────────────────────────────────────────
     # Rilevamento nel primo turno (collecting_items + carrello vuoto)
+    _res_pref_ack = {"pending": False}
+
+    def _capture_reservation_preferences() -> None:
+        """Preferenza di sala e richieste particolari dette in un turno di prenotazione."""
+        room, note = _extract_reservation_preferences(request.message)
+        if not room and not note:
+            return
+        res_data = json.loads(conversation.reservation_json or "{}")
+        if room:
+            res_data["preferred_room"] = room
+        if note and note not in (res_data.get("notes") or []):
+            res_data["notes"] = [*(res_data.get("notes") or []), note]
+        conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+        _res_pref_ack["pending"] = bool(room)
+        print(f"[Reservation] Preferenza registrata: sala={room!r} nota={bool(note)}")
+
+    def _known_customer_notes() -> str:
+        """Tavolo e note abituali del cliente già noto dal numero di telefono."""
+        if not conversation.customer_phone:
+            return ""
+        try:
+            return customer_reservation_notes(lookup_customer(conversation.customer_phone, restaurant_id=restaurant_id))
+        except Exception as exc:
+            print(f"[Reservation] Lookup cliente per le note non riuscito: {type(exc).__name__}")
+            return ""
+
+    def _prefs_only_reservation_json() -> str:
+        """Ricomincia dal giorno tenendo preferenza di sala e note già dette."""
+        res_data = json.loads(conversation.reservation_json or "{}")
+        kept = {k: res_data[k] for k in ("preferred_room", "notes") if res_data.get(k)}
+        return json.dumps(kept, ensure_ascii=False)
+
     def _res_response(state: str, resp: str, valid: bool = False) -> ChatResponse:
+        if _res_pref_ack["pending"]:
+            resp = f"{RESERVATION_PREFERENCE_ACK} {resp}"
+            _res_pref_ack["pending"] = False
         stub = {"intent": "reservation", "items": [], "customer_name": None, "pickup_time": None}
         res_data = json.loads(conversation.reservation_json or "{}")
         session.add(ConversationLog(
@@ -2489,6 +2586,9 @@ def chat(request: ChatRequest, session: SessionDep):
         "collecting_reservation_party",
         "collecting_reservation_name",
         "awaiting_reservation_confirmation",
+        "reservation_handoff",
+        "collecting_reservation_callback_name",
+        "collecting_reservation_callback_phone",
     }
     if not _reservations_on:
         if conversation.state in _reservation_states:
@@ -2514,12 +2614,16 @@ def chat(request: ChatRequest, session: SessionDep):
     ):
         conversation.state = "collecting_reservation_date"
         conversation.reservation_json = "{}"
+        _capture_reservation_preferences()
         print(f"[Reservation] Intent rilevato, entro nel flusso prenotazione")
         _log_chat_timing(request.session_id, "reservation_intent", request_started_at)
         return _res_response(
             "collecting_reservation_date",
             "Certo! Per quale giorno vuole prenotare?",
         )
+
+    if conversation.state in _reservation_states:
+        _capture_reservation_preferences()
 
     if conversation.state == "collecting_reservation_date":
         res_date = _extract_reservation_date(request.message)
@@ -2580,6 +2684,26 @@ def chat(request: ChatRequest, session: SessionDep):
             res_data["party_size"] = party
             conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
 
+            # Gruppi oltre max_party_size_auto: si passa la chiamata al locale
+            # (<Dial> in voice) oppure si raccolgono i dati per richiamare.
+            _party_limit, _handoff_phone = get_large_party_settings(restaurant_id)
+            if _party_limit and party > _party_limit:
+                res_data["large_group"] = True
+                if _handoff_phone:
+                    res_data["handoff_phone"] = _handoff_phone
+                    conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+                    conversation.state = "reservation_handoff"
+                    print(f"[Reservation] Gruppo di {party} (> {_party_limit}): trasferimento al locale")
+                    _log_chat_timing(request.session_id, "reservation_handoff", request_started_at)
+                    return _res_response(
+                        "reservation_handoff",
+                        "Per i gruppi numerosi la passo subito al locale, resti in linea.",
+                    )
+                conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+                _cb_state, _cb_msg = large_group_callback_prompt(conversation, "Per i gruppi numerosi la richiamiamo noi.")
+                _log_chat_timing(request.session_id, "reservation_large_group_callback", request_started_at)
+                return _res_response(_cb_state, _cb_msg)
+
             # Controllo disponibilità e assegnazione tavolo
             try:
                 available, next_slot, table_info = check_reservation_availability(
@@ -2617,13 +2741,14 @@ def chat(request: ChatRequest, session: SessionDep):
                         summary = _format_reservation_summary(
                             conversation.customer_name, date_it, next_slot,
                             party, res_data.get("table_name"),
+                            preferred_room=res_data.get("preferred_room"),
                         )
                         msg = f"Mi dispiace, quello slot è esaurito. Ho disponibilità alle {next_slot}. Allora: {summary}. Confermo?"
                     print(f"[Reservation] Slot esaurito, propongo {next_slot}")
                 else:
                     conversation.state = "collecting_reservation_date"
-                    conversation.reservation_json = "{}"
-                    msg = "Mi dispiace, non ho disponibilità per quella data. Per quale altro giorno?"
+                    conversation.reservation_json = _prefs_only_reservation_json()
+                    msg = "Mi dispiace, per quella sera siamo al completo. Per quale altro giorno?"
                 _log_chat_timing(request.session_id, "reservation_no_availability", request_started_at)
                 return _res_response(conversation.state, msg)
 
@@ -2651,9 +2776,68 @@ def chat(request: ChatRequest, session: SessionDep):
                 res_data.get("time", ""),
                 int(res_data.get("party_size") or 1),
                 res_data.get("table_name"),
+                preferred_room=res_data.get("preferred_room"),
             )
             msg = f"Allora: {summary}. Confermo?"
             return _res_response("awaiting_reservation_confirmation", msg)
+
+    if conversation.state == "reservation_handoff":
+        # Nessun trasferimento in corso (chat di test, o chiamata tornata all'agente)
+        _cb_state, _cb_msg = large_group_callback_prompt(conversation, "Al momento il locale non risponde.")
+        _log_chat_timing(request.session_id, "reservation_handoff_fallback", request_started_at)
+        return _res_response(_cb_state, _cb_msg)
+
+    if conversation.state == "collecting_reservation_callback_name":
+        local_name = _extract_local_customer_name(request.message)
+        if local_name:
+            conversation.customer_name = local_name
+            _cb_state, _cb_msg = large_group_callback_prompt(conversation, "Grazie.")
+            return _res_response(_cb_state, _cb_msg.replace(" Prendo i dati e la richiamiamo noi per confermare.", ""))
+        return _res_response("collecting_reservation_callback_name", "A nome di chi devo segnare la richiesta?")
+
+    if conversation.state == "collecting_reservation_callback_phone":
+        callback_phone = _normalize_callback_phone(request.message, conversation.customer_phone)
+        if not callback_phone:
+            return _res_response(
+                "collecting_reservation_callback_phone",
+                "Mi scusi, a che numero possiamo richiamarla?",
+            )
+        res_data = json.loads(conversation.reservation_json or "{}")
+        _party = int(res_data.get("party_size") or 0)
+        _party_limit, _ = get_large_party_settings(restaurant_id)
+        _notes = [_reservation_notes_text(res_data), _known_customer_notes()]
+        reservation_id = save_reservation_to_base44(
+            customer_name=conversation.customer_name or "Ospite",
+            customer_phone=callback_phone,
+            date=res_data.get("date", ""),
+            time=res_data.get("time", ""),
+            party_size=_party,
+            session_id=request.session_id,
+            notes=" · ".join(n for n in _notes if n),
+            restaurant_id=restaurant_id,
+            preferred_room=res_data.get("preferred_room"),
+            status="da_confermare",
+            review_reason=(
+                f"Gruppo di {_party} persone (limite automatico {_party_limit}): "
+                f"trasferimento al locale non riuscito, richiamare il cliente al {callback_phone}"
+            ),
+        )
+        if not reservation_id:
+            return _res_response(
+                "collecting_reservation_callback_phone",
+                "Mi dispiace, al momento non riesco a registrare la richiesta. Vuole che riprovi tra un attimo?",
+            )
+        conversation.state = "reservation_completed"
+        conversation.completed = True
+        date_it = _format_reservation_date_it(res_data.get("date", ""))
+        _log_chat_timing(request.session_id, "reservation_callback_saved", request_started_at)
+        return _res_response(
+            "reservation_completed",
+            f"Grazie{', ' + conversation.customer_name if conversation.customer_name else ''}. "
+            f"Ho registrato la richiesta per {_party} persone, {date_it} alle {res_data.get('time', '')}: "
+            "la richiameremo il prima possibile per confermare.",
+            valid=True,
+        )
 
     if conversation.state == "collecting_reservation_name":
         local_name = _extract_local_customer_name(request.message)
@@ -2668,6 +2852,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 res_data.get("time", ""),
                 int(res_data.get("party_size") or 1),
                 res_data.get("table_name"),
+                preferred_room=res_data.get("preferred_room"),
             )
             msg = f"Allora: {summary}. Confermo?"
             print(f"[Reservation] Nome: {mask_name(local_name)}")
@@ -2720,6 +2905,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     summary = _format_reservation_summary(
                         conversation.customer_name or "Ospite", date_it, next_slot,
                         _res_party, res_data.get("table_name"),
+                        preferred_room=res_data.get("preferred_room"),
                     )
                     msg = (
                         f"Mi dispiace, nel frattempo quello slot è stato preso. "
@@ -2729,11 +2915,11 @@ def chat(request: ChatRequest, session: SessionDep):
                     return _res_response("awaiting_reservation_confirmation", msg)
 
                 conversation.state = "collecting_reservation_date"
-                conversation.reservation_json = "{}"
+                conversation.reservation_json = _prefs_only_reservation_json()
                 _log_chat_timing(request.session_id, "reservation_recheck_unavailable", request_started_at)
                 return _res_response(
                     "collecting_reservation_date",
-                    "Mi dispiace, nel frattempo quello slot è stato preso e non vedo alternative vicine. Per quale altro giorno vuole prenotare?",
+                    "Mi dispiace, nel frattempo per quella sera siamo al completo. Per quale altro giorno vuole prenotare?",
                 )
 
             _apply_reservation_table_info(res_data, table_info)
@@ -2743,6 +2929,7 @@ def chat(request: ChatRequest, session: SessionDep):
             _res_combined = res_data.get("combined_tables") or []
             _res_extended = bool(res_data.get("extended", False))
             # Salva su Base44
+            _notes = [_reservation_notes_text(res_data), _known_customer_notes()]
             reservation_id = save_reservation_to_base44(
                 customer_name=conversation.customer_name or "Ospite",
                 customer_phone=conversation.customer_phone,
@@ -2750,11 +2937,13 @@ def chat(request: ChatRequest, session: SessionDep):
                 time=_res_time,
                 party_size=_res_party,
                 session_id=request.session_id,
+                notes=" · ".join(n for n in _notes if n),
                 table_id=_res_table_id,
                 table_name=_res_table_name,
                 combined_tables=_res_combined,
                 extended=_res_extended,
                 restaurant_id=restaurant_id,
+                preferred_room=res_data.get("preferred_room"),
             )
             if not reservation_id:
                 conversation.state = "awaiting_reservation_confirmation"

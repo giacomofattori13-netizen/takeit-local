@@ -15,10 +15,10 @@ from xml.sax.saxutils import escape
 import httpx
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import get_session, engine as _db_engine
-from app.models import ConversationSession, Order
+from app.models import ConversationLog, ConversationSession, Order
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
 from app.telemetry import record_latency
@@ -39,7 +39,11 @@ from app.routes.chat import (
     _extract_local_pickup_time,
     _extract_party_size,
     _reservation_confirmation_intent,
+    large_group_callback_prompt,
 )
+
+# Trasferimento al locale per i gruppi oltre max_party_size_auto
+_HANDOFF_DIAL_TIMEOUT_SECONDS = 20
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -1030,6 +1034,18 @@ async def _build_response_twiml(result, session_id: str) -> str:
         f"[Voice] Risposta agente: {describe_text_for_log(reply)} "
         f"stato={result.state!r} cache_hit={cache_hit}"
     )
+    handoff_phone = (getattr(result, "merged_order", None) or {}).get("handoff_phone")
+    if result.state == "reservation_handoff" and handoff_phone:
+        audio = await _audio_element_async(reply)
+        print(f"[Voice] Trasferimento al locale session={session_id!r} verso {mask_phone(handoff_phone)}")
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            "<Response>\n"
+            f"  {audio}\n"
+            f'  <Dial timeout="{_HANDOFF_DIAL_TIMEOUT_SECONDS}" '
+            f'action="/voice/dial-result?session_id={session_id}" method="POST">{escape(handoff_phone)}</Dial>\n'
+            "</Response>"
+        )
     if result.state in ("completed", "unavailable"):
         audio = await _audio_element_async(reply)
         return (
@@ -1271,6 +1287,59 @@ async def voice_incoming(
         result="gather",
         customer_profile=bool(customer),
     )
+    return Response(content=twiml, media_type="application/xml")
+
+
+def _dial_result_update(session_id: str, dial_status: str) -> tuple[bool, str | None]:
+    """Esito del <Dial> verso il locale. (trasferita, messaggio per il cliente).
+
+    Se il locale ha risposto la chiamata è finita lì. Altrimenti (nessuna risposta,
+    occupato, errore) l'agente riprende e raccoglie i dati per far richiamare il cliente.
+    """
+    if dial_status == "completed":
+        return True, None
+    with Session(_db_engine) as db:
+        conversation = db.exec(
+            select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+        if conversation is None:
+            return False, None
+        _, message = large_group_callback_prompt(conversation, "Mi dispiace, al momento il locale non risponde.")
+        db.add(conversation)
+        db.add(ConversationLog(
+            session_id=session_id,
+            user_message=f"[dial:{dial_status or 'sconosciuto'}]",
+            extracted_order_json=json.dumps({"intent": "reservation_handoff_failed", "items": []}, ensure_ascii=False),
+            merged_order_json=conversation.reservation_json or "{}",
+            response_message=message,
+            valid=False,
+            missing_items_json="[]",
+            state=conversation.state,
+        ))
+        db.commit()
+    return False, message
+
+
+@router.post("/dial-result")
+async def voice_dial_result(
+    request: Request,
+    session_id: str = Query(...),
+    DialCallStatus: str = Form(default=""),
+):
+    """Twilio, a fine <Dial> verso il locale: se nessuno ha risposto si torna all'agente."""
+    await _verify_twilio_request(request)
+    print(f"[Voice] Esito trasferimento session={session_id!r} status={DialCallStatus!r}")
+    transferred, message = _dial_result_update(session_id, DialCallStatus)
+    if transferred:
+        twiml = '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Hangup/>\n</Response>'
+    elif message is None:
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n'
+            '  <Say voice="Polly.Giorgio">Mi dispiace, la richiameremo appena possibile. Arrivederci.</Say>\n'
+            "  <Hangup/>\n</Response>"
+        )
+    else:
+        twiml = await _build_retry_gather_twiml(session_id, message)
     return Response(content=twiml, media_type="application/xml")
 
 
