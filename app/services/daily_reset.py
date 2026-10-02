@@ -25,6 +25,7 @@ from app.services.conversation_service import (
     fetch_and_save_restaurant,
     reset_menu_cache,
     reset_restaurant_cache,
+    restaurant_flag,
 )
 
 ROME = ZoneInfo("Europe/Rome")
@@ -32,22 +33,12 @@ DAILY_RESET_ATTEMPTS_DEFAULT = 3
 DAILY_RESET_RETRY_DELAY_DEFAULT_SECONDS = 450.0  # 3 tentativi in 15 minuti
 
 
-def _truthy(value) -> bool:
-    if isinstance(value, str):
-        return value.lower() not in ("false", "0", "no")
-    return bool(value)
-
-
 def is_daily_reset_enabled(restaurant: dict) -> bool:
     """True se i MenuItem disattivati del locale vanno riattivati ogni giorno.
 
-    Usa Restaurant.daily_reset_enabled; se il campo manca (transitorio) ripiega
-    su `not reservations_enabled` (modalità menu del giorno / al taglio).
+    Dipende solo da Restaurant.daily_reset_enabled: null o assente → False.
     """
-    value = restaurant.get("daily_reset_enabled")
-    if value is None:
-        return not _truthy(restaurant.get("reservations_enabled", True))
-    return _truthy(value)
+    return restaurant_flag(restaurant, "daily_reset_enabled", default=False)
 
 
 def _reset_restaurant(restaurant: dict, today: str) -> bool:

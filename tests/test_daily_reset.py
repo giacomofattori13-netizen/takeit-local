@@ -55,8 +55,10 @@ class FakeBase44:
 
 
 def _restaurants(**overrides):
-    pap = {"id": PAP_ID, "name": "Pizza a Pezzi", "reservations_enabled": False, "sold_out_ingredients": ["bufala"]}
-    cds = {"id": CDS_ID, "name": "Corte del Sole", "reservations_enabled": True, "sold_out_ingredients": ["nduja"]}
+    pap = {"id": PAP_ID, "name": "Pizza a Pezzi", "reservations_enabled": False, "daily_reset_enabled": True,
+           "sold_out_ingredients": ["bufala"]}
+    cds = {"id": CDS_ID, "name": "Corte del Sole", "reservations_enabled": True, "daily_reset_enabled": False,
+           "sold_out_ingredients": ["nduja"]}
     pap.update(overrides.get("pap", {}))
     cds.update(overrides.get("cds", {}))
     return [pap, cds]
@@ -74,14 +76,17 @@ class IsDailyResetEnabledTests(unittest.TestCase):
         self.assertTrue(daily_reset.is_daily_reset_enabled({"daily_reset_enabled": True, "reservations_enabled": True}))
         self.assertFalse(daily_reset.is_daily_reset_enabled({"daily_reset_enabled": False, "reservations_enabled": False}))
 
-    def test_missing_field_falls_back_to_not_reservations_enabled(self):
-        self.assertTrue(daily_reset.is_daily_reset_enabled({"reservations_enabled": False}))
-        self.assertFalse(daily_reset.is_daily_reset_enabled({"reservations_enabled": True}))
-        self.assertFalse(daily_reset.is_daily_reset_enabled({}))
+    def test_missing_or_null_field_is_off_regardless_of_reservations(self):
+        for restaurant in (
+            {}, {"daily_reset_enabled": None}, {"daily_reset_enabled": None, "reservations_enabled": False},
+            {"reservations_enabled": False}, {"reservations_enabled": None},
+        ):
+            self.assertFalse(daily_reset.is_daily_reset_enabled(restaurant), restaurant)
 
     def test_string_values_from_base44(self):
         self.assertFalse(daily_reset.is_daily_reset_enabled({"daily_reset_enabled": "false"}))
-        self.assertTrue(daily_reset.is_daily_reset_enabled({"reservations_enabled": "false"}))
+        self.assertTrue(daily_reset.is_daily_reset_enabled({"daily_reset_enabled": "true"}))
+        self.assertFalse(daily_reset.is_daily_reset_enabled({"reservations_enabled": "false"}))
 
 
 class DailyResetTestCase(unittest.TestCase):

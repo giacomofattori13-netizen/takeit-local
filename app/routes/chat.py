@@ -882,6 +882,40 @@ def _extract_party_size(message: str) -> int | None:
     return None
 
 
+_PARTY_WORDS = {
+    "una": 1, "uno": 1, "un": 1, "due": 2, "tre": 3, "quattro": 4, "cinque": 5, "sei": 6,
+    "sette": 7, "otto": 8, "nove": 9, "dieci": 10, "undici": 11, "dodici": 12,
+    "tredici": 13, "quattordici": 14, "quindici": 15, "venti": 20,
+}
+_PARTY_IN_SENTENCE_RE = re.compile(
+    r"\b(\d{1,2}|" + "|".join(_PARTY_WORDS) + r")\s+person[ae]\b|\bsiamo\s+in\s+(\d{1,2}|" + "|".join(_PARTY_WORDS) + r")\b"
+)
+_TIME_IN_SENTENCE_RE = re.compile(
+    r"\b(?:alle|per\s+le|verso\s+le|ore)\s+\d{1,2}(?:[:.]\d{2})?(?:\s+e\s+mezza)?"
+)
+
+
+def _extract_reservation_details(message: str) -> dict:
+    """Giorno, ora e persone già detti nella frase con cui il cliente chiede il tavolo
+    ("un tavolo per domani alle 20 per 4 persone"). Solo i dati espliciti: l'ora
+    deve seguire "alle"/"per le", il numero deve essere seguito da "persone"."""
+    normalized = _normalize_for_match(message)
+    details: dict = {}
+    date = _extract_reservation_date(message)
+    if date:
+        details["date"] = date
+    time_match = _TIME_IN_SENTENCE_RE.search(normalized)
+    if time_match:
+        local_time = _extract_local_pickup_time(time_match.group(0))
+        if local_time:
+            details["time"] = local_time
+    party_match = _PARTY_IN_SENTENCE_RE.search(normalized)
+    if party_match:
+        token = party_match.group(1) or party_match.group(2)
+        details["party_size"] = int(token) if token.isdigit() else _PARTY_WORDS[token]
+    return details
+
+
 def _reservation_day_error(date_str: str, restaurant_id: str = "") -> str | None:
     """Messaggio se nel giorno scelto non si può prenotare: locale chiuso quel giorno,
     oppure oggi senza più orari. None se il giorno va bene (qualsiasi giorno futuro aperto)."""
@@ -2605,6 +2639,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 "Mi dispiace, al momento accettiamo solo ordini da asporto. Cosa desidera ordinare?",
             )
 
+    _prefilled_party: int | None = None
+
     # Trigger: messaggio di prenotazione nel primo turno
     if (
         _reservations_on
@@ -2617,10 +2653,35 @@ def chat(request: ChatRequest, session: SessionDep):
         _capture_reservation_preferences()
         print(f"[Reservation] Intent rilevato, entro nel flusso prenotazione")
         _log_chat_timing(request.session_id, "reservation_intent", request_started_at)
-        return _res_response(
-            "collecting_reservation_date",
-            "Certo! Per quale giorno vuole prenotare?",
-        )
+        # Giorno, ora e persone già detti nella stessa frase: si chiede solo il resto
+        _details = _extract_reservation_details(request.message)
+        _res_data = json.loads(conversation.reservation_json or "{}")
+        _day_error = _reservation_day_error(_details["date"], restaurant_id) if _details.get("date") else None
+        if not _details.get("date") or _day_error:
+            return _res_response(
+                "collecting_reservation_date",
+                _day_error or "Certo! Per quale giorno vuole prenotare?",
+            )
+        _res_data["date"] = _details["date"]
+        _date_it = _format_reservation_date_it(_details["date"])
+        if _details.get("time"):
+            _res_time = resolve_pickup_time(_details["time"])
+            _time_ok, _time_error = validate_reservation_time(_details["date"], _res_time, restaurant_id=restaurant_id)
+            if _time_ok:
+                _res_data["time"] = _res_time
+        conversation.reservation_json = json.dumps(_res_data, ensure_ascii=False)
+        if "time" not in _res_data:
+            conversation.state = "collecting_reservation_time"
+            _ask = _time_error if _details.get("time") and _time_error else f"Certo, {_date_it}. A che ora?"
+            return _res_response("collecting_reservation_time", _ask)
+        conversation.state = "collecting_reservation_party"
+        if not _details.get("party_size"):
+            return _res_response(
+                "collecting_reservation_party",
+                f"Certo, {_date_it} alle {_res_data['time']}. Per quante persone?",
+            )
+        # Tutto detto: il numero di persone passa dal controllo disponibilità qui sotto
+        _prefilled_party = _details["party_size"]
 
     if conversation.state in _reservation_states:
         _capture_reservation_preferences()
@@ -2678,7 +2739,7 @@ def chat(request: ChatRequest, session: SessionDep):
         )
 
     if conversation.state == "collecting_reservation_party":
-        party = _extract_party_size(request.message)
+        party = _prefilled_party or _extract_party_size(request.message)
         if party and party >= 1:
             res_data = json.loads(conversation.reservation_json or "{}")
             res_data["party_size"] = party

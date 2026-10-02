@@ -1000,15 +1000,17 @@ def load_restaurant(restaurant_id: str = "") -> dict:
     return {}
 
 
+def restaurant_flag(restaurant: dict, key: str, default: bool) -> bool:
+    """Flag booleano del Restaurant. Base44 restituisce i campi non impostati come
+    null: null, assente o stringa vuota valgono `default`, mai False."""
+    return _is_truthy_flag(restaurant.get(key), default)
+
+
 def is_agent_active(restaurant_id: str = "") -> bool:
     """Restituisce True se l'agente è attivo (agent_active != False).
     In caso di dati mancanti o errori, assume attivo per sicurezza."""
     restaurant = load_restaurant(restaurant_id=restaurant_id)
-    active = restaurant.get("agent_active", True)
-    # Base44 può restituire bool o stringa
-    if isinstance(active, str):
-        active = active.lower() not in ("false", "0", "no")
-    result = bool(active)
+    result = restaurant_flag(restaurant, "agent_active", default=True)
     print(f"[Agent] agent_active={result!r} (raw={restaurant.get('agent_active')!r})")
     return result
 
@@ -1017,10 +1019,7 @@ def is_reservations_enabled(restaurant_id: str = "") -> bool:
     """Restituisce True se le prenotazioni tavolo sono abilitate (default True).
     Quando False il ristorante è in modalità asporto puro: nessun flusso prenotazione."""
     restaurant = load_restaurant(restaurant_id=restaurant_id)
-    value = restaurant.get("reservations_enabled", True)
-    if isinstance(value, str):
-        value = value.lower() not in ("false", "0", "no")
-    result = bool(value)
+    result = restaurant_flag(restaurant, "reservations_enabled", default=True)
     print(f"[Reservation] reservations_enabled={result!r} (raw={restaurant.get('reservations_enabled')!r})")
     return result
 
@@ -1028,11 +1027,7 @@ def is_reservations_enabled(restaurant_id: str = "") -> bool:
 def is_phone_orders_next_day_only(restaurant_id: str = "") -> bool:
     """True se gli ordini telefonici del locale sono solo preordini per il prossimo
     giorno di apertura (Restaurant.phone_orders_next_day_only, default False)."""
-    restaurant = load_restaurant(restaurant_id=restaurant_id)
-    value = restaurant.get("phone_orders_next_day_only", False)
-    if isinstance(value, str):
-        value = value.lower() in ("true", "1", "yes", "si", "sì")
-    return bool(value)
+    return restaurant_flag(load_restaurant(restaurant_id=restaurant_id), "phone_orders_next_day_only", default=False)
 
 
 def fetch_and_save_restaurant(restaurant_id: str = "") -> dict:
@@ -1099,11 +1094,13 @@ def resolve_restaurant_from_phone(to_number: str) -> tuple[dict, str, str]:
 
 
 def _is_truthy_flag(value: Any, default: bool) -> bool:
-    """Interpreta un flag Base44 (bool o stringa); None/assente → default."""
+    """Interpreta un flag Base44 (bool o stringa); None/assente/stringa vuota → default."""
     if value is None:
         return default
     if isinstance(value, str):
-        return value.lower() not in ("false", "0", "no")
+        if not value.strip():
+            return default
+        return value.strip().lower() not in ("false", "0", "no")
     return bool(value)
 
 
@@ -2022,12 +2019,7 @@ def assign_table(
 def is_table_assignment_enabled(restaurant_id: str = "") -> bool:
     """Restaurant.table_assignment_enabled (default True). Se False l'agente non assegna
     tavoli e controlla solo i coperti della data contro max_covers."""
-    value = load_restaurant(restaurant_id=restaurant_id).get("table_assignment_enabled", True)
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return value.lower() not in ("false", "0", "no")
-    return bool(value)
+    return restaurant_flag(load_restaurant(restaurant_id=restaurant_id), "table_assignment_enabled", default=True)
 
 
 def get_large_party_settings(restaurant_id: str = "") -> tuple[int | None, str | None]:

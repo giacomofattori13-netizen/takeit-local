@@ -57,6 +57,19 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def _customer_turns_sync(session_id: str) -> int:
+    """Turni in cui il cliente ha parlato (esclusi gli eventi interni come l'esito del <Dial>)."""
+    from sqlmodel import select as _select
+
+    from app.models import ConversationLog
+
+    with Session(_db_engine) as db:
+        messages = db.exec(
+            _select(ConversationLog.user_message).where(ConversationLog.session_id == session_id)
+        ).all()
+    return sum(1 for m in messages if m and m.strip() and not m.startswith("[dial:"))
+
+
 def _fetch_transcript_sync(session_id: str) -> str:
     """Ricostruisce la trascrizione turno-per-turno (utente + agente) dai ConversationLog."""
     from sqlmodel import select as _select
@@ -124,6 +137,7 @@ async def _call_log_create(
         return
     data = {
         "restaurant_id": _rid,
+        "session_id": session_id,
         "started_at": _now_iso(),
         "caller_phone": caller_phone,
         "outcome": "abbandonata",
@@ -204,8 +218,10 @@ async def _call_log_update(
 async def _call_log_close_from_status(call_sid: str, call_status: str, call_duration: str) -> None:
     """Chiude il CallLog quando Twilio segnala la fine della chiamata.
 
-    Se il CallLog è già chiuso (ordine confermato, nessun input) non lo tocca:
-    resta solo il caso del cliente che riattacca, che conserva outcome=abbandonata.
+    Se il CallLog è già chiuso (ordine o prenotazione confermati, nessun input) non lo
+    tocca. Altrimenti è il cliente che ha riattaccato: la trascrizione si salva sempre;
+    l'esito resta "abbandonata" solo se il cliente non ha detto niente, altrimenti
+    diventa "nessun_ordine".
     """
     from app.services.base44_client import find_call_log_by_sid, update_call_log
 
@@ -219,12 +235,40 @@ async def _call_log_close_from_status(call_sid: str, call_status: str, call_dura
     duration = int(call_duration) if call_duration.isdigit() else _duration_since(record.get("started_at"))
     if duration is not None:
         patch["duration_seconds"] = duration
-    patch["summary"] = f"Chiamata chiusa dal chiamante prima della fine (Twilio: {call_status})"
+    session_id = record.get("session_id") or ""
+    turns = await asyncio.to_thread(_customer_turns_sync, session_id) if session_id else 0
+    if turns:
+        patch["outcome"] = "nessun_ordine"
+        patch["summary"] = (
+            f"Chiamata chiusa dal chiamante dopo {turns} {'turno' if turns == 1 else 'turni'} "
+            f"(Twilio: {call_status})"
+        )
+        transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
+        if transcript:
+            patch["transcript"] = transcript
+    else:
+        patch["summary"] = f"Chiamata chiusa dal chiamante prima della fine (Twilio: {call_status})"
     try:
         await asyncio.to_thread(update_call_log, record["id"], patch)
         print(f"[CallLog] /status: chiuso id={record['id']!r} call_sid={call_sid!r} status={call_status!r}")
     except Exception as exc:
         print(f"[CallLog] /status: errore id={record['id']!r}: {type(exc).__name__}: {exc}")
+
+
+def _call_log_outcome_for_result(result) -> tuple[str, str] | None:
+    """(esito, riassunto) da scrivere sul CallLog dopo questo turno, o None se la
+    chiamata non è ancora conclusa."""
+    if result.state == "completed":
+        if result.order_id is not None:
+            return "ordine", ""
+        return "nessun_ordine", "Chiamata terminata senza ordine"
+    if result.state == "reservation_completed":
+        res = result.merged_order or {}
+        party = res.get("party_size")
+        when = f"{res.get('date', '')} alle {res.get('time', '')}".strip()
+        pending = " (da confermare: richiamare il cliente)" if res.get("large_group") else ""
+        return "prenotazione", f"Prenotazione per {party} persone, {when}{pending}"
+    return None
 
 
 async def _twilio_call_sid(request: Request) -> str:
@@ -1138,15 +1182,15 @@ async def voice_process(request: Request, session_id: str = Query(...)):
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
-    if result.state == "completed":
-        _has_order = result.order_id is not None
+    _call_outcome = _call_log_outcome_for_result(result)
+    if _call_outcome:
         asyncio.create_task(_call_log_update(
             session_id,
             await _twilio_call_sid(request),
-            "ordine" if _has_order else "nessun_ordine",
-            summary="" if _has_order else "Chiamata terminata senza ordine",
+            _call_outcome[0],
+            summary=_call_outcome[1],
         ))
-    else:
+    if result.state != "completed":
         asyncio.create_task(_prefetch_openai_connection())
     return Response(content=twiml, media_type="application/xml")
 
@@ -1573,15 +1617,15 @@ async def voice_gather(
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)
-    if result.state == "completed":
-        _has_order = result.order_id is not None
+    _call_outcome = _call_log_outcome_for_result(result)
+    if _call_outcome:
         asyncio.create_task(_call_log_update(
             session_id,
             await _twilio_call_sid(request),
-            "ordine" if _has_order else "nessun_ordine",
-            summary="" if _has_order else "Chiamata terminata senza ordine",
+            _call_outcome[0],
+            summary=_call_outcome[1],
         ))
-    else:
+    if result.state != "completed":
         asyncio.create_task(_prefetch_openai_connection())
     record_latency(
         "voice",
