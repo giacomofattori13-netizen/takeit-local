@@ -2218,6 +2218,21 @@ def save_reservation_to_base44(
         return None
 
 
+def update_reservation_on_base44(reservation_id: str, patch: dict) -> bool:
+    """Aggiorna una prenotazione già salvata (richiesta di gruppo completata o passata
+    al locale). False in caso di errore."""
+    if not base44_token():
+        print("[Reservation] BASE44_TOKEN non configurato, skip aggiornamento")
+        return False
+    try:
+        base44_client.update_entity("Reservation", reservation_id, patch)
+        print(f"[Reservation] Aggiornata id={reservation_id} campi={sorted(patch)}")
+        return True
+    except Exception as e:
+        print(f"[Reservation] Errore aggiornamento id={reservation_id}: {type(e).__name__}: {_mask_b44(e)}")
+        return False
+
+
 def send_reservation_sms(
     customer_name: str,
     customer_phone: str | None,
@@ -2225,8 +2240,10 @@ def send_reservation_sms(
     time: str,
     party_size: int,
     table_name: str | None = None,
+    restaurant_name: str | None = None,
 ) -> str:
-    """Invia SMS di conferma prenotazione. Ritorna stringa di stato."""
+    """Invia SMS di conferma prenotazione. Ritorna stringa di stato.
+    Il mittente è Restaurant.name; PIZZERIA_NAME solo se il nome manca."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     if not all([account_sid, auth_token]):
@@ -2245,7 +2262,7 @@ def send_reservation_sms(
 
     sms_from = raw_sms_from.removeprefix("whatsapp:")
     pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
-    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+    pizzeria_name = (restaurant_name or "").strip() or os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
     # Formato data leggibile: 2026-05-21 → "21/05/2026"
     try:

@@ -38,12 +38,16 @@ from app.routes.chat import (
     _extract_local_customer_name,
     _extract_local_pickup_time,
     _extract_party_size,
+    _format_reservation_date_it,
     _reservation_confirmation_intent,
     large_group_callback_prompt,
 )
 
 # Trasferimento al locale per i gruppi oltre max_party_size_auto
 _HANDOFF_DIAL_TIMEOUT_SECONDS = 20
+# Secondi entro cui chi risponde al locale deve premere 1 (altrimenti torna all'agente)
+_HANDOFF_SCREEN_TIMEOUT_SECONDS = 5
+_HANGUP_TWIML = '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Hangup/>\n</Response>'
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -243,6 +247,11 @@ async def _call_log_close_from_status(call_sid: str, call_status: str, call_dura
             f"Chiamata chiusa dal chiamante dopo {turns} {'turno' if turns == 1 else 'turni'} "
             f"(Twilio: {call_status})"
         )
+        pending = await asyncio.to_thread(_pending_group_request_sync, session_id)
+        if pending:
+            # Richiesta di gruppo già salvata prima del trasferimento: non è persa
+            patch["outcome"] = "prenotazione"
+            patch["summary"] = f"{pending} (Twilio: {call_status})"
         transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
         if transcript:
             patch["transcript"] = transcript
@@ -253,6 +262,22 @@ async def _call_log_close_from_status(call_sid: str, call_status: str, call_dura
         print(f"[CallLog] /status: chiuso id={record['id']!r} call_sid={call_sid!r} status={call_status!r}")
     except Exception as exc:
         print(f"[CallLog] /status: errore id={record['id']!r}: {type(exc).__name__}: {exc}")
+
+
+def _pending_group_request_sync(session_id: str) -> str | None:
+    """Riassunto della richiesta di gruppo salvata come "da_confermare", se c'è."""
+    with Session(_db_engine) as db:
+        conversation = db.exec(
+            select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+    res = json.loads((conversation.reservation_json if conversation else None) or "{}")
+    if not res.get("pending_reservation_id"):
+        return None
+    status = "passata al locale" if res.get("handoff_accepted") else "richiamare il cliente"
+    return (
+        f"Richiesta prenotazione per {res.get('party_size')} persone, "
+        f"{res.get('date', '')} alle {res.get('time', '')}, da confermare: {status}"
+    )
 
 
 def _call_log_outcome_for_result(result) -> tuple[str, str] | None:
@@ -1087,7 +1112,9 @@ async def _build_response_twiml(result, session_id: str) -> str:
             "<Response>\n"
             f"  {audio}\n"
             f'  <Dial timeout="{_HANDOFF_DIAL_TIMEOUT_SECONDS}" '
-            f'action="/voice/dial-result?session_id={session_id}" method="POST">{escape(handoff_phone)}</Dial>\n'
+            f'action="/voice/dial-result?session_id={session_id}" method="POST">'
+            f'<Number url="/voice/screen?session_id={session_id}" method="POST">{escape(handoff_phone)}</Number>'
+            "</Dial>\n"
             "</Response>"
         )
     if result.state in ("completed", "unavailable"):
@@ -1337,17 +1364,18 @@ async def voice_incoming(
 def _dial_result_update(session_id: str, dial_status: str) -> tuple[bool, str | None]:
     """Esito del <Dial> verso il locale. (trasferita, messaggio per il cliente).
 
-    Se il locale ha risposto la chiamata è finita lì. Altrimenti (nessuna risposta,
-    occupato, errore) l'agente riprende e raccoglie i dati per far richiamare il cliente.
+    Trasferita solo se chi ha risposto ha premuto 1 (/voice/screen-result): la chiamata
+    è finita lì. Altrimenti (nessuna risposta, occupato, segreteria, nessun 1 entro il
+    timeout) l'agente riprende e raccoglie i dati per far richiamare il cliente.
     """
-    if dial_status == "completed":
-        return True, None
     with Session(_db_engine) as db:
         conversation = db.exec(
             select(ConversationSession).where(ConversationSession.session_id == session_id)
         ).first()
         if conversation is None:
-            return False, None
+            return dial_status == "completed", None
+        if json.loads(conversation.reservation_json or "{}").get("handoff_accepted"):
+            return True, None
         _, message = large_group_callback_prompt(conversation, "Mi dispiace, al momento il locale non risponde.")
         db.add(conversation)
         db.add(ConversationLog(
@@ -1385,6 +1413,86 @@ async def voice_dial_result(
     else:
         twiml = await _build_retry_gather_twiml(session_id, message)
     return Response(content=twiml, media_type="application/xml")
+
+
+def _screen_message_sync(session_id: str) -> str | None:
+    """Messaggio per chi risponde al locale; None se la sessione non c'è più."""
+    with Session(_db_engine) as db:
+        conversation = db.exec(
+            select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+    if conversation is None:
+        return None
+    res = json.loads(conversation.reservation_json or "{}")
+    party = int(res.get("party_size") or 0)
+    when = f", {_format_reservation_date_it(res['date'])} alle {res.get('time', '')}" if res.get("date") else ""
+    return f"Prenotazione per {party} persone{when}. Premi 1 per accettare."
+
+
+def _screen_accept_sync(session_id: str) -> tuple[str, str] | None:
+    """Il locale ha premuto 1: la chiamata passa al locale. Restituisce (id prenotazione,
+    review_reason aggiornato) da scrivere su Base44, o None se non c'è la richiesta salvata."""
+    with Session(_db_engine) as db:
+        conversation = db.exec(
+            select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+        if conversation is None:
+            return None
+        res = json.loads(conversation.reservation_json or "{}")
+        res["handoff_accepted"] = True
+        conversation.reservation_json = json.dumps(res, ensure_ascii=False)
+        db.add(conversation)
+        db.commit()
+    if not res.get("pending_reservation_id"):
+        return None
+    base = res.get("pending_review_reason") or f"Gruppo di {res.get('party_size')} persone"
+    return res["pending_reservation_id"], f"{base} — passata al locale"
+
+
+@router.post("/screen")
+async def voice_screen(request: Request, session_id: str = Query(...)):
+    """Twilio, quando il locale risponde al <Dial>: prima di collegare il cliente chiede
+    di premere 1. Senza 1 entro il timeout (segreteria, nessuno) la gamba del locale
+    si chiude e /voice/dial-result riporta il cliente all'agente."""
+    await _verify_twilio_request(request)
+    message = await asyncio.to_thread(_screen_message_sync, session_id)
+    if message is None:
+        return Response(content=_HANGUP_TWIML, media_type="application/xml")
+    audio = await _audio_element_async(message)
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f'  <Gather input="dtmf" numDigits="1" timeout="{_HANDOFF_SCREEN_TIMEOUT_SECONDS}" '
+        f'action="/voice/screen-result?session_id={session_id}" method="POST">\n'
+        f"    {audio}\n"
+        "  </Gather>\n"
+        "  <Hangup/>\n"
+        "</Response>"
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/screen-result")
+async def voice_screen_result(
+    request: Request,
+    session_id: str = Query(...),
+    Digits: str = Form(default=""),
+):
+    """Tasto premuto dal locale: 1 collega il cliente, qualsiasi altro chiude la gamba."""
+    await _verify_twilio_request(request)
+    print(f"[Voice] Screening locale session={session_id!r} digits={Digits!r}")
+    if Digits.strip() != "1":
+        return Response(content=_HANGUP_TWIML, media_type="application/xml")
+    pending = await asyncio.to_thread(_screen_accept_sync, session_id)
+    if pending:
+        from app.services.conversation_service import update_reservation_on_base44
+
+        reservation_id, review_reason = pending
+        asyncio.create_task(asyncio.to_thread(
+            update_reservation_on_base44, reservation_id, {"review_reason": review_reason},
+        ))
+    # TwiML vuoto: Twilio collega il locale al cliente
+    return Response(content='<?xml version="1.0" encoding="UTF-8"?>\n<Response/>', media_type="application/xml")
 
 
 @router.post("/status")
