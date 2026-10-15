@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from app.privacy import mask_name, mask_phone
 from app.services import base44_client
 from app.services.conversation_service import _PIZZA_TYPE_TO_DOUGH
+from app.turn_latency import traced_tool
 
 ROME_TZ = ZoneInfo("Europe/Rome")
 MAX_RENUMBER_ATTEMPTS = 5
@@ -138,6 +139,7 @@ def _ensure_unique_number(record: dict, restaurant_id: str, order_date: str) -> 
     )
 
 
+@traced_tool("base44_order_save")
 def save_order_to_base44(
     *,
     session_id: str | None,

@@ -13,6 +13,8 @@ import re
 
 import httpx
 
+from app.turn_latency import traced_tool
+
 _APP_ID = "69c54bc5c44250d7da397903"
 _BASE = f"https://app.base44.com/api/apps/{_APP_ID}/entities"
 
@@ -81,6 +83,7 @@ def update_entity(entity: str, entity_id: str, patch: dict, timeout: float = 10.
     return resp.json()
 
 
+@traced_tool("base44_menu")
 def get_menu_items(restaurant_id: str | None = None, timeout: float = 10.0) -> list[dict]:
     """Fetch MenuItem entities from Base44, optionally filtered by restaurant_id."""
     token = base44_token()
@@ -200,6 +203,7 @@ def get_restaurant_by_phone(phone: str, timeout: float = 10.0) -> dict | None:
     return match_restaurant_by_phone(phone, restaurants)
 
 
+@traced_tool("base44_restaurant")
 def get_restaurant_by_id(restaurant_id: str, timeout: float = 10.0) -> dict | None:
     """Fetch a specific Restaurant entity by ID from Base44."""
     if not base44_token():

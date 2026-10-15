@@ -21,6 +21,7 @@ from app.db import get_session, engine as _db_engine
 from app.models import ConversationLog, ConversationSession, Order
 from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
+from app import turn_latency
 from app.telemetry import record_latency
 from app.services.conversation_service import (
     SERVICE_UNAVAILABLE_MESSAGE,
@@ -880,13 +881,15 @@ async def _synthesize_async(text: str, *, pinned: bool = False) -> str | None:
         return None
 
 
-async def _audio_element_async(text: str) -> str:
+async def _audio_element_async(text: str, *, turn_audio: bool = False) -> str:
     """Restituisce <Play>url</Play> se ElevenLabs funziona, altrimenti <Say voice=Polly>.
 
     Per le frasi in cache (pre-riscaldate all'avvio) serve il file MP3 già pronto.
     Per tutto il resto registra uno stream_id e restituisce subito l'URL di streaming:
     Twilio riceverà il TwiML senza attendere ElevenLabs, poi richiederà l'audio e
     lo riceverà in streaming non appena ElevenLabs inizia a generarlo (~200-400ms).
+
+    turn_audio=True: è la risposta del turno in corso, i suoi tempi vanno in latency_turns.
     """
     text = format_time_for_speech(text)
     print(f"[TTS] Testo finale: {describe_text_for_log(text)}")
@@ -895,16 +898,26 @@ async def _audio_element_async(text: str) -> str:
     cached = _audio_cache_get(text)
     if cached:
         print(f"[ElevenLabs] Cache hit: {describe_text_for_log(text)}")
+        if turn_audio:
+            # MP3 già pronto: Twilio lo scarica appena riceve il TwiML (o dalla sua cache)
+            turn_latency.annotate(audio_source="cache")
+            turn_latency.mark("first_audio_sent_to_twilio")
         url = f"{_public_base_url()}/voice/audio/{cached}"
         return f"<Play>{escape(url)}</Play>"
 
     # ElevenLabs non configurato → fallback Polly (nessuna latenza di rete)
     if not os.getenv("ELEVENLABS_API_KEY") or not os.getenv("ELEVENLABS_VOICE_ID"):
+        if turn_audio:
+            turn_latency.annotate(audio_source="polly")
+            turn_latency.mark("first_audio_sent_to_twilio")
         return f'<Say voice="{_POLLY_FALLBACK}">{escape(text)}</Say>'
 
     # Registra lo stream e ritorna subito: Twilio recupererà l'audio in streaming
     stream_id = str(uuid.uuid4())
     _pending_streams[stream_id] = (text, time.time())
+    if turn_audio:
+        turn_latency.annotate(audio_source="stream")
+        turn_latency.link_stream(stream_id)
     url = f"{_public_base_url()}/voice/stream/{stream_id}"
     print(f"[ElevenLabs] Stream registrato {stream_id}: {describe_text_for_log(text)}")
     return f"<Play>{escape(url)}</Play>"
@@ -1011,6 +1024,7 @@ async def stream_audio(stream_id: str):
         raise HTTPException(status_code=404, detail="Stream non trovato o scaduto")
 
     text, _ = entry
+    turn = turn_latency.stream_turn(stream_id)
     api_key = os.getenv("ELEVENLABS_API_KEY")
     voice_id = os.getenv("ELEVENLABS_VOICE_ID")
     model_id = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
@@ -1022,6 +1036,7 @@ async def stream_audio(stream_id: str):
         first_chunk_seen = False
         try:
             http = await _get_tts_stream_client()
+            turn_latency.mark("tts_request_sent", turn=turn)
             async with http.stream(
                 "POST",
                 el_url,
@@ -1041,7 +1056,7 @@ async def stream_audio(stream_id: str):
                     return
                 async for chunk in resp.aiter_bytes(chunk_size=4096):
                     if not first_chunk_seen:
-                        first_chunk_seen = True
+                        turn_latency.mark("tts_first_byte", turn=turn)
                         record_latency(
                             "voice",
                             "tts_first_byte",
@@ -1051,6 +1066,11 @@ async def stream_audio(stream_id: str):
                         )
                         print(f"[ElevenLabs] Stream {stream_id}: primo chunk in arrivo")
                     yield chunk
+                    if not first_chunk_seen:
+                        # Il generatore riprende quando Starlette ha scritto il chunk
+                        first_chunk_seen = True
+                        turn_latency.mark("first_audio_sent_to_twilio", turn=turn)
+                turn_latency.mark("tts_complete", turn=turn)
         except Exception as e:
             record_latency(
                 "voice",
@@ -1105,7 +1125,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
     )
     handoff_phone = (getattr(result, "merged_order", None) or {}).get("handoff_phone")
     if result.state == "reservation_handoff" and handoff_phone:
-        audio = await _audio_element_async(reply)
+        audio = await _audio_element_async(reply, turn_audio=True)
         print(f"[Voice] Trasferimento al locale session={session_id!r} verso {mask_phone(handoff_phone)}")
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1118,7 +1138,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
             "</Response>"
         )
     if result.state in ("completed", "unavailable"):
-        audio = await _audio_element_async(reply)
+        audio = await _audio_element_async(reply, turn_audio=True)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"
@@ -1127,7 +1147,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
             "</Response>"
         )
     audio, no_input = await asyncio.gather(
-        _audio_element_async(reply),
+        _audio_element_async(reply, turn_audio=True),
         _audio_element_async(_NO_INPUT_MSG),
     )
     return (
@@ -1167,6 +1187,7 @@ async def voice_process(request: Request, session_id: str = Query(...)):
     """Chiamato da Twilio dopo il filler audio per collecting_items.
     Attende il risultato del chat() in background e ritorna il TwiML finale."""
     await _verify_twilio_request(request)
+    turn_latency.resume_turn(session_id)
     _cleanup_stale_pending_responses()
     task = _pending_responses.pop(session_id, None)
     _pending_response_created_at.pop(session_id, None)
@@ -1231,6 +1252,7 @@ async def voice_incoming(
 ):
     """Webhook Twilio Voice: crea sessione, lookup cliente, risponde con saluto + Gather speech."""
     started = time.perf_counter()
+    call_started = time.monotonic()
     await _verify_twilio_request(request)
     caller_phone = From.strip() or None
     print(f"[Voice] Chiamata in arrivo da: {mask_phone(caller_phone)}")
@@ -1305,7 +1327,9 @@ async def voice_incoming(
     print(f"[Voice] Sessione creata: {session_id}")
 
     # CallLog: crea con outcome=abbandonata di default (verrà aggiornato a fine chiamata)
-    asyncio.create_task(_call_log_create(session_id, restaurant_id, caller_phone, await _twilio_call_sid(request)))
+    call_sid = await _twilio_call_sid(request)
+    turn_latency.start_call(call_sid, session_id, started_at=call_started)
+    asyncio.create_task(_call_log_create(session_id, restaurant_id, caller_phone, call_sid))
 
     greeting = get_agent_greeting(restaurant_id=restaurant_id)
 
@@ -1510,6 +1534,7 @@ async def voice_status(
     print(f"[Voice] Status callback call_sid={CallSid!r} status={CallStatus!r} duration={CallDuration!r}")
     if CallSid and CallStatus in _TWILIO_FINAL_CALL_STATUSES:
         await _call_log_close_from_status(CallSid, CallStatus, CallDuration)
+        asyncio.create_task(turn_latency.flush_call(CallSid))
     return Response(content="<?xml version='1.0'?><Response/>", media_type="application/xml")
 
 
@@ -1523,6 +1548,7 @@ async def voice_gather(
     """Riceve il testo trascritto da Twilio, lo passa al motore di chat
     e risponde con TwiML per far sentire la risposta al cliente."""
     started = time.perf_counter()
+    stt_final_at = time.monotonic()
     await _verify_twilio_request(request)
     # Import locale per evitare import circolare (chat importa da conversation_service)
     from app.routes.chat import chat  # noqa: PLC0415
@@ -1608,6 +1634,10 @@ async def voice_gather(
         session.commit()
 
     chat_request = ChatRequest(session_id=session_id, message=speech)
+    # Da qui il turno è corrente: chat() nel thread e il task del filler lo ereditano
+    turn_latency.start_turn(
+        await _twilio_call_sid(request), session_id, state=_state, stt_final_at=stt_final_at,
+    )
 
     if _needs_filler(speech, _state):
         # Filler path: lancia chat() in background con sessione DB propria,
@@ -1653,9 +1683,11 @@ async def voice_gather(
         _now = time.time()
         _last = _filler_last_played.get(session_id, 0.0)
         _cooldown_ok = (_now - _last) > _FILLER_COOLDOWN
+        turn_latency.annotate(path="filler")
         if _cooldown_ok:
             _filler_last_played[session_id] = _now
             _filler_el = _filler_audio_element()
+            turn_latency.mark("filler_audio_sent")
         else:
             _filler_el = ""
         print(

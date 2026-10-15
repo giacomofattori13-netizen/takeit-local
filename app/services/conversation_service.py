@@ -18,6 +18,7 @@ from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.services import base44_client
 from app.services.base44_client import auth_headers, base44_token
 from app.telemetry import record_latency
+from app.turn_latency import annotate as _turn_annotate, mark as _turn_mark, traced_tool
 
 load_dotenv()
 
@@ -425,6 +426,7 @@ def _parse_doughs_from_base44_body(body: Any) -> list[dict]:
     ]
 
 
+@traced_tool("base44_doughs")
 def _fetch_doughs_from_base44(timeout_seconds: float | None = None) -> list[dict]:
     token = base44_token()
     if not token:
@@ -786,6 +788,7 @@ def send_whatsapp_confirmation(
     return sms_status
 
 
+@traced_tool("twilio_message")
 def _send_twilio_message(to: str, body: str, from_number: str, account_sid: str, auth_token: str) -> str:
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
     try:
@@ -1555,6 +1558,7 @@ def lookup_customer(phone: str, restaurant_id: str = "") -> dict | None:
     return customer
 
 
+@traced_tool("base44_customer_lookup")
 def _fetch_customers_by_phone(
     phone: str,
     restaurant_id: str = "",
@@ -1615,6 +1619,7 @@ def _delete_customer(customer_id: str, auth_kwargs: dict) -> None:
         print(f"[Customer] Errore eliminazione duplicato id={customer_id}: {type(e).__name__}: {_mask_b44(e)}")
 
 
+@traced_tool("base44_customer_upsert")
 def upsert_customer(
     full_name: str,
     phone: str | None,
@@ -1779,6 +1784,7 @@ def detect_reservation_intent(message: str) -> bool:
     return bool(_RESERVATION_INTENT_PATTERNS.search(message))
 
 
+@traced_tool("base44_tables")
 def _fetch_tables_from_base44(required: bool = False, restaurant_id: str = "") -> list[dict]:
     """Recupera i tavoli del ristorante su Base44 (tutti se restaurant_id è vuoto,
     flusso legacy). Restituisce [] in caso di errore, o solleva se `required`."""
@@ -2045,6 +2051,7 @@ def customer_reservation_notes(customer: dict | None) -> str:
     return " · ".join(parts)
 
 
+@traced_tool("base44_reservation_availability")
 def check_reservation_availability(
     date: str, time: str, party_size: int, restaurant_id: str = ""
 ) -> tuple[bool, str | None, dict | None]:
@@ -2149,6 +2156,7 @@ def check_reservation_availability(
     return False, None, None
 
 
+@traced_tool("base44_reservation_save")
 def save_reservation_to_base44(
     customer_name: str,
     customer_phone: str | None,
@@ -2233,6 +2241,7 @@ def update_reservation_on_base44(reservation_id: str, patch: dict) -> bool:
         return False
 
 
+@traced_tool("reservation_sms")
 def send_reservation_sms(
     customer_name: str,
     customer_phone: str | None,
@@ -2964,6 +2973,7 @@ def extract_order_from_text(
     # La Responses API usa invece previous_response_id per il caching, che non
     # si applica al pattern stateless che usiamo qui.
     _t0 = time.time()
+    _turn_mark("llm_request_sent")
     try:
         response = get_openai_client().chat.completions.create(
             model=MODEL_NAME,
@@ -2974,6 +2984,8 @@ def extract_order_from_text(
             timeout=8,
         )
     except Exception as e:
+        _turn_mark("llm_complete")
+        _turn_annotate(llm_error=type(e).__name__)
         _elapsed_ms = int((time.time() - _t0) * 1000)
         record_latency(
             "llm",
@@ -2986,6 +2998,8 @@ def extract_order_from_text(
         )
         print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} ERROR={type(e).__name__}: {e} → fallback Ok!")
         return _fallback_extracted_payload()
+    # Senza streaming il primo token arriva insieme alla risposta: llm_first_token resta null
+    _turn_mark("llm_complete")
     _elapsed_ms = int((time.time() - _t0) * 1000)
     record_latency(
         "llm",
@@ -2999,6 +3013,7 @@ def extract_order_from_text(
     _tokens_in = getattr(_usage, "prompt_tokens", -1)
     _cached = getattr(getattr(_usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0
     print(f"[OpenAI] elapsed={_elapsed_ms}ms stato={state} tokens_in={_tokens_in} cached={_cached}")
+    _turn_annotate(llm_model=MODEL_NAME, llm_prompt_tokens=_tokens_in, llm_cached_tokens=_cached)
 
     raw_text = (response.choices[0].message.content or "").strip()
     parsed = _parse_llm_json_payload(raw_text)
