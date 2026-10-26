@@ -45,6 +45,7 @@ from app.services.conversation_service import (
     send_whatsapp_confirmation,
     send_owner_alert,
     build_order_not_saved_alert,
+    build_new_order_owner_message,
     get_dough_surcharge,
     is_dough_available,
     is_agent_active,
@@ -1207,7 +1208,26 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
             review_reasons=payload.get("review_reasons"),
         )
         if payload.get("session_id"):
-            _store_order_number(payload["session_id"], result)
+            local_order_id = _store_order_number(payload["session_id"], result)
+        else:
+            local_order_id = None
+        if not result:
+            return
+        # Qui l'ordine è già su Base44: un errore della notifica non deve far ritentare
+        # questo job (creerebbe un doppione), quindi si registra e basta.
+        try:
+            _enqueue_owner_new_order(
+                _owner_new_order_payload(payload, local_order_id, result.get("order_number"), rid),
+            )
+        except Exception as exc:
+            print(
+                f"[OwnerNotify] accodamento fallito restaurant_id={rid!r} order_id={local_order_id} "
+                f"order_number={result.get('order_number')}: {type(exc).__name__}: {exc}"
+            )
+        return
+
+    if kind == "owner_new_order":
+        _send_owner_new_order(payload)
         return
 
     if kind == "whatsapp_confirmation":
@@ -1221,6 +1241,8 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
             pickup_time=payload["pickup_time"],
             items=payload["items"],
             total_amount=payload["total_amount"],
+            pickup_date=payload.get("pickup_date") or payload.get("order_date"),
+            restaurant_id=payload.get("restaurant_id") or "",
         )
         return
 
@@ -1248,6 +1270,7 @@ def _execute_order_side_effect(kind: str, payload: dict[str, Any]) -> None:
             party_size=payload["party_size"],
             table_name=payload.get("table_name"),
             restaurant_name=payload.get("restaurant_name"),
+            restaurant_phone=payload.get("restaurant_phone"),
         )
         if status.startswith("sms_errore"):
             raise RuntimeError(status)
@@ -1409,24 +1432,88 @@ def recover_order_side_effects(limit: int = 100) -> int:
 
 
 def _alert_owner_order_not_saved(order: dict[str, Any], attempts: int, last_error: str | None) -> None:
-    """Un ordine confermato al cliente non è arrivato su Base44: avvisa subito il titolare."""
+    """Un ordine confermato al cliente non è arrivato su Base44: avvisa subito il titolare del locale."""
+    rid = order.get("restaurant_id") or ""
     try:
-        status = send_owner_alert(build_order_not_saved_alert(order, attempts, last_error))
-        print(f"[SideEffects] avviso titolare ordine non salvato: {status}")
+        status = send_owner_alert(build_order_not_saved_alert(order, attempts, last_error), restaurant_id=rid)
+        print(f"[SideEffects] avviso titolare ordine non salvato restaurant_id={rid!r}: {status}")
+        if "inviato" not in status:
+            print(
+                f"[OwnerNotify] avviso ordine non salvato NON inviato restaurant_id={rid!r} "
+                f"order_id={order.get('session_id')!r} status={status}"
+            )
     except Exception as exc:
-        print(f"[SideEffects] avviso titolare fallito: {type(exc).__name__}: {exc}")
+        print(
+            f"[OwnerNotify] avviso ordine non salvato fallito restaurant_id={rid!r} "
+            f"order_id={order.get('session_id')!r}: {type(exc).__name__}: {exc}"
+        )
 
 
-def _store_order_number(session_id: str, result: dict[str, Any]) -> None:
-    """Salva sull'Order locale il numero definitivo e l'id Base44."""
+_OWNER_NEW_ORDER_FIELDS = (
+    "customer_name", "customer_phone", "pickup_time", "pickup_date", "order_date",
+    "items", "total_amount", "review_reasons",
+)
+
+
+def _owner_new_order_payload(
+    order: dict[str, Any], local_order_id: int | None, order_number: Any, restaurant_id: str,
+) -> dict[str, Any]:
+    payload = {key: order.get(key) for key in _OWNER_NEW_ORDER_FIELDS}
+    payload.update(restaurant_id=restaurant_id, local_order_id=local_order_id, order_number=order_number)
+    return payload
+
+
+def _enqueue_owner_new_order(payload: dict[str, Any]) -> None:
+    """Accoda la notifica al titolare per un ordine salvato su Base44 da un job di retry."""
+    now = time.time()
+    with Session(_db_engine) as db_session:
+        job = OrderSideEffect(
+            order_number=payload.get("local_order_id") or 0,
+            kind="owner_new_order",
+            payload_json=json.dumps(payload, ensure_ascii=False),
+            status="pending",
+            attempts=0,
+            next_attempt_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(job)
+        db_session.commit()
+        db_session.refresh(job)
+        job_id = job.id
+    _schedule_order_side_effect_job(job_id)
+
+
+def _send_owner_new_order(payload: dict[str, Any]) -> None:
+    """Notifica al titolare del locale un nuovo ordine. Un invio fallito si registra
+    con restaurant_id e order_id e si ritenta tramite l'outbox; la configurazione
+    mancante non si ritenta."""
+    rid = payload.get("restaurant_id") or ""
+    order_ref = f"order_id={payload.get('local_order_id')} order_number={payload.get('order_number')}"
+    try:
+        status = send_owner_alert(build_new_order_owner_message(payload), restaurant_id=rid)
+    except Exception as exc:
+        print(f"[OwnerNotify] invio fallito restaurant_id={rid!r} {order_ref}: {type(exc).__name__}: {exc}")
+        raise
+    if "inviato" in status:
+        print(f"[OwnerNotify] nuovo ordine notificato restaurant_id={rid!r} {order_ref}: {status}")
+        return
+    print(f"[OwnerNotify] invio fallito restaurant_id={rid!r} {order_ref} status={status}")
+    if not status.startswith("skip"):
+        raise RuntimeError(f"notifica titolare non inviata: {status}")
+
+
+def _store_order_number(session_id: str, result: dict[str, Any]) -> int | None:
+    """Salva sull'Order locale il numero definitivo e l'id Base44; ritorna l'id locale."""
     with Session(_db_engine) as db_session:
         order = _get_order_for_session(db_session, session_id)
         if order is None:
-            return
+            return None
         order.order_number = int(result["order_number"])
         order.base44_id = str(result["id"])
         db_session.add(order)
         db_session.commit()
+        return order.id
 
 
 def _finalize_new_order(
@@ -1484,7 +1571,13 @@ def _finalize_new_order(
         total_amount=total_amount,
         pizza_names=list(dict.fromkeys(item["pizza_name"] for item in merged_order["items"])),
         restaurant_id=base44_payload["restaurant_id"],
+        pickup_date=base44_payload.get("pickup_date"),
+        order_date=base44_payload["order_date"],
         base44_order_payload=None if result else base44_payload,
+        owner_notification=(
+            _owner_new_order_payload(base44_payload, order.id, result["order_number"], base44_payload["restaurant_id"])
+            if result else None
+        ),
     )
 
 
@@ -1499,10 +1592,14 @@ def _enqueue_order_side_effects(
     total_amount: float | None,
     pizza_names: list[str],
     restaurant_id: str = "",
+    pickup_date: str | None = None,
+    order_date: str | None = None,
     base44_order_payload: dict[str, Any] | None = None,
+    owner_notification: dict[str, Any] | None = None,
 ) -> None:
     """Accoda i side effect dell'ordine. `base44_order_payload` è presente solo se
-    l'Order non è già stato creato su Base44 alla conferma."""
+    l'Order non è già stato creato su Base44 alla conferma; in quel caso la
+    notifica al titolare la accoda il job base44_order quando l'ordine è salvato."""
     now = time.time()
     item_payload = copy.deepcopy(items)
     job_specs: list[tuple[str, dict[str, Any]]] = []
@@ -1515,8 +1612,13 @@ def _enqueue_order_side_effects(
             "pickup_time": pickup_time,
             "items": item_payload,
             "total_amount": total_amount,
+            "pickup_date": pickup_date,
+            "order_date": order_date,
+            "restaurant_id": restaurant_id,
         }),
     ]
+    if owner_notification is not None:
+        job_specs.append(("owner_new_order", owner_notification))
     if customer_name:
         job_specs.append(("customer_upsert", {
             "customer_name": customer_name,
@@ -1558,6 +1660,7 @@ def _enqueue_reservation_sms_side_effect(
     party_size: int,
     table_name: str | None,
     restaurant_name: str | None = None,
+    restaurant_phone: str | None = None,
 ) -> None:
     if not _is_mobile_phone(customer_phone):
         return
@@ -1574,6 +1677,7 @@ def _enqueue_reservation_sms_side_effect(
             "party_size": party_size,
             "table_name": table_name,
             "restaurant_name": restaurant_name,
+            "restaurant_phone": restaurant_phone,
         }, ensure_ascii=False),
         status="pending",
         attempts=0,
@@ -3101,6 +3205,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 party_size=int(res_data.get("party_size") or 1),
                 table_name=_res_table_name,
                 restaurant_name=load_restaurant(restaurant_id=restaurant_id).get("name"),
+                restaurant_phone=load_restaurant(restaurant_id=restaurant_id).get("phone"),
             )
 
             conversation.state = "reservation_completed"

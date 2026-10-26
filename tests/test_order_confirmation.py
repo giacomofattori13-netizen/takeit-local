@@ -93,7 +93,7 @@ class OrderConfirmationTests(unittest.TestCase):
         # Base44 (e il controllo doppioni) prima di WhatsApp/SMS e della risposta al cliente
         self.assertEqual(events, ["base44_saved", "side_effects_enqueued"])
         self.assertEqual((order.order_number, order.base44_id), (7, "b44-1"))
-        self.assertEqual({j.kind for j in jobs}, {"whatsapp_confirmation", "customer_upsert"})
+        self.assertEqual({j.kind for j in jobs}, {"whatsapp_confirmation", "customer_upsert", "owner_new_order"})
 
     def test_base44_down_at_confirmation_moves_order_to_retry_job(self):
         with Session(self.engine) as session:
@@ -146,7 +146,7 @@ class OrderConfirmationTests(unittest.TestCase):
         job_id = self._failing_job(chat_module._SIDE_EFFECT_MAX_ATTEMPTS - 1)
         alerts = []
         with patch.object(chat_module, "save_order_to_base44", side_effect=RuntimeError("HTTP 503")), \
-                patch.object(chat_module, "send_owner_alert", side_effect=lambda body: alerts.append(body) or "wa_inviato:201"):
+                patch.object(chat_module, "send_owner_alert", side_effect=lambda body, **kw: alerts.append(body) or "wa_inviato:201"):
             chat_module._process_order_side_effect_job(job_id)
 
         with Session(self.engine) as session:

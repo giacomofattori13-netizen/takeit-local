@@ -1,17 +1,18 @@
 # Audit riattivazione Pizza a Pezzi
 
-Data: 2026-10-26. Solo diagnosi: nessun codice applicativo è stato modificato.
+Data: 2026-10-26. Prima stesura: solo diagnosi, nessun codice applicativo modificato.
+Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e 6; punto 5). Le parti risolte sono segnate con **RISOLTO**.
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
 
 | # | Tema | Stato | Rischio |
 |---|------|-------|---------|
-| 1 | CallLog | Su Base44, non su SQLite | Basso per il CallLog. **Alto** per l'outbox degli ordini (`OrderSideEffect`), che sta su SQLite |
+| 1 | CallLog | Su Base44, non su SQLite | Basso per il CallLog. **Alto** per l'outbox degli ordini (`OrderSideEffect`), che sta su SQLite. **Aperto**: ora anche le notifiche al titolare passano dall'outbox |
 | 2 | File di fallback | Contengono Pizza a Pezzi e vengono filtrati per tenant | Basso. `dough_data.json` è condiviso da tutti i locali |
 | 3 | Tenant PaP | Il record esiste, ma `agent_phone` è un segnaposto e `agent_active` è false | Bloccante finché non si configura |
-| 4 | Logica PaP | Le 5 domande e il preordine sono implementati | Medio: porzione chiesta solo per i tranci, SMS al cliente senza giorno e con nome/telefono globali |
-| 5 | Notifiche a Fabio | Nessuna notifica per i nuovi ordini. Solo un avviso quando un ordine non viene salvato, inviato a `OWNER_PHONE` (unico, globale) | **Alto** |
+| 4 | Logica PaP | Le 5 domande e il preordine sono implementati | Medio: porzione chiesta solo per i tranci. **RISOLTO**: giorno di ritiro e nome/telefono del locale nell'SMS al cliente |
+| 5 | Notifiche a Fabio | **RISOLTO**: SMS a `Restaurant.owner_notify_phone` a ogni nuovo ordine e per gli ordini non salvati, `OWNER_PHONE` solo come ripiego | Basso, se `owner_notify_phone` è compilato. Restano aperti i comandi SMS (un solo `OWNER_PHONE`) |
 
 ---
 
@@ -41,6 +42,8 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 1. Verificare su Railway se sul servizio c'è un Volume montato sulla directory di lavoro, o in alternativa spostare `DATABASE_URL` sul percorso di un Volume, ad esempio `sqlite:////data/takeit.db` letto da una variabile d'ambiente.
 2. Rispettare la regola già in vigore: nessun deploy dalle 17 alle 21. Prima di un deploy, controllare che in `OrderSideEffect` non ci siano job `pending` o `retry`.
 3. Facoltativo: un retry breve (1-2 tentativi) su `create_call_log`.
+
+**Aggiornamento 2026-10-26: ancora aperto.** La notifica al titolare per ogni nuovo ordine è un job `owner_new_order` nella stessa outbox su SQLite. Senza un Volume, anche una notifica in attesa di retry si perde con un deploy.
 
 ---
 
@@ -155,15 +158,15 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 2. **Dopo 2 risposte non capite** (`KG_SLOT_MAX_ATTEMPTS = 2`, `chat.py:2184`) quantità, porzione o temperatura restano vuote e l'ordine viene **salvato comunque**, con `review_reasons` (`chat.py:2247-2275`). Il prezzo usa la tariffa fredda come stima (`chat.py:1146`). L'ordine non è bloccato: qualcuno deve leggere le `review_reasons` sulla dashboard.
 3. **Se mancano gli `opening_hours`** (Base44 non risponde e il file non corrisponde), `get_next_open_day` restituisce domani senza controlli, anche se è lunedì (`conversation_service.py:1524-1526`).
 4. **Chiusure straordinarie e festività** non sono gestite: esiste solo l'orario settimanale.
-5. **L'SMS di conferma al cliente non indica il giorno di ritiro.** Il payload `whatsapp_confirmation` (`chat.py:1511-1517`) non contiene `pickup_date`, e il testo dice solo "Ritiro alle HH:MM" (`conversation_service.py:658-663`). Per un preordine il cliente può capire "stasera".
-6. **Nome e telefono del locale nell'SMS al cliente sono globali**: vengono dalle variabili d'ambiente `PIZZERIA_NAME` e `PIZZERIA_PHONE` (`conversation_service.py:650-651`), non dal Restaurant. Con due locali attivi, un cliente PaP riceve il nome configurato per tutti. L'SMS delle prenotazioni usa invece `Restaurant.name` (`conversation_service.py:2274`).
+5. **RISOLTO.** **L'SMS di conferma al cliente non indicava il giorno di ritiro.** Il payload `whatsapp_confirmation` (`chat.py:1511-1517`) non contiene `pickup_date`, e il testo dice solo "Ritiro alle HH:MM" (`conversation_service.py:658-663`). Per un preordine il cliente può capire "stasera".
+6. **RISOLTO.** **Nome e telefono del locale nell'SMS al cliente erano globali**: vengono dalle variabili d'ambiente `PIZZERIA_NAME` e `PIZZERIA_PHONE` (`conversation_service.py:650-651`), non dal Restaurant. Con due locali attivi, un cliente PaP riceve il nome configurato per tutti. L'SMS delle prenotazioni usa invece `Restaurant.name` (`conversation_service.py:2274`).
 
 **Correzione proposta (non applicata)**
 
 - Buco 1: decidere con Fabio se la porzione va chiesta anche per gli ordini a peso. In caso affermativo, togliere la condizione `unit == "tranci"` nello slot `portion`.
-- Buco 2: far comparire l'ordine come "da verificare" in modo evidente in Cucina/OrdiniStaff, oppure aggiungerlo alla notifica a Fabio (vedi punto 5).
-- Buco 5: aggiungere `pickup_date` al payload `whatsapp_confirmation` e scrivere "Ritiro martedì 27/10 alle 18:30".
-- Buco 6: passare `Restaurant.name` e `Restaurant.phone` alla conferma, come già succede per le prenotazioni.
+- Buco 2: **RISOLTO lato notifica.** La notifica a Fabio di un ordine con `review_reasons` inizia con "DA VERIFICARE" ed elenca i motivi. Resta da valutare se evidenziarlo anche in Cucina/OrdiniStaff.
+- Buco 5: **RISOLTO.** Il job `whatsapp_confirmation` porta `pickup_date` (o, se manca, `order_date`) e `restaurant_id`. L'SMS dice "Ritiro martedì 3 novembre, ore 12:30" (`format_pickup_day` in `conversation_service.py`). Il fallback WhatsApp usa ancora il template Twilio con la sola ora.
+- Buco 6: **RISOLTO.** `restaurant_contact(restaurant_id)` legge `Restaurant.name` e `Restaurant.phone` del tenant. `PIZZERIA_NAME` resta solo come ripiego quando il nome manca, con un warning nei log, e per i job accodati prima della modifica. `PIZZERIA_PHONE` non si usa più: senza `Restaurant.phone` la riga "Per modifiche chiama il..." viene omessa. Oggi `phone` è null per PaP. Anche l'SMS delle prenotazioni ora usa `Restaurant.phone`.
 - Buchi 3 e 4: in mancanza di orari, chiedere conferma del giorno invece di assumere domani. Valutare un campo `closed_dates` sul Restaurant.
 
 ---
@@ -186,7 +189,19 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 - Se `OWNER_PHONE` è il numero di chi sviluppa TakeIt o quello di Corte del Sole, gli avvisi "ordine non salvato" di PaP vanno alla persona sbagliata, e Fabio non può mandare comandi SMS.
 - L'avviso "ordine non salvato" dipende dall'outbox su SQLite (punto 1): si perde con un deploy.
 
-**Correzione proposta (non applicata)**
+**Aggiornamento 2026-10-26: RISOLTO (punti 1 e 2 qui sotto)**
+
+- **Nuovo ordine**: quando l'ordine è salvato su Base44 parte un job `owner_new_order`. Se è salvato alla conferma, il job viene accodato insieme alle conferme; se è salvato dal job di retry `base44_order`, viene accodato da quel job.
+  - Il messaggio contiene numero d'ordine, cliente, giorno e ora di ritiro, voci con quantità e totale (`build_new_order_owner_message`).
+  - Se l'ordine ha `review_reasons`, il messaggio inizia con "DA VERIFICARE".
+- **Destinazione**: `Restaurant.owner_notify_phone` del locale dell'ordine (`owner_notify_phone()` in `conversation_service.py`). Se il campo è vuoto si usa `OWNER_PHONE`, con un warning `[OwnerAlert] WARNING owner_notify_phone vuoto ...` nei log. Lo stesso vale per l'avviso "ordine non salvato".
+- **Canale**: lo stesso di prima, `send_owner_alert`: WhatsApp se `TWILIO_WHATSAPP_FROM` è configurato, altrimenti, o se WhatsApp fallisce, SMS da `TWILIO_NUMBER`.
+- **Errori**: un invio fallito viene registrato nei log come `[OwnerNotify] invio fallito restaurant_id=... order_id=... order_number=...` e ritentato dall'outbox. Con la configurazione mancante non viene ritentato. Il salvataggio dell'ordine non dipende mai dalla notifica: se l'accodamento fallisce dentro `base44_order`, l'errore viene registrato e il job non viene ritentato, così non si crea un doppione.
+- **Test**: `tests/test_owner_notifications.py`.
+- **Da fare su Base44**: compilare `owner_notify_phone` (in formato E.164) per Pizza a Pezzi e per Corte del Sole.
+- **Ancora aperto**: i comandi SMS del titolare accettano ancora un solo `OWNER_PHONE` per tutti i locali.
+
+**Correzione proposta originale**
 
 1. Aggiungere al Restaurant un campo `owner_phone` (o `notification_phone`) e usarlo al posto di `OWNER_PHONE` sia in `send_owner_alert` sia per autorizzare i comandi SMS, con `OWNER_PHONE` come ripiego.
 2. Aggiungere un job `owner_new_order` nell'outbox: un SMS a Fabio per ogni preordine, con giorno, ora, voci e `review_reasons`.
@@ -201,6 +216,7 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 - [ ] Base44 PaP: `agent_phone` reale e `agent_active = true` (punto 3)
 - [ ] Menu PaP su Base44 verificato e `scripts/export_menu.py` rieseguito (punto 2)
 - [ ] Decisione con Fabio sulla porzione negli ordini a peso (punto 4)
-- [ ] Giorno di ritiro e nome del locale nell'SMS al cliente (punto 4)
-- [ ] Canale di notifica a Fabio per ogni ordine e `OWNER_PHONE` per locale (punto 5)
+- [x] Giorno di ritiro e nome del locale nell'SMS al cliente (punto 4)
+- [x] Canale di notifica a Fabio per ogni ordine e numero del titolare per locale (punto 5)
+- [ ] Base44: `owner_notify_phone` compilato per PaP e Corte del Sole, e `phone` per PaP (punto 5 e punto 4, buco 6)
 - [ ] Chiamata di prova di domenica: il ritiro proposto deve essere martedì

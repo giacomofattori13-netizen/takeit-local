@@ -591,6 +591,36 @@ def format_total_line(total_amount: float | None) -> str:
     return f"Totale: \u20ac{float(total_amount):.2f}"
 
 
+_MONTH_IT = [
+    "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+    "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+]
+
+
+def format_pickup_day(pickup_date: str | None, pickup_time: str | None) -> str:
+    """Giorno e ora di ritiro in chiaro: "martedì 3 novembre, ore 12:30".
+    Senza una data valida resta solo l'ora."""
+    time_part = f"ore {pickup_time}" if pickup_time else "ora da definire"
+    try:
+        day = datetime.date.fromisoformat(pickup_date or "")
+    except ValueError:
+        return time_part
+    return f"{_WEEKDAY_IT[day.weekday()]} {day.day} {_MONTH_IT[day.month - 1]}, {time_part}"
+
+
+def restaurant_contact(restaurant_id: str) -> tuple[str, str]:
+    """(nome, telefono) del locale per gli SMS al cliente, dal Restaurant del tenant.
+    PIZZERIA_NAME solo se il nome manca (job accodati senza restaurant_id);
+    il telefono non ha ripiego globale: senza Restaurant.phone la riga si omette."""
+    restaurant = load_restaurant(restaurant_id=restaurant_id) if restaurant_id else {}
+    name = (restaurant.get("name") or "").strip()
+    phone = (restaurant.get("phone") or "").strip()
+    if not name:
+        print(f"[Conferma] WARNING Restaurant.name assente per restaurant_id={restaurant_id!r}: uso PIZZERIA_NAME")
+        name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
+    return name, phone
+
+
 def _build_pizza_lines(items: list[dict]) -> list[str]:
     """Costruisce le righe descrittive delle pizze per i messaggi di conferma.
 
@@ -631,10 +661,12 @@ def _build_pizza_lines(items: list[dict]) -> list[str]:
 def _send_sms(
     phone: str,
     items: list[dict],
-    pickup_time: str,
+    pickup_label: str,
     total_amount: float | None,
     account_sid: str,
     auth_token: str,
+    pizzeria_name: str,
+    pizzeria_phone: str,
 ) -> str:
     """Invia SMS di conferma ordine (canale principale).
     Restituisce 'sms_inviato:<status>', 'sms_skip:<motivo>', 'sms_errore:<msg>'."""
@@ -647,11 +679,8 @@ def _send_sms(
     sms_from = raw_sms_from.removeprefix("whatsapp:")
     print(f"[SMS] From={mask_phone(sms_from)} To={mask_phone(phone)}")
 
-    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
-    pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
     pizza_lines = _build_pizza_lines(items)
     pizza_block = "\n".join(pizza_lines)
-    time_str = pickup_time or "da definire"
     contact_line = f"Per modifiche chiama il {pizzeria_phone}" if pizzeria_phone else ""
 
     parts = [
@@ -660,7 +689,7 @@ def _send_sms(
         "",
         pizza_block,
         "",
-        f"{format_total_line(total_amount)} \u2014 Ritiro alle {time_str}",
+        f"{format_total_line(total_amount)} \u2014 Ritiro {pickup_label}",
     ]
     if contact_line:
         parts.append(contact_line)
@@ -743,13 +772,15 @@ def send_whatsapp_confirmation(
     pickup_time: str,
     items: list[dict],
     total_amount: float | None,
+    pickup_date: str | None = None,
+    restaurant_id: str = "",
 ) -> str:
     """Invia la conferma ordine: SMS come canale principale, WhatsApp come fallback opzionale.
+    Nome e telefono del locale vengono dal Restaurant del tenant (restaurant_id).
     Restituisce una stringa di stato con i risultati dei canali usati."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     wa_from_number = os.getenv("TWILIO_WHATSAPP_FROM")
-    pizzeria_name = os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
     print(f"[Conferma] === INIZIO INVIO CONFERMA ORDINE ===")
     print(f"[Conferma] customer_name={mask_name(customer_name)} customer_phone={mask_phone(customer_phone)}")
@@ -774,8 +805,13 @@ def send_whatsapp_confirmation(
         print(f"[Conferma] Numero non valido o fisso, skip invio")
         return "skip:numero_non_valido"
 
+    pizzeria_name, pizzeria_phone = restaurant_contact(restaurant_id)
+    pickup_label = format_pickup_day(pickup_date, pickup_time)
+
     # ── Canale principale: SMS ────────────────────────────────────────────────
-    sms_status = _send_sms(phone, items, pickup_time, total_amount, account_sid, auth_token)
+    sms_status = _send_sms(
+        phone, items, pickup_label, total_amount, account_sid, auth_token, pizzeria_name, pizzeria_phone,
+    )
     print(f"[Conferma] SMS risultato: {sms_status}")
 
     # ── Canale secondario: WhatsApp (solo se SMS fallisce e credenziali disponibili) ──
@@ -827,13 +863,48 @@ def build_order_not_saved_alert(order: dict, attempts: int, last_error: str | No
     return "\n".join(lines)
 
 
-def send_owner_alert(body: str) -> str:
-    """Avvisa il titolare (OWNER_PHONE): WhatsApp, e SMS se WhatsApp non parte.
+def build_new_order_owner_message(order: dict) -> str:
+    """Notifica al titolare per un nuovo ordine salvato. Se l'ordine è da verificare
+    il messaggio inizia con "DA VERIFICARE"."""
+    review_reasons = order.get("review_reasons") or []
+    number = f" #{order['order_number']}" if order.get("order_number") else ""
+    header = f"Nuovo ordine{number}"
+    if review_reasons:
+        header = f"DA VERIFICARE - {header}"
+    lines = [
+        header,
+        f"Cliente: {order.get('customer_name') or '?'} {order.get('customer_phone') or ''}".rstrip(),
+        f"Ritiro: {format_pickup_day(order.get('pickup_date') or order.get('order_date'), order.get('pickup_time'))}",
+        *_build_pizza_lines(order.get("items") or []),
+        format_total_line(order.get("total_amount")),
+    ]
+    lines += [f"! {reason}" for reason in review_reasons]
+    return "\n".join(lines)
+
+
+def owner_notify_phone(restaurant_id: str = "") -> str:
+    """Numero del titolare del locale (Restaurant.owner_notify_phone).
+    Se il campo è vuoto si usa OWNER_PHONE, con un warning nei log."""
+    restaurant = load_restaurant(restaurant_id=restaurant_id) if restaurant_id else {}
+    phone = (restaurant.get("owner_notify_phone") or "").strip()
+    if phone:
+        return phone
+    fallback = os.getenv("OWNER_PHONE", "").strip()
+    print(
+        f"[OwnerAlert] WARNING owner_notify_phone vuoto per restaurant_id={restaurant_id!r}: "
+        f"uso OWNER_PHONE ({'configurato' if fallback else 'non configurato'})"
+    )
+    return fallback
+
+
+def send_owner_alert(body: str, restaurant_id: str = "") -> str:
+    """Avvisa il titolare del locale (owner_notify_phone, ripiego OWNER_PHONE):
+    WhatsApp, e SMS se WhatsApp non parte.
 
     WhatsApp accetta testo libero solo entro 24 ore dall'ultimo messaggio del
     titolare: fuori da quella finestra Twilio rifiuta l'invio e si passa all'SMS.
     """
-    owner_phone = os.getenv("OWNER_PHONE", "").strip()
+    owner_phone = owner_notify_phone(restaurant_id)
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     if not owner_phone or not account_sid or not auth_token:
@@ -2250,9 +2321,11 @@ def send_reservation_sms(
     party_size: int,
     table_name: str | None = None,
     restaurant_name: str | None = None,
+    restaurant_phone: str | None = None,
 ) -> str:
     """Invia SMS di conferma prenotazione. Ritorna stringa di stato.
-    Il mittente è Restaurant.name; PIZZERIA_NAME solo se il nome manca."""
+    Il mittente è Restaurant.name; PIZZERIA_NAME solo se il nome manca.
+    Il telefono è Restaurant.phone: senza, la riga "Per modifiche" si omette."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     if not all([account_sid, auth_token]):
@@ -2270,7 +2343,7 @@ def send_reservation_sms(
         return "skip:TWILIO_NUMBER_mancante"
 
     sms_from = raw_sms_from.removeprefix("whatsapp:")
-    pizzeria_phone = os.getenv("PIZZERIA_PHONE", "")
+    pizzeria_phone = (restaurant_phone or "").strip()
     pizzeria_name = (restaurant_name or "").strip() or os.getenv("PIZZERIA_NAME", "La Pizzeria")
 
     # Formato data leggibile: 2026-05-21 → "21/05/2026"
