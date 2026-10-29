@@ -2,13 +2,14 @@
 
 Data: 2026-10-26. Prima stesura: solo diagnosi, nessun codice applicativo modificato.
 Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e 6; punto 5). Le parti risolte sono segnate con **RISOLTO**.
+Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 1). **In corso, manca il Volume su Railway.**
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
 
 | # | Tema | Stato | Rischio |
 |---|------|-------|---------|
-| 1 | CallLog | Su Base44, non su SQLite | Basso per il CallLog. **Alto** per l'outbox degli ordini (`OrderSideEffect`), che sta su SQLite. **Aperto**: ora anche le notifiche al titolare passano dall'outbox |
+| 1 | CallLog | Su Base44, non su SQLite | Basso per il CallLog. **Alto** per l'outbox degli ordini (`OrderSideEffect`), che sta su SQLite. **In corso, manca il Volume su Railway**: il codice legge già `DB_PATH` |
 | 2 | File di fallback | Contengono Pizza a Pezzi e vengono filtrati per tenant | Basso. `dough_data.json` è condiviso da tutti i locali |
 | 3 | Tenant PaP | Il record esiste, ma `agent_phone` è un segnaposto e `agent_active` è false | Bloccante finché non si configura |
 | 4 | Logica PaP | Le 5 domande e il preordine sono implementati | Medio: porzione chiesta solo per i tranci. **RISOLTO**: giorno di ritiro e nome/telefono del locale nell'SMS al cliente |
@@ -28,7 +29,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
   - Chiusura su riaggancio tramite callback Twilio `/voice/status`: `voice.py:223-265` e `voice.py:1522-1536`.
   - Latenze per turno (`latency_turns`) tenute in memoria e scritte sul CallLog a fine chiamata: `app/turn_latency.py:220-231`.
 - Tutte le scritture sono fire-and-forget (`asyncio.create_task`). Se Base44 non risponde, il CallLog si perde e resta solo una riga nei log di Railway.
-- **SQLite** (`sqlite:///./takeit.db`, `app/db.py:6`, sul filesystem del container) contiene invece le tabelle in `app/models.py`: `MenuItem`, `Order`, `OrderItem`, `OrderSideEffect`, `ConversationSession` e `ConversationLog`.
+- **SQLite** (`sqlite:///./takeit.db` di default, `app/db.py`, sul filesystem del container; dal 2026-10-29 il percorso si imposta con `DB_PATH`) contiene invece le tabelle in `app/models.py`: `MenuItem`, `Order`, `OrderItem`, `OrderSideEffect`, `ConversationSession` e `ConversationLog`.
   - Nel repo non c'è nessuna configurazione Railway (`railway.json` o `Procfile`), quindi non posso verificare se è montato un Volume su quel percorso. **Se non c'è un Volume, il contenuto di `takeit.db` si perde a ogni deploy.** Questo riguarda `ConversationLog` (il log dei turni letto da `/logs`), le sessioni in corso e l'outbox `OrderSideEffect`, non il CallLog.
 
 **Rischio**
@@ -44,6 +45,11 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 3. Facoltativo: un retry breve (1-2 tentativi) su `create_call_log`.
 
 **Aggiornamento 2026-10-26: ancora aperto.** La notifica al titolare per ogni nuovo ordine è un job `owner_new_order` nella stessa outbox su SQLite. Senza un Volume, anche una notifica in attesa di retry si perde con un deploy.
+
+**Aggiornamento 2026-10-29: in corso, manca il Volume su Railway.** `app/db.py` legge il percorso del database da `DB_PATH` (senza la variabile resta `./takeit.db`), crea all'avvio la cartella se non esiste e scrive nei log `[Startup] Database SQLite: <percorso>`. Nessun altro punto del codice apre `takeit.db` con un percorso scritto a mano: tutti passano da `app.db`. Test: `tests/test_db_path.py`. Per chiudere il punto:
+
+- su Railway, creare un Volume montato su `/data` e impostare `DB_PATH=/data/takeit.db`;
+- dopo il deploy, verificare nei log la riga `[Startup] Database SQLite: /data/takeit.db`, poi fare un secondo deploy e controllare che sessioni e `ConversationLog` siano ancora lì.
 
 ---
 
@@ -211,7 +217,7 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 
 ## Checklist prima della riattivazione
 
-- [ ] Volume Railway per `takeit.db`, oppure verifica che esista già (punto 1)
+- [ ] Volume Railway su `/data` e `DB_PATH=/data/takeit.db` (punto 1: codice pronto, manca il Volume)
 - [ ] Numero Twilio dedicato e webhook configurati (punto 3)
 - [ ] Base44 PaP: `agent_phone` reale e `agent_active = true` (punto 3)
 - [ ] Menu PaP su Base44 verificato e `scripts/export_menu.py` rieseguito (punto 2)
