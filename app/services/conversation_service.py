@@ -886,6 +886,11 @@ def owner_notify_phone(restaurant_id: str = "") -> str:
     """Numero del titolare del locale (Restaurant.owner_notify_phone).
     Se il campo è vuoto si usa OWNER_PHONE, con un warning nei log."""
     restaurant = load_restaurant(restaurant_id=restaurant_id) if restaurant_id else {}
+    return owner_phone_for_restaurant(restaurant, restaurant_id)
+
+
+def owner_phone_for_restaurant(restaurant: dict, restaurant_id: str = "") -> str:
+    """Come owner_notify_phone, ma su un Restaurant già letto (es. dal riepilogo giornaliero)."""
     phone = (restaurant.get("owner_notify_phone") or "").strip()
     if phone:
         return phone

@@ -11,6 +11,7 @@ from app.routes.menu import router as menu_router
 from app.routes.orders import router as orders_router
 from app.routes.chat import recover_order_side_effects
 from app.routes.chat import router as chat_router
+from app.routes.daily_summary import router as daily_summary_router
 from app.routes.sessions import router as sessions_router
 from app.routes.tts import router as tts_router
 from app.routes.logs import router as logs_router
@@ -19,6 +20,7 @@ from app.routes.sms import router as sms_router
 from app.routes.voice import close_tts_stream_client, router as voice_router, prewarm_audio_cache
 from app.services.base44_client import log_authenticated_user
 from app.services.daily_reset import start_daily_reset_thread
+from app.services.daily_summary import start_daily_summary_thread
 from app.services.menu_sync import sync_menu_to_db
 from app.services.conversation_service import (
     fetch_and_save_doughs,
@@ -77,6 +79,7 @@ def on_startup():
     print(f"[Startup] TWILIO_NUMBER={mask_phone(_twilio_number)}")
 
     start_daily_reset_thread()
+    start_daily_summary_thread()
     print(
         f"[Startup] OWNER_PHONE={'✓' if os.getenv('OWNER_PHONE') else '✗ NON CONFIGURATO'}"
     )
@@ -119,6 +122,7 @@ def serve_tech_dashboard():
 app.include_router(menu_router)
 app.include_router(orders_router)
 app.include_router(chat_router)
+app.include_router(daily_summary_router)
 app.include_router(sessions_router)
 app.include_router(tts_router)
 app.include_router(logs_router)

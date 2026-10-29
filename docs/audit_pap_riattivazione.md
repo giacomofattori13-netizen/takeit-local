@@ -3,6 +3,7 @@
 Data: 2026-10-26. Prima stesura: solo diagnosi, nessun codice applicativo modificato.
 Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e 6; punto 5). Le parti risolte sono segnate con **RISOLTO**.
 Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 1). **In corso, manca il Volume su Railway.**
+Aggiornamento 2026-10-29: riepilogo giornaliero degli ordini al titolare e `owner_order_sms_enabled` (punto 6).
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -14,6 +15,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 | 3 | Tenant PaP | Il record esiste, ma `agent_phone` è un segnaposto e `agent_active` è false | Bloccante finché non si configura |
 | 4 | Logica PaP | Le 5 domande e il preordine sono implementati | Medio: porzione chiesta solo per i tranci. **RISOLTO**: giorno di ritiro e nome/telefono del locale nell'SMS al cliente |
 | 5 | Notifiche a Fabio | **RISOLTO**: SMS a `Restaurant.owner_notify_phone` a ogni nuovo ordine e per gli ordini non salvati, `OWNER_PHONE` solo come ripiego | Basso, se `owner_notify_phone` è compilato. Restano aperti i comandi SMS (un solo `OWNER_PHONE`) |
+| 6 | Riepilogo giornaliero | Codice pronto, spento su Base44 (`daily_summary_enabled` null) | Basso. Da provare con l'anteprima prima di attivarlo |
 
 ---
 
@@ -206,12 +208,71 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 - **Test**: `tests/test_owner_notifications.py`.
 - **Da fare su Base44**: compilare `owner_notify_phone` (in formato E.164) per Pizza a Pezzi e per Corte del Sole.
 - **Ancora aperto**: i comandi SMS del titolare accettano ancora un solo `OWNER_PHONE` per tutti i locali.
+- **Aggiornamento 2026-10-29**: con `Restaurant.owner_order_sms_enabled = false` la notifica per ogni nuovo ordine non parte, tranne per gli ordini da verificare (vedi punto 6).
 
 **Correzione proposta originale**
 
 1. Aggiungere al Restaurant un campo `owner_phone` (o `notification_phone`) e usarlo al posto di `OWNER_PHONE` sia in `send_owner_alert` sia per autorizzare i comandi SMS, con `OWNER_PHONE` come ripiego.
 2. Aggiungere un job `owner_new_order` nell'outbox: un SMS a Fabio per ogni preordine, con giorno, ora, voci e `review_reasons`.
 3. In alternativa, o in aggiunta: account di Fabio su Base44 con OrdiniStaff filtrato sul suo locale (vedi la nota sulla dashboard già aperta: ID hardcoded e regole RLS sugli Order) e `notification_sound = true`.
+
+---
+
+## 6. Riepilogo giornaliero
+
+**Aggiornamento 2026-10-29: codice pronto, da attivare su Base44.**
+
+Fabio prende solo preordini per il giorno di apertura successivo, quindi la mattina gli serve un riepilogo unico per organizzare produzione e ritiri.
+
+**Come funziona** (`app/services/daily_summary.py`)
+
+- Un thread, avviato all'avvio accanto al DailyReset e con lo stesso meccanismo (thread daemon e `sleep`), rilegge i Restaurant da Base44 al massimo ogni 15 minuti, e all'orario di un locale attivo se arriva prima. Così un cambio di orario o un'attivazione su Base44 vale senza riavvio.
+- Un locale riceve il riepilogo se:
+  - `daily_summary_enabled = true` (null vale false);
+  - oggi è un giorno di apertura secondo `opening_hours`. Senza orari il locale conta come aperto, come in `get_next_open_day`;
+  - l'ora di Roma ha superato `daily_summary_time`. Se il campo è vuoto o non è "HH:MM", vale 11:00 e nei log compare `[DailySummary] WARNING daily_summary_time ...`;
+  - `last_daily_summary_date` non è la data di oggi.
+- **Destinazione**: `owner_notify_phone`, con ripiego su `OWNER_PHONE` e lo stesso warning delle notifiche (`owner_phone_for_restaurant`). **Canale**: solo SMS da `TWILIO_NUMBER`, niente WhatsApp.
+- **Ordini inclusi**: gli Order del locale con `pickup_date` uguale a oggi, più quelli senza `pickup_date` con `order_date` di oggi. Sono esclusi gli stati annullato/cancellato e ritirato/completato/consegnato, e i record `is_sample`. Oggi su Base44 gli stati usati sono solo `nuovo` e `completato`: **`completato` conta come ritirato**.
+- **Contenuto**, in quest'ordine:
+  1. intestazione "Ordini di giovedì 29 ottobre — N ordini";
+  2. "DA VERIFICARE" (solo se ci sono ordini con `needs_review`): ora, nome, telefono e `review_reason`;
+  3. "TOTALI PER GUSTO": per ogni prodotto, kg (con il dettaglio caldo/freddo se le temperature sono più di una), tranci per porzione e temperatura, pezzi. Ad esempio "Bufala: 3,5 kg (calda 2 kg, fredda 1,5 kg) · 6 tranci interi freddi". Temperatura o porzione mancanti compaiono come "da definire";
+  4. "RITIRI": un blocco per ordine, in ordine di ora di ritiro (quelli senza ora vanno in fondo), con le voci nello stesso formato dell'SMS al cliente. Gli ordini da verificare sono segnati "(DA VERIFICARE)";
+  5. senza ordini: "Nessun ordine per oggi".
+- **Lunghezza**: oltre 1500 caratteri il testo si divide in più SMS numerati "(1/3)", "(2/3)"..., senza spezzare un ordine.
+
+**Idempotenza e recupero**
+
+- Dopo l'invio si scrive `last_daily_summary_date` su Base44. Un riavvio nello stesso giorno non manda un secondo riepilogo.
+- Se il servizio riparte dopo l'orario e il riepilogo di oggi non è partito, parte al primo controllo, cioè subito.
+- Se Twilio fallisce, si ritenta al controllo successivo, fino a 3 tentativi al giorno.
+- Se gli SMS partono ma la scrittura della data su Base44 fallisce, il processo ricorda l'invio e non lo ripete. **Rischio residuo**: un riavvio nello stesso giorno, prima che la data sia salvata, manda il riepilogo una seconda volta.
+
+**`owner_order_sms_enabled`**
+
+- Con `false`, la notifica per ogni nuovo ordine (`owner_new_order`) non parte e il job si chiude con il log `owner_order_sms_enabled=false: notifica saltata`.
+- Gli ordini da verificare partono sempre: quelli con `review_reasons` e quelli con `ai_confidence` sotto 0,8, la stessa regola di `needs_review` su Base44.
+- Con null o `true` il comportamento non cambia. L'avviso "ordine non salvato" non dipende da questo campo.
+
+**Anteprima senza invio**
+
+```
+curl -H "X-Admin-Api-Key: $ADMIN_API_KEY" \
+  "https://<servizio>/daily-summary/preview?restaurant_id=6a22d781b615baedb412be35&date=2026-10-30"
+```
+
+L'anteprima restituisce il testo degli SMS (`messages`), il numero di ordini, se il locale è aperto quel giorno, l'orario in uso e se il riepilogo è attivo. Scrive il testo anche nei log. Non invia nulla e non scrive su Base44. Senza `date` usa oggi. Prova del 2026-10-29 sui dati reali di PaP (1 ottobre, 3 ordini): totali "Bufala: 0,7 kg fredda · 2 tranci interi freddi" e tre ritiri alle 20:00.
+
+**Attivazione** (`scripts/set_restaurant_field.py` aggiorna un solo campo e mostra il valore prima e dopo):
+
+```
+python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 daily_summary_time 10:30
+python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 daily_summary_enabled true
+python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_enabled false   # facoltativo
+```
+
+**Test**: `tests/test_daily_summary.py` (contenuto, totali con unità e temperature miste, ordinamento, ordini da verificare in cima, zero ordini, split, giorno chiuso, idempotenza dopo riavvio, orario vuoto o non valido) e `OwnerOrderSmsEnabledTests` in `tests/test_owner_notifications.py`.
 
 ---
 
@@ -226,3 +287,5 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 - [x] Canale di notifica a Fabio per ogni ordine e numero del titolare per locale (punto 5)
 - [ ] Base44: `owner_notify_phone` compilato per PaP e Corte del Sole, e `phone` per PaP (punto 5 e punto 4, buco 6)
 - [ ] Chiamata di prova di domenica: il ritiro proposto deve essere martedì
+- [ ] Riepilogo giornaliero: anteprima verificata con Fabio, poi `daily_summary_time` e `daily_summary_enabled` su Base44 (punto 6)
+- [ ] Decidere con Fabio se spegnere l'SMS per ogni ordine (`owner_order_sms_enabled = false`) una volta attivo il riepilogo (punto 6)

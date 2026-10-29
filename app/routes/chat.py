@@ -41,6 +41,7 @@ from app.services.conversation_service import (
     get_proposable_menu,
     get_sold_out_item_names,
     load_restaurant,
+    restaurant_flag,
     load_doughs,
     send_whatsapp_confirmation,
     send_owner_alert,
@@ -1451,7 +1452,7 @@ def _alert_owner_order_not_saved(order: dict[str, Any], attempts: int, last_erro
 
 _OWNER_NEW_ORDER_FIELDS = (
     "customer_name", "customer_phone", "pickup_time", "pickup_date", "order_date",
-    "items", "total_amount", "review_reasons",
+    "items", "total_amount", "review_reasons", "ai_confidence",
 )
 
 
@@ -1484,12 +1485,28 @@ def _enqueue_owner_new_order(payload: dict[str, Any]) -> None:
     _schedule_order_side_effect_job(job_id)
 
 
+def _owner_new_order_wanted(payload: dict[str, Any], restaurant_id: str) -> bool:
+    """True se la notifica per questo nuovo ordine va inviata. Gli ordini da
+    verificare (motivi o bassa confidenza AI, come needs_review su Base44) partono sempre."""
+    confidence = payload.get("ai_confidence")
+    if payload.get("review_reasons") or (confidence is not None and confidence < 0.8):
+        return True
+    restaurant = load_restaurant(restaurant_id=restaurant_id) if restaurant_id else {}
+    return restaurant_flag(restaurant, "owner_order_sms_enabled", default=True)
+
+
 def _send_owner_new_order(payload: dict[str, Any]) -> None:
     """Notifica al titolare del locale un nuovo ordine. Un invio fallito si registra
     con restaurant_id e order_id e si ritenta tramite l'outbox; la configurazione
-    mancante non si ritenta."""
+    mancante non si ritenta.
+
+    Con Restaurant.owner_order_sms_enabled = false (null vale true) partono solo
+    gli ordini da verificare: gli altri il titolare li trova nel riepilogo giornaliero."""
     rid = payload.get("restaurant_id") or ""
     order_ref = f"order_id={payload.get('local_order_id')} order_number={payload.get('order_number')}"
+    if not _owner_new_order_wanted(payload, rid):
+        print(f"[OwnerNotify] owner_order_sms_enabled=false: notifica saltata restaurant_id={rid!r} {order_ref}")
+        return
     try:
         status = send_owner_alert(build_new_order_owner_message(payload), restaurant_id=rid)
     except Exception as exc:

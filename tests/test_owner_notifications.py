@@ -58,6 +58,7 @@ class _Harness(unittest.TestCase):
             patch.object(chat_module, "_db_engine", self.engine),
             patch.object(chat_module, "_schedule_order_side_effect_job", return_value=None),
             patch.object(service, "load_restaurant", side_effect=_fake_load_restaurant),
+            patch.object(chat_module, "load_restaurant", side_effect=_fake_load_restaurant),
             patch.object(service, "_send_twilio_message", side_effect=self._fake_twilio),
         ):
             p.start()
@@ -177,6 +178,50 @@ class NewOrderOwnerNotificationTests(_Harness):
         self.assertEqual(self.sent[0][0], "+393330000002")
         self.assertIn("ORDINE NON SALVATO", self.sent[0][1])
 
+
+class OwnerOrderSmsEnabledTests(_Harness):
+    """Restaurant.owner_order_sms_enabled: false spegne la notifica per ogni nuovo
+    ordine, tranne per quelli da verificare; null vale true."""
+
+    def _with_flag(self, value):
+        restaurants = {**RESTAURANTS, PAP_ID: {**RESTAURANTS[PAP_ID], "owner_order_sms_enabled": value}}
+        for target in (service, chat_module):
+            p = patch.object(target, "load_restaurant", side_effect=lambda restaurant_id="": dict(restaurants.get(restaurant_id, {})))
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_false_skips_normal_order_and_closes_the_job(self):
+        self._with_flag(False)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            job = self._run_owner_job(self._finalize(PAP_ID))
+        self.assertEqual(self.sent, [])
+        self.assertEqual(job.status, "done")
+        self.assertIn("owner_order_sms_enabled=false: notifica saltata", output.getvalue())
+
+    def test_false_still_sends_orders_to_verify(self):
+        self._with_flag(False)
+        self._run_owner_job(self._finalize(PAP_ID, review_reasons=["Quantità non capita"]))
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.sent[0][1].startswith("DA VERIFICARE"))
+
+    def test_false_still_sends_low_confidence_orders(self):
+        self._with_flag(False)
+        payload = chat_module._owner_new_order_payload(
+            {"customer_name": "Giacomo", "items": ITEMS, "ai_confidence": 0.5}, 1, 9, PAP_ID,
+        )
+        chat_module._send_owner_new_order(payload)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_null_keeps_current_behaviour(self):
+        self._with_flag(None)
+        self._run_owner_job(self._finalize(PAP_ID))
+        self.assertEqual(len(self.sent), 1)
+
+    def test_true_sends_normal_order(self):
+        self._with_flag(True)
+        self._run_owner_job(self._finalize(PAP_ID))
+        self.assertEqual(len(self.sent), 1)
 
 class CustomerConfirmationSmsTests(_Harness):
     def _sms_body(self, restaurant_id, pickup_date="2026-11-03"):
