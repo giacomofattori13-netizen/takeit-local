@@ -138,6 +138,15 @@ class SummaryContentTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("DA VERIFICARE\n18:00 Bruno +393330000002 — Caldo/freddo non capito", text)
 
+    def test_order_without_pickup_time_is_to_verify_with_time_to_define(self):
+        orders = [order("o01", "", "Anna", [kg("Bufala", 1, "calda")], needs_review=True,
+                        review_reason="Orario non capito, il cliente ha rifiutato 17:00")]
+        text = self.text(orders)
+        self.assertIn(
+            "DA VERIFICARE\norario da definire Anna +393330000001 — Orario non capito, il cliente ha rifiutato 17:00",
+            text,
+        )
+
     def test_pickups_sorted_by_time_with_items(self):
         orders = [
             order("o01", "20:15", "Anna", [slices("Bufala", 2, "piena", "fredda")]),

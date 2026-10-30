@@ -52,6 +52,7 @@ from app.services.conversation_service import (
     is_agent_active,
     is_reservations_enabled,
     is_phone_orders_next_day_only,
+    get_opening_hours,
     get_opening_range_text,
     _WEEKDAY_IT,
     INGREDIENT_EXTRA_PRICE,
@@ -65,7 +66,6 @@ from app.services.conversation_service import (
     get_next_open_day,
     earliest_pickup_minutes_today,
     first_pickup_slot,
-    is_evening_only,
     reservation_slots_left_today,
     lookup_customer,
     upsert_customer,
@@ -708,6 +708,16 @@ def _apply_evening_pickup_hour_rule(hour: int, text: str, evening_only: bool = T
     return hour
 
 
+def _spoken_day_part(text: str) -> str | None:
+    """"mattina" o "sera" se il cliente lo dice ("di sera", "stasera", "di pomeriggio")."""
+    normalized = _normalize_for_match(text)
+    if re.search(r"\bmattin[ao]\b", normalized):
+        return "mattina"
+    if re.search(r"\b(?:sera|stasera|pomeriggio)\b", normalized):
+        return "sera"
+    return None
+
+
 def _normalize_spoken_time(text: str) -> str:
     """Ripara le storpiature più comuni dello STT sugli orari:
     "l'otto"/"all'otto" → "alle otto", "allotto"/"ottoe" → "alle otto"/"otto",
@@ -741,6 +751,8 @@ PICKUP_TIME_MISS_MESSAGE = "Non ho capito l'orario. Mi dica per esempio: alle ot
 NAME_MISS_MESSAGE = "Non ho capito il nome. Me lo ripete, per favore?"
 NAME_MISS_NO_GUESS_MESSAGE = "Mi dica solo il nome, per favore. Per esempio: Mario."
 UNKNOWN_CUSTOMER_NAME = "Cliente"
+PICKUP_TIME_ASK_AFTER_NO_MESSAGE = "A che ora le va bene?"
+PICKUP_TIME_UNDEFINED_MESSAGE = "Segno l'ordine, il locale la richiama per l'orario. Grazie, a presto!"
 
 
 def _slot_state(conversation: ConversationSession) -> dict:
@@ -2942,13 +2954,48 @@ def chat(request: ChatRequest, session: SessionDep):
         hours_part = f" siamo aperti {hours}" if hours else " siamo chiusi a quell'ora"
         return None, f"Mi dispiace, {_day_phrase}{hours_part}. A che ora passa?"
 
-    def _pickup_time_miss(merged_order: dict, error: str | None) -> tuple[str, str, int | None]:
+    def _choose_pickup_hour(local_time: str, message: str) -> tuple[str | None, str | None]:
+        """Ore 1-11 senza "di mattina"/"di sera": vale l'ora che rientra negli orari del
+        giorno di ritiro, altrimenti +12. Se vanno bene entrambe → (None, domanda)."""
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})", local_time)
+        if not match or not 1 <= int(match.group(1)) <= 11 or _spoken_day_part(message):
+            return local_time, None
+        hour, minute = int(match.group(1)), match.group(2)
+        morning, evening = f"{hour:02d}:{minute}", f"{hour + 12:02d}:{minute}"
+        if not get_opening_hours(restaurant_id=restaurant_id):
+            return (evening if hour >= 6 else morning), None  # senza orari: sera, come il prompt
+        morning_ok = validate_pickup_time(morning, restaurant_id=restaurant_id, pickup_date=_preorder_date)[0]
+        evening_ok = validate_pickup_time(evening, restaurant_id=restaurant_id, pickup_date=_preorder_date)[0]
+        if morning_ok and evening_ok:
+            spoken = _spoken_pickup_time(f"{hour}:{minute}")
+            return None, f"Le {spoken} di mattina o le {spoken} di sera?"
+        return (morning if morning_ok else evening), None
+
+    def _pickup_time_miss(
+        merged_order: dict, error: str | None, refused_proposal: bool = False,
+    ) -> tuple[str, str, int | None]:
         """Orario non capito (o rifiutato) alla domanda sull'orario: (stato, risposta, order_id).
         1° frase d'esempio (o l'errore sugli orari), 2° proposta del primo orario
-        disponibile, 3° ordine salvato al primo orario con needs_review."""
+        disponibile, 3° ordine salvato al primo orario con needs_review.
+        "No" alla proposta: si chiede una volta l'orario; se ancora non va, l'ordine
+        si salva senza orario di ritiro (mai all'orario rifiutato)."""
         data = _slot_state(conversation)
         attempts = data.setdefault("pickup_time", {})
         attempts["misses"] = int(attempts.get("misses") or 0) + 1
+        if refused_proposal:
+            attempts["refused"] = attempts.pop("proposed")
+            _store_slot_state(conversation, data)
+            return "collecting_pickup_time", PICKUP_TIME_ASK_AFTER_NO_MESSAGE, None
+        if attempts.get("refused"):
+            data.setdefault("review", []).append(
+                f"Orario non capito, il cliente ha rifiutato {attempts.pop('refused')}"
+            )
+            _store_slot_state(conversation, data)
+            conversation.pickup_time = None
+            merged_order["pickup_time"] = ""  # Order.pickup_time non è nullable: "" = da definire
+            print("[PickupTime] orario non capito dopo il rifiuto della proposta: ordine senza orario, needs_review")
+            order = _confirm_order(session, conversation, merged_order, restaurant_id)
+            return "completed", PICKUP_TIME_UNDEFINED_MESSAGE, order.id
         if attempts["misses"] == 1:
             _store_slot_state(conversation, data)
             return "collecting_pickup_time", error or PICKUP_TIME_MISS_MESSAGE, None
@@ -3836,22 +3883,40 @@ def chat(request: ChatRequest, session: SessionDep):
             )
 
     if conversation.state == "collecting_pickup_time":
-        local_pickup_time = _extract_local_pickup_time(
-            request.message, evening_only=is_evening_only(restaurant_id),
-        )
-        _pt_proposed = _slot_state(conversation).get("pickup_time", {}).get("proposed")
+        _pt_data = _slot_state(conversation)
+        _pt_slot = _pt_data.get("pickup_time", {})
+        local_pickup_time = _extract_local_pickup_time(request.message, evening_only=False)
+        _day_part = _spoken_day_part(request.message)
+        if not local_pickup_time and _pt_slot.get("ambiguous") and _day_part:
+            # Risposta a "Le 8 di mattina o le 8 di sera?"
+            local_pickup_time = _pt_slot["ambiguous"][1 if _day_part == "sera" else 0]
+        elif local_pickup_time and local_pickup_time != "prima_possibile":
+            local_pickup_time, _ambiguity_question = _choose_pickup_hour(local_pickup_time, request.message)
+            if _ambiguity_question:
+                _merged_now = _current_merged_order()
+                if _pt_slot.pop("ambiguous", None):
+                    # Già chiesto mattina o sera: mai la stessa domanda due volte
+                    _store_slot_state(conversation, _pt_data)
+                    _miss_state, _miss_resp, _miss_order_id = _pickup_time_miss(_merged_now, None)
+                    _log_pickup_time_turn("nessuno", conversation)
+                    return _local_reply(_miss_state, _miss_resp, _merged_now, "pickup_time_not_understood", _miss_order_id)
+                _ambiguous_hour = _extract_local_pickup_time(request.message, evening_only=False)
+                _h, _m = (int(x) for x in _ambiguous_hour.split(":"))
+                _pt_data.setdefault("pickup_time", {})["ambiguous"] = [f"{_h:02d}:{_m:02d}", f"{_h + 12:02d}:{_m:02d}"]
+                _store_slot_state(conversation, _pt_data)
+                _log_pickup_time_turn("regole", conversation)
+                return _local_reply("collecting_pickup_time", _ambiguity_question, _merged_now, "pickup_time_ambiguous")
+        _pt_proposed = _pt_slot.get("proposed")
         _pt_answer = _yes_no_answer(request.message) if _pt_proposed and not local_pickup_time else None
         if _pt_answer == "yes":
             local_pickup_time = _pt_proposed
         elif _pt_answer == "no":
             _merged_now = _current_merged_order()
-            _miss_state, _miss_resp, _miss_order_id = _pickup_time_miss(_merged_now, None)
+            _miss_state, _miss_resp, _miss_order_id = _pickup_time_miss(_merged_now, None, refused_proposal=True)
             _log_pickup_time_turn("nessuno", conversation)
-            if conversation.pickup_time:
-                _clear_slot_attempts(conversation, "pickup_time")
             return _local_reply(_miss_state, _miss_resp, _merged_now, "pickup_time_not_understood", _miss_order_id)
         if local_pickup_time:
-            pickup_time = resolve_pickup_time(local_pickup_time, restaurant_id=restaurant_id)
+            pickup_time = resolve_pickup_time(local_pickup_time, restaurant_id=restaurant_id, keep_hour=True)
             checked_time, pickup_time_error = _check_pickup_time(pickup_time)
             is_valid_pickup = pickup_time_error is None
             if checked_time:

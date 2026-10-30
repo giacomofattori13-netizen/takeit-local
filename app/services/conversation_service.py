@@ -817,7 +817,7 @@ def send_whatsapp_confirmation(
     # ── Canale secondario: WhatsApp (solo se SMS fallisce e credenziali disponibili) ──
     if not sms_status.startswith("sms_inviato") and wa_from_number:
         print(f"[Conferma] SMS fallito → tentativo WhatsApp")
-        wa_status = _send_whatsapp(phone, pickup_time, account_sid, auth_token, wa_from_number, pizzeria_name)
+        wa_status = _send_whatsapp(phone, pickup_time or "da definire", account_sid, auth_token, wa_from_number, pizzeria_name)
         print(f"[Conferma] WhatsApp risultato: {wa_status}")
         return f"{sms_status}|{wa_status}"
 
@@ -1405,17 +1405,6 @@ def first_pickup_slot(restaurant_id: str = "", pickup_date: datetime.date | None
     return resolve_pickup_time("prima_possibile", restaurant_id=restaurant_id)
 
 
-def is_evening_only(restaurant_id: str = "") -> bool:
-    """True se il locale apre solo la sera (ogni giorno aperto apre dalle 15 in poi).
-    Senza orari configurati vale True, come la regola del prompt (18:30-22:30)."""
-    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
-    if not opening_hours or not isinstance(opening_hours, dict):
-        return True
-    ranges = [_parse_opening_range(opening_hours.get(day, "")) for day in _WEEKDAY_NAMES]
-    opens = [r[0] for r in ranges if r]
-    return bool(opens) and min(opens) >= 15 * 60
-
-
 def reservation_slots_left_today(restaurant_id: str = "") -> bool:
     """True se oggi c'è ancora almeno un orario prenotabile (dopo l'ora attuale,
     prima della chiusura)."""
@@ -1433,7 +1422,7 @@ def reservation_slots_left_today(restaurant_id: str = "") -> bool:
     return first_slot < close_min
 
 
-def resolve_pickup_time(raw: str, restaurant_id: str | None = None) -> str:
+def resolve_pickup_time(raw: str, restaurant_id: str | None = None, keep_hour: bool = False) -> str:
     """
     Normalizza un orario di ritiro grezzo in "HH:MM" (timezone Europe/Rome).
 
@@ -1472,9 +1461,10 @@ def resolve_pickup_time(raw: str, restaurant_id: str | None = None) -> str:
     # interpretiamo sempre come PM (7 → 19, 8 → 20). Un cliente che chiama la sera
     # non vuole ritirare alle 7 di mattina.
     # Usa now_total (minuti dall'inizio della giornata in Europe/Rome) come fonte di verità.
+    # keep_hour: l'ora è già stata scelta tra mattina e sera (_choose_pickup_hour in chat.py)
     is_afternoon = now_total >= 12 * 60
     original_hour = hour
-    if 1 <= hour <= 11 and is_afternoon:
+    if 1 <= hour <= 11 and is_afternoon and not keep_hour:
         hour += 12
     print(
         f"[Hours] ora cliente={original_hour} ora attuale={now.hour:02d}:{now.minute:02d} "

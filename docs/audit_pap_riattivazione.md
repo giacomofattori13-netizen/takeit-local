@@ -4,7 +4,7 @@ Data: 2026-10-26. Prima stesura: solo diagnosi, nessun codice applicativo modifi
 Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e 6; punto 5). Le parti risolte sono segnate con **RISOLTO**.
 Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 1). **In corso, manca il Volume su Railway.**
 Aggiornamento 2026-10-29: riepilogo giornaliero degli ordini al titolare e `owner_order_sms_enabled` (punto 6).
-Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle domande obbligatorie (punto 7).
+Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle domande obbligatorie (punto 7). Corretto lo stesso giorno: dopo un "no" alla proposta l'ordine non viene mai salvato all'orario rifiutato; mattina/sera decise dagli orari del giorno.
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -283,16 +283,20 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 **Cosa cambia**
 
 1. **Hints STT** (`app/routes/voice.py`, `_gather_attrs`): i `<Gather>` degli stati `collecting_pickup_time` e `confirming_next_day` hanno `hints` con le espressioni orarie frequenti ("alle otto", "alle otto e mezza", "alle 20", "prima possibile", "subito", "domani", "stasera", "sì", "no"…). `language="it-IT"` era già presente. Un attributo `hints` già esistente viene unito senza duplicati. Vale anche per il Gather di "non ho sentito nulla" e per quello di riprova dopo un errore.
-2. **Parsing più tollerante prima dell'LLM** (`_extract_local_pickup_time` in `app/routes/chat.py`): cifre e parole da "sei" a "dieci", "e mezza", "e un quarto", "meno un quarto", e le storpiature di "otto" ("l'otto", "allotto", "ottoe", "8pm"; "ottobre" escluso). Le ore 6-11 valgono come sera solo se il locale apre solo la sera (`is_evening_only`: ogni giorno aperto apre dalle 15 in poi; senza orari vale sera, come prima). Se le regole trovano un orario valido l'LLM non viene chiamato.
+2. **Parsing più tollerante prima dell'LLM** (`_extract_local_pickup_time` in `app/routes/chat.py`): cifre e parole da "sei" a "dieci", "e mezza", "e un quarto", "meno un quarto", e le storpiature di "otto" ("l'otto", "allotto", "ottoe", "8pm"; "ottobre" escluso). Se le regole trovano un orario valido l'LLM non viene chiamato.
+   - **Mattina o sera** (`_choose_pickup_hour`): per le ore 1-11 dette senza "di mattina"/"di sera" vale l'ora che rientra negli orari di ritiro del giorno (oggi, o il giorno del preordine); se rientra solo l'ora +12 si usa quella. Se vanno bene entrambe l'agente chiede "Le 8 di mattina o le 8 di sera?". Esempi: apertura 17-22, "alle otto" → 20:00; apertura 7-22 → domanda; apertura 10-14, "alle undici" → 11:00. Oggi un orario già passato non conta come valido. Senza orari configurati resta la regola di prima (6-11 → sera). Tolta la regola "apre solo la sera dalle 15". Vale per il riconoscimento con le regole: il prompt dell'LLM resta quello di un locale serale.
 3. **Mai la stessa domanda due volte di fila** (`_pickup_time_miss`): ogni risposta alla domanda sull'orario che non porta a un orario valido conta come fallimento, anche un orario fuori apertura.
    - 1° fallimento: "Non ho capito l'orario. Mi dica per esempio: alle otto, oppure alle otto e mezza." (per un orario fuori apertura resta il messaggio con gli orari).
-   - 2° fallimento: "Va bene alle <primo orario disponibile>? Mi dica sì o no." Sì → quell'orario; no → 3° fallimento.
-   - 3° fallimento: l'ordine viene salvato al primo orario disponibile (`first_pickup_slot`: oggi ora + preparazione, per un preordine l'apertura di quel giorno), con `review_reasons` "Orario non capito: …" (quindi `needs_review` su Base44 e SMS a Fabio anche con `owner_order_sms_enabled = false`). Al cliente: "Segno alle <orario>, il locale la richiama se serve."
+   - 2° fallimento: "Va bene alle <primo orario disponibile>? Mi dica sì o no." Sì → quell'orario.
+   - **No alla proposta**: l'agente chiede una volta "A che ora le va bene?". Se la risposta è un orario valido viene usato. Altrimenti l'ordine viene salvato **senza orario di ritiro** (`pickup_time` vuoto, mai l'orario rifiutato), con `review_reasons` "Orario non capito, il cliente ha rifiutato <orario proposto>". Al cliente: "Segno l'ordine, il locale la richiama per l'orario. Grazie, a presto!". Nel riepilogo giornaliero l'ordine compare in DA VERIFICARE con "orario da definire"; nell'SMS al titolare e al cliente "ora da definire".
+   - 3° fallimento senza "no" (risposta non capita alla proposta): l'ordine viene salvato al primo orario disponibile (`first_pickup_slot`: oggi ora + preparazione, per un preordine l'apertura di quel giorno), con `review_reasons` "Orario non capito: …" (quindi `needs_review` su Base44 e SMS a Fabio anche con `owner_order_sms_enabled = false`). Al cliente: "Segno alle <orario>, il locale la richiama se serve."
    - Lo stesso schema vale per le altre domande obbligatorie di PaP: **nome** (1° "Non ho capito il nome…", 2° "Ho capito <nome trascritto>, giusto?", 3° ordine a nome "Cliente" da verificare), **porzione** e **caldo/freddo** (1° "Scusi, …", 2° "Va bene interi/caldi? Mi dica sì o no.", dove "no" vale l'altro valore, 3° campo vuoto da verificare). La quantità resta a due tentativi.
    - Tentativi, valore proposto e motivi sono in `ConversationSession.slot_attempts_json` (nuova colonna, migrazione all'avvio).
 4. **Log Railway**: per ogni risposta in `collecting_pickup_time` una riga `[PickupTime] riconosciuto=regole|llm|nessuno fallimenti=N stato=…`, senza il testo del cliente.
 
-**Test**: `tests/test_pickup_time_escalation.py` ("per le hotpoint" → primo messaggio; "alle otto" e "per le 8" → 20:00 senza LLM; "le otto e mezza" → 20:30; tre fallimenti → ordine salvato con `review_reasons` al primo orario; sì/no alla proposta; nessuna risposta identica consecutiva; log senza testo; nome; hints nei Gather). Aggiornati i test di porzione/caldo-freddo in `tests/test_next_day_preorder_flow.py`.
+**Test**: `tests/test_pickup_time_escalation.py` ("per le hotpoint" → primo messaggio; "alle otto" e "per le 8" → 20:00 senza LLM; "le otto e mezza" → 20:30; tre fallimenti → ordine salvato con `review_reasons` al primo orario; "no" alla proposta poi orario valido → usato; "no" poi non capito o fuori orario → ordine senza orario, mai quello rifiutato; mattina/sera con aperture 17-22, 7-22 e 10-14; sì alla proposta; nessuna risposta identica consecutiva; log senza testo; nome; hints nei Gather). Aggiornati i test di porzione/caldo-freddo in `tests/test_next_day_preorder_flow.py`; "orario da definire" nel riepilogo in `tests/test_daily_summary.py`.
+
+**Dashboard Base44**: l'app della dashboard non è in questo repository. Gli ordini senza orario arrivano con `needs_review = true`, il motivo in `review_reason` e `pickup_time` vuoto: va verificato che le pagine Ordini e Cucina li mostrino come "orario da definire" e non li nascondano o li mettano in fondo senza segnalarli.
 
 ---
 
@@ -311,3 +315,4 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 - [ ] Decidere con Fabio se spegnere l'SMS per ogni ordine (`owner_order_sms_enabled = false`) una volta attivo il riepilogo (punto 6)
 - [x] Orario non capito: hints STT, parsing tollerante, escalation e `needs_review` (punto 7)
 - [ ] Chiamata di prova: dire "per le otto" e controllare nei log `[PickupTime] riconosciuto=regole` (punto 7)
+- [ ] Dashboard Base44: ordine con `pickup_time` vuoto e `needs_review` visibile come "orario da definire" (punto 7)

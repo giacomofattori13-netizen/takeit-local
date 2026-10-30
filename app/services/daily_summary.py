@@ -196,7 +196,7 @@ def flavour_totals(orders: list[dict]) -> list[str]:
 # ── Testo ─────────────────────────────────────────────────────────────────────
 
 def _order_head(order: dict) -> str:
-    pickup = order.get("pickup_time") or "ora ?"
+    pickup = order.get("pickup_time") or "orario da definire"
     return f"{pickup} {order.get('customer_name') or '?'} {order.get('customer_phone') or ''}".rstrip()
 
 

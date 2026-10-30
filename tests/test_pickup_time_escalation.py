@@ -106,14 +106,40 @@ class PickupTimeEscalationTests(_AtPickupTime):
         self.assertTrue(any(reason.startswith("Orario non capito") for reason in saved["review_reasons"]))
         self.assertEqual(r1.response_message, PICKUP_TIME_MISS_MESSAGE)
 
-    def test_no_to_the_proposal_is_the_third_failure(self):
+    def test_no_to_the_proposal_then_a_valid_time_is_used(self):
         self.say("Per le hotpoint.")
         self.say("Parte.")
         calls = self.llm_calls
         r = self.say("no")
-        self.assertEqual(r.state, "completed")
+        self.assertEqual((r.state, r.response_message), ("collecting_pickup_time", "A che ora le va bene?"))
         self.assertEqual(self.llm_calls, calls)
-        self.assertTrue(self.saved[0]["review_reasons"])
+        r = self.say("alle sette")
+        self.assertEqual(r.state, "awaiting_confirmation")
+        self.assertEqual(r.merged_order["pickup_time"], "19:00")
+        self.say("sì")
+        self.assertEqual(self.saved[0]["pickup_time"], "19:00")
+        self.assertIsNone(self.saved[0].get("review_reasons"))
+
+    def test_no_to_the_proposal_then_not_understood_saves_without_pickup_time(self):
+        self.say("Per le hotpoint.")
+        self.say("Parte.")
+        self.say("no")
+        r = self.say("boh")
+        self.assertEqual(r.state, "completed")
+        self.assertEqual(r.response_message, "Segno l'ordine, il locale la richiama per l'orario. Grazie, a presto!")
+        saved = self.saved[0]
+        self.assertEqual(saved["pickup_time"], "")
+        self.assertNotEqual(saved["pickup_time"], "17:00")
+        self.assertIn("Orario non capito, il cliente ha rifiutato 17:00", saved["review_reasons"])
+        self.assertIn("ora da definire", chat_module.build_new_order_owner_message(saved))
+
+    def test_no_to_the_proposal_then_a_closed_time_saves_without_pickup_time(self):
+        self.say("Per le hotpoint.")
+        self.say("Parte.")
+        self.say("no")
+        r = self.say("alle 23")
+        self.assertEqual(r.state, "completed")
+        self.assertEqual(self.saved[0]["pickup_time"], "")
 
     def test_yes_to_the_proposal_sets_the_slot_without_review(self):
         self.say("Per le hotpoint.")
@@ -174,6 +200,58 @@ class PickupTimeSameDayTests(_AtPickupTime):
         r = self.say("boh")
         self.assertEqual(r.state, "completed")
         self.assertEqual(self.saved[0]["pickup_time"], "15:30")
+
+
+class _WithHours(_AtPickupTime):
+    """Preordine per martedì con gli orari dati (lunedì chiuso)."""
+
+    hours = "17:00-22:00"
+
+    def setUp(self):
+        restaurant = {
+            "id": "rest-hours", "name": "Prova", "reservations_enabled": False,
+            "phone_orders_next_day_only": True,
+            "opening_hours": {
+                "monday": "closed",
+                **{day: self.hours for day in ("tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")},
+            },
+        }
+        patcher = patch.dict(flow.RESTAURANTS, {"rest-hours": restaurant})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        super().setUp()
+
+
+class MorningOrEveningTests(_WithHours):
+    restaurant_id = "rest-hours"
+
+    def test_evening_opening_alle_otto_is_20(self):
+        r = self.say("alle otto")
+        self.assertEqual(r.merged_order["pickup_time"], "20:00")
+
+    def test_all_day_opening_asks_morning_or_evening(self):
+        flow.RESTAURANTS["rest-hours"]["opening_hours"]["tuesday"] = "07:00-22:00"
+        r = self.say("alle otto")
+        self.assertEqual((r.state, r.response_message), ("collecting_pickup_time", "Le 8 di mattina o le 8 di sera?"))
+        r = self.say("di sera")
+        self.assertEqual(r.merged_order["pickup_time"], "20:00")
+
+    def test_all_day_opening_morning_answer(self):
+        flow.RESTAURANTS["rest-hours"]["opening_hours"]["tuesday"] = "07:00-22:00"
+        self.say("alle otto")
+        r = self.say("di mattina")
+        self.assertEqual(r.merged_order["pickup_time"], "08:00")
+
+    def test_explicit_day_part_is_not_asked(self):
+        flow.RESTAURANTS["rest-hours"]["opening_hours"]["tuesday"] = "07:00-22:00"
+        r = self.say("alle otto di sera")
+        self.assertEqual(r.merged_order["pickup_time"], "20:00")
+
+    def test_lunch_opening_alle_undici_is_11(self):
+        flow.RESTAURANTS["rest-hours"]["opening_hours"]["tuesday"] = "10:00-14:00"
+        r = self.say("alle undici")
+        self.assertEqual(r.state, "awaiting_confirmation")
+        self.assertEqual(r.merged_order["pickup_time"], "11:00")
 
 
 class NameEscalationTests(flow._FlowHarness):
