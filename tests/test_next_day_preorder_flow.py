@@ -307,7 +307,8 @@ class PreorderFlowTests(_FlowHarness):
         self.order_up_to_name()
         r = self.say("alle 8", {**NOTHING, "pickup_time": "20:00"})
         self.assertEqual(r.state, "collecting_name")
-        self.assertEqual(r.response_message, "A che nome?")
+        # mai "A che nome?" due volte di fila
+        self.assertEqual(r.response_message, "Non ho capito il nome. Me lo ripete, per favore?")
         r = self.say("Giacomo")
         self.assertEqual(r.state, "awaiting_confirmation")
 
@@ -316,18 +317,23 @@ class PreorderFlowTests(_FlowHarness):
         self.say("Giacomo")
         r = self.say("va bene")
         self.assertEqual(r.state, "collecting_pickup_time")
-        self.assertIn("il ritiro è per martedì. A che ora passa?", r.response_message)
+        self.assertEqual(r.response_message, chat_module.PICKUP_TIME_MISS_MESSAGE)
         self.assertEqual(self.saved, [])
 
-    # ── Risposta non capita due volte: niente default, needs_review ─────────
+    # ── Risposta non capita: frase diversa, proposta sì/no, poi needs_review ─
 
-    def test_unrecognised_portion_twice_saves_without_default_and_needs_review(self):
+    def test_unrecognised_portion_three_times_saves_without_default_and_needs_review(self):
         self.say("due tranci di bufala", {**NOTHING, "intent": "add_items", "items": [_bufala_slices(2)]})
         r = self.say("boh")
-        self.assertEqual(r.state, "collecting_kg_portion")
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_portion", "Scusi, interi o mezzi? Caldi o freddi?"))
         r = self.say("non saprei")
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_portion", "Va bene interi? Mi dica sì o no."))
+        r = self.say("boh vediamo")
         # si passa oltre, senza valore
-        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Caldi o freddi?"))
+        self.assertEqual(
+            (r.state, r.response_message),
+            ("collecting_kg_temperature", "Va bene, lo segno da verificare. Caldi o freddi?"),
+        )
         self.say("freddi")
         self.say("Giacomo")
         r = self.say("alle 8")
@@ -338,13 +344,31 @@ class PreorderFlowTests(_FlowHarness):
         self.assertNotIn(saved["items"][0].get("size"), ("piena", "mezza"))
         self.assertEqual(saved["items"][0]["temperature"], "fredda")
         self.assertEqual(len(saved["review_reasons"]), 1)
-        self.assertIn("Porzione (intero/mezzo) non capito dopo 2 tentativi per Bufala", saved["review_reasons"][0])
+        self.assertIn("Porzione (intero/mezzo) non capito dopo 3 tentativi per Bufala", saved["review_reasons"][0])
+
+    def test_portion_proposal_yes_and_no(self):
+        self.say("due tranci di bufala", {**NOTHING, "intent": "add_items", "items": [_bufala_slices(2)]})
+        self.say("boh")
+        self.say("non saprei")
+        r = self.say("no")
+        # "no" a "Va bene interi?" vale mezzi; si passa a caldo/freddo
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Caldi o freddi?"))
+        self.assertIn('"size": "mezza"', self.conversation().items_json)
+        self.say("boh")
+        r = self.say("non so")
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Va bene caldi? Mi dica sì o no."))
+        r = self.say("sì")
+        self.assertEqual(r.state, "collecting_name")
+        self.assertIn('"temperature": "calda"', self.conversation().items_json)
 
     def test_unrecognised_quantity_twice_saves_without_default_and_needs_review(self):
         self.say("della bufala", {**NOTHING, "intent": "add_items", "items": [_bufala()]})
         self.say("boh")
         r = self.say("non saprei")
-        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Caldi o freddi?"))
+        self.assertEqual(
+            (r.state, r.response_message),
+            ("collecting_kg_temperature", "Va bene, lo segno da verificare. Caldi o freddi?"),
+        )
         self.say("freddi")
         self.say("Giacomo")
         r = self.say("alle 8")

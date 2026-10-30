@@ -64,6 +64,8 @@ from app.services.conversation_service import (
     resolve_pickup_time,
     get_next_open_day,
     earliest_pickup_minutes_today,
+    first_pickup_slot,
+    is_evening_only,
     reservation_slots_left_today,
     lookup_customer,
     upsert_customer,
@@ -694,15 +696,90 @@ def _format_customer_name(name: str) -> str:
     return " ".join(part[:1].upper() + part[1:].lower() for part in name.split())
 
 
-def _apply_evening_pickup_hour_rule(hour: int, text: str) -> int:
-    """Regola locale coerente col prompt: 6-11 senza mattina esplicita => sera."""
+def _apply_evening_pickup_hour_rule(hour: int, text: str, evening_only: bool = True) -> int:
+    """Regola locale coerente col prompt: 6-11 senza mattina esplicita => sera,
+    solo per i locali aperti solo la sera."""
     has_morning_marker = re.search(r"\b(?:mattina|di\s+mattina)\b", text) is not None
     has_evening_marker = re.search(r"\b(?:sera|di\s+sera|stasera)\b", text) is not None
     if 1 <= hour <= 11 and has_evening_marker:
         return hour + 12
-    if 6 <= hour <= 11 and not has_morning_marker:
+    if evening_only and 6 <= hour <= 11 and not has_morning_marker:
         return hour + 12
     return hour
+
+
+def _normalize_spoken_time(text: str) -> str:
+    """Ripara le storpiature più comuni dello STT sugli orari:
+    "l'otto"/"all'otto" → "alle otto", "allotto"/"ottoe" → "alle otto"/"otto",
+    "8pm" → "8". "ottobre" resta com'è."""
+    text = re.sub(r"\b(?:all|l)'\s*", "alle ", text)
+    text = re.sub(r"\b(alle|all|al)?otto(?!bre)[a-z]*", lambda m: "alle otto" if m.group(1) else "otto", text)
+    return re.sub(r"\b8[a-z]+\b", "8", text)
+
+
+_YES_ANSWER_RE = re.compile(
+    r"\b(?:si|ok|okay|va\s+bene|certo|esatto|giusto|perfetto|confermo|d'accordo|benissimo|volentieri)\b"
+)
+_NO_ANSWER_RE = re.compile(r"\b(?:no|non|sbagliato)\b")
+
+
+def _yes_no_answer(message: str) -> str | None:
+    """"yes" / "no" per una risposta a una proposta sì/no; None se ambigua o assente."""
+    normalized = _normalize_for_match(message)
+    is_yes = _YES_ANSWER_RE.search(normalized) is not None
+    is_no = _NO_ANSWER_RE.search(normalized) is not None
+    if is_yes != is_no:
+        return "yes" if is_yes else "no"
+    return None
+
+
+# ── Domande obbligatorie non capite: nome e orario ──────────────────────────
+# Mai la stessa domanda due volte di fila: 1° fallimento frase diversa, 2° proposta
+# sì/no, 3° valore di ripiego e ordine da verificare (needs_review). Tentativi,
+# proposta e motivi stanno in ConversationSession.slot_attempts_json.
+PICKUP_TIME_MISS_MESSAGE = "Non ho capito l'orario. Mi dica per esempio: alle otto, oppure alle otto e mezza."
+NAME_MISS_MESSAGE = "Non ho capito il nome. Me lo ripete, per favore?"
+NAME_MISS_NO_GUESS_MESSAGE = "Mi dica solo il nome, per favore. Per esempio: Mario."
+UNKNOWN_CUSTOMER_NAME = "Cliente"
+
+
+def _slot_state(conversation: ConversationSession) -> dict:
+    try:
+        data = json.loads(conversation.slot_attempts_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _store_slot_state(conversation: ConversationSession, data: dict) -> None:
+    conversation.slot_attempts_json = json.dumps(data, ensure_ascii=False)
+
+
+def _clear_slot_attempts(conversation: ConversationSession, slot: str) -> None:
+    data = _slot_state(conversation)
+    if data.pop(slot, None) is not None:
+        _store_slot_state(conversation, data)
+
+
+def _log_pickup_time_turn(recognized: str, conversation: ConversationSession) -> None:
+    """Una riga per ogni risposta alla domanda sull'orario, senza il testo del cliente.
+    recognized: "regole" | "llm" | "nessuno"."""
+    misses = int(_slot_state(conversation).get("pickup_time", {}).get("misses") or 0)
+    print(f"[PickupTime] riconosciuto={recognized} fallimenti={misses} stato={conversation.state}")
+
+
+def _slot_review_reasons(conversation: ConversationSession) -> list[str]:
+    return list(_slot_state(conversation).get("review") or [])
+
+
+def _name_guess(message: str) -> str | None:
+    """Il nome come è stato trascritto (max 2 parole), da proporre con sì/no."""
+    raw = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ' ]+", " ", message)
+    raw = re.sub(r"^\s*(?:sono|mi chiamo|chiamami|il nome [eè]|a nome di|nome|per)\s+", "", raw, flags=re.IGNORECASE)
+    words = [word for word in raw.split() if len(word) >= 2][:2]
+    if not words or _yes_no_answer(" ".join(words)):
+        return None
+    return _format_customer_name(" ".join(words))
 
 
 def _extract_local_customer_name(message: str) -> str | None:
@@ -736,10 +813,26 @@ def _extract_local_customer_name(message: str) -> str | None:
     return _format_customer_name(candidate)
 
 
-def _extract_local_pickup_time(message: str) -> str | None:
-    """Estrae orari semplici senza LLM quando il bot sta già chiedendo solo l'orario."""
+# "e mezza", "e un quarto", "meno un quarto" dopo l'ora (gruppi: e/meno, parola)
+_PICKUP_MINUTE_WORDS = r"(?:\s+(e|meno)\s+(mezza|mezzo|un\s+quarto|quarto))"
+
+
+def _apply_minute_words(hour: int, minute: int, sign: str | None, word: str | None) -> tuple[int, int]:
+    """(8, 0, "e", "mezza") → (8, 30); (8, 0, "meno", "un quarto") → (7, 45)."""
+    if not word:
+        return hour, minute
+    if sign == "meno":
+        return (hour - 1) % 24, 45
+    return hour, 30 if word in {"mezza", "mezzo"} else 15
+
+
+def _extract_local_pickup_time(message: str, evening_only: bool = True) -> str | None:
+    """Estrae orari semplici senza LLM quando il bot sta già chiedendo solo l'orario.
+
+    evening_only: le ore 6-11 senza "mattina" valgono come sera (locali aperti solo la sera).
+    """
     normalized = _normalize_for_match(message).strip()
-    compact = re.sub(r"[.!?,;:]+$", "", normalized)
+    compact = _normalize_spoken_time(re.sub(r"[.!?,;:]+$", "", normalized))
     if not compact or _contains_any_word(compact, _LOCAL_PICKUP_BLOCKERS):
         return None
 
@@ -748,44 +841,40 @@ def _extract_local_pickup_time(message: str) -> str | None:
 
     numeric = re.search(
         r"(?:\b(?:alle|le|ore|verso|per(?:\s+le)?)\s+)?(\d{1,2})(?:[:.](\d{1,2}))?"
-        r"(?:\s+e\s+(mezza|mezzo|un quarto|quarto))?\b",
+        rf"{_PICKUP_MINUTE_WORDS}?\b",
         compact,
     )
     if numeric:
         has_time_marker = re.search(r"\b(?:alle|le|ore|verso|per(?:\s+le)?)\b", compact)
         is_only_time = re.fullmatch(
-            r"\d{1,2}(?:[:.]\d{1,2})?(?:\s+e\s+(?:mezza|mezzo|un quarto|quarto))?",
+            rf"\d{{1,2}}(?:[:.]\d{{1,2}})?{_PICKUP_MINUTE_WORDS}?",
             compact,
         )
         if numeric.group(2) or has_time_marker or is_only_time:
             hour = int(numeric.group(1))
-            minute_word = numeric.group(3)
             minute = int(numeric.group(2) or 0)
-            if minute_word in {"mezza", "mezzo"}:
-                minute = 30
-            elif minute_word:
-                minute = 15
             if 0 <= hour <= 23 and 0 <= minute <= 59:
-                hour = _apply_evening_pickup_hour_rule(hour, compact)
+                hour, minute = _apply_minute_words(hour, minute, numeric.group(3), numeric.group(4))
+                hour = _apply_evening_pickup_hour_rule(hour, compact, evening_only)
                 return f"{hour}:{minute:02d}"
 
     word_pattern = "|".join(sorted(_ITALIAN_HOUR_WORDS, key=len, reverse=True))
     word_match = re.search(
         rf"(?:\b(?:alle|le|ore|verso|per(?:\s+le)?)\s+)?\b({word_pattern})\b"
-        r"(?:\s+e\s+(mezza|mezzo|un quarto|quarto))?",
+        rf"{_PICKUP_MINUTE_WORDS}?",
         compact,
     )
     if word_match:
         has_time_marker = re.search(r"\b(?:alle|le|ore|verso|per(?:\s+le)?)\b", compact)
         is_only_time = re.fullmatch(
-            rf"({word_pattern})(?:\s+e\s+(?:mezza|mezzo|un quarto|quarto))?",
+            rf"({word_pattern}){_PICKUP_MINUTE_WORDS}?",
             compact,
         )
         if has_time_marker or is_only_time:
-            hour = _ITALIAN_HOUR_WORDS[word_match.group(1)]
-            minute_word = word_match.group(2)
-            minute = 30 if minute_word in {"mezza", "mezzo"} else 15 if minute_word else 0
-            hour = _apply_evening_pickup_hour_rule(hour, compact)
+            hour, minute = _apply_minute_words(
+                _ITALIAN_HOUR_WORDS[word_match.group(1)], 0, word_match.group(2), word_match.group(3),
+            )
+            hour = _apply_evening_pickup_hour_rule(hour, compact, evening_only)
             return f"{hour}:{minute:02d}"
 
     return None
@@ -2135,6 +2224,31 @@ def _persist_order_once(
     return order, True
 
 
+def _confirm_order(
+    session: Session,
+    conversation: ConversationSession,
+    merged_order: dict,
+    restaurant_id: str,
+) -> Order:
+    """Salva l'ordine confermato (una sola volta per sessione) con i motivi
+    needs_review delle voci al taglio e delle domande non capite."""
+    order, order_created = _persist_order_once(session, conversation, merged_order)
+    enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
+    if order_created:
+        _finalize_new_order(
+            session=session,
+            order=order,
+            conversation=conversation,
+            merged_order=merged_order,
+            enriched_items=enriched_items,
+            total_amount=order_total,
+            restaurant_id=restaurant_id,
+            ai_confidence=0.95,
+            review_reasons=_kg_review_reasons(merged_order["items"]) + _slot_review_reasons(conversation),
+        )
+    return order
+
+
 @router.post("/start", response_model=ChatStartResponse)
 def start_chat(body: ChatStartRequest, session: SessionDep):
     print(f"[ChatStart] test_phone={mask_phone(body.test_phone)}")
@@ -2295,7 +2409,8 @@ def _normalize_kg_order_unit(item: dict, message: str) -> None:
 # Nessun valore predefinito: se il cliente non li dice, l'agente li chiede.
 # La porzione (intero/mezzo) serve solo per gli ordini a tranci, non a peso.
 # Dopo KG_SLOT_MAX_ATTEMPTS risposte non capite il campo resta vuoto e l'ordine
-# viene salvato con needs_review (vedi _kg_review_reasons).
+# viene salvato con needs_review (vedi _kg_review_reasons). Porzione e caldo/freddo
+# hanno un passo in più: al secondo fallimento si propone un valore (sì/no).
 _KG_SLOTS = ("quantity", "portion", "temperature")
 _KG_SLOT_STATES = {
     "collecting_kg_quantity": "quantity",
@@ -2304,6 +2419,9 @@ _KG_SLOT_STATES = {
 }
 _KG_STATE_BY_SLOT = {slot: state for state, slot in _KG_SLOT_STATES.items()}
 KG_SLOT_MAX_ATTEMPTS = 2
+_KG_SLOT_MAX_ATTEMPTS_BY_SLOT = {"quantity": KG_SLOT_MAX_ATTEMPTS, "portion": 3, "temperature": 3}
+# Valore proposto al secondo fallimento; con "no" vale l'altro
+_KG_PROPOSALS = {"portion": ("piena", "mezza"), "temperature": ("calda", "fredda")}
 
 
 def _kg_slot_missing(item: dict, slot: str) -> bool:
@@ -2325,6 +2443,26 @@ def _kg_items_missing(items: list[dict], slot: str) -> list[dict]:
 def _clear_kg_attempts(item: dict, slot: str) -> None:
     item.pop(f"_{slot}_attempts", None)
     item.pop(f"_{slot}_unresolved", None)
+    item.pop(f"_{slot}_proposed", None)
+
+
+def _apply_kg_proposal_answer(items: list[dict], slot: str, message: str) -> bool:
+    """Sì/no alla proposta "Va bene interi?" / "Va bene caldi?": sì → valore
+    proposto, no → l'altro. True se la risposta è stata applicata."""
+    pending = [item for item in _kg_items_missing(items, slot) if item.get(f"_{slot}_proposed")]
+    answer = _yes_no_answer(message) if pending else None
+    if answer is None:
+        return False
+    for item in pending:
+        proposed = item[f"_{slot}_proposed"]
+        value = proposed if answer == "yes" else next(v for v in _KG_PROPOSALS[slot] if v != proposed)
+        if slot == "portion":
+            item["order_unit"] = "tranci"
+            item["size"] = value
+        else:
+            item["temperature"] = value
+        _clear_kg_attempts(item, slot)
+    return True
 
 
 def _apply_kg_answers_from_message(
@@ -2366,15 +2504,23 @@ def _apply_kg_answers_from_message(
     return applied
 
 
-def _register_kg_miss(items: list[dict], slot: str) -> None:
-    """Risposta non capita alla domanda `slot`: conta il tentativo, e dopo il
-    secondo lascia il campo vuoto (niente default) e passa oltre."""
+def _register_kg_miss(items: list[dict], slot: str) -> bool:
+    """Risposta non capita alla domanda `slot`: conta il tentativo. Porzione e
+    caldo/freddo al secondo propongono un valore; all'ultimo il campo resta vuoto
+    (niente default) e si passa oltre. True se il campo è appena diventato da verificare."""
+    max_attempts = _KG_SLOT_MAX_ATTEMPTS_BY_SLOT[slot]
+    unresolved = False
     for item in _kg_items_missing(items, slot):
         attempts = int(item.get(f"_{slot}_attempts") or 0) + 1
         item[f"_{slot}_attempts"] = attempts
-        if attempts >= KG_SLOT_MAX_ATTEMPTS:
+        if attempts >= max_attempts:
             item[f"_{slot}_unresolved"] = True
+            item.pop(f"_{slot}_proposed", None)
+            unresolved = True
             print(f"[KgSlot] {slot} non capito dopo {attempts} tentativi per {item.get('pizza_name')!r}: needs_review")
+        elif slot in _KG_PROPOSALS and attempts == max_attempts - 1:
+            item[f"_{slot}_proposed"] = _KG_PROPOSALS[slot][0]
+    return unresolved
 
 
 _KG_REVIEW_LABELS = {
@@ -2390,7 +2536,7 @@ def _kg_review_reasons(items: list[dict]) -> list[str]:
         names = [item["pizza_name"] for item in items if item.get(f"_{slot}_unresolved")]
         if names:
             reasons.append(
-                f"{_KG_REVIEW_LABELS[slot]} non capito dopo {KG_SLOT_MAX_ATTEMPTS} tentativi per "
+                f"{_KG_REVIEW_LABELS[slot]} non capito dopo {_KG_SLOT_MAX_ATTEMPTS_BY_SLOT[slot]} tentativi per "
                 f"{_format_pizza_list(names)}: chiedere al cliente"
             )
     return reasons
@@ -2426,6 +2572,10 @@ def _kg_slot_question(items: list[dict], slot: str | None = None) -> str:
 
     first_slot = next(s for s in _KG_SLOTS if missing[s])
     retry = any(int(item.get(f"_{first_slot}_attempts") or 0) > 0 for item in missing[first_slot])
+    proposed = [item for item in missing[first_slot] if item.get(f"_{first_slot}_proposed")]
+    if proposed:
+        question = _kg_proposal_question(first_slot, proposed)
+        retry = False
 
     asked = list(dict.fromkeys(
         item["pizza_name"].lower() for s in _KG_SLOTS for item in missing[s]
@@ -2437,6 +2587,18 @@ def _kg_slot_question(items: list[dict], slot: str | None = None) -> str:
     if retry:
         question = f"Scusi, {question[0].lower()}{question[1:]}"
     return question
+
+
+def _kg_proposal_question(slot: str, items: list[dict]) -> str:
+    """ "Va bene interi? Mi dica sì o no." con l'accordo di _kg_temperature_question."""
+    value = items[0][f"_{slot}_proposed"]
+    if slot == "portion":
+        single = len(items) == 1 and slice_count(items[0]) == 1
+        word = {"piena": "intero" if single else "interi", "mezza": "mezzo" if single else "mezzi"}[value]
+    else:
+        temperature_question = _kg_temperature_question(items)  # "Calda o fredda?"
+        word = temperature_question.split()[0 if value == "calda" else 2].rstrip("?").lower()
+    return f"Va bene {word}? Mi dica sì o no."
 
 
 def pickup_day_phrase(pickup_date: datetime.date) -> str:
@@ -2484,7 +2646,7 @@ def build_confirmation_recap(merged_order: dict, day_phrase: str | None = None) 
     at = f"alle {_spoken_pickup_time(merged_order.get('pickup_time'))}"
     when = f"per {(day_phrase or _today_phrase(merged_order.get('pickup_time'))).replace(',', '')} {at}"
     name = merged_order.get("customer_name")
-    name_part = f", a nome {name}" if name else ""
+    name_part = f", a nome {name}" if name and name != UNKNOWN_CUSTOMER_NAME else ""
     return f"Allora: {items_text}, {when}{name_part}. Confermo?"
 
 
@@ -2779,6 +2941,144 @@ def chat(request: ChatRequest, session: SessionDep):
         hours = get_opening_range_text(restaurant_id, _preorder_date)
         hours_part = f" siamo aperti {hours}" if hours else " siamo chiusi a quell'ora"
         return None, f"Mi dispiace, {_day_phrase}{hours_part}. A che ora passa?"
+
+    def _pickup_time_miss(merged_order: dict, error: str | None) -> tuple[str, str, int | None]:
+        """Orario non capito (o rifiutato) alla domanda sull'orario: (stato, risposta, order_id).
+        1° frase d'esempio (o l'errore sugli orari), 2° proposta del primo orario
+        disponibile, 3° ordine salvato al primo orario con needs_review."""
+        data = _slot_state(conversation)
+        attempts = data.setdefault("pickup_time", {})
+        attempts["misses"] = int(attempts.get("misses") or 0) + 1
+        if attempts["misses"] == 1:
+            _store_slot_state(conversation, data)
+            return "collecting_pickup_time", error or PICKUP_TIME_MISS_MESSAGE, None
+        if attempts["misses"] == 2:
+            attempts["proposed"] = first_pickup_slot(restaurant_id, pickup_date=_preorder_date)
+            _store_slot_state(conversation, data)
+            return (
+                "collecting_pickup_time",
+                f"Va bene alle {_spoken_pickup_time(attempts['proposed'])}? Mi dica sì o no.",
+                None,
+            )
+        slot = attempts.get("proposed")
+        if not slot or _check_pickup_time(slot)[1]:
+            slot = first_pickup_slot(restaurant_id, pickup_date=_preorder_date)
+        attempts.pop("proposed", None)  # i tentativi restano per il log, si azzerano con l'orario
+        data.setdefault("review", []).append(
+            f"Orario non capito: segnato il primo orario disponibile ({slot}), verificare col cliente"
+        )
+        _store_slot_state(conversation, data)
+        conversation.pickup_time = slot
+        merged_order["pickup_time"] = slot
+        note = f"Segno alle {_spoken_pickup_time(slot)}, il locale la richiama se serve."
+        next_state = determine_state(
+            merged_order=merged_order,
+            missing_messages=[],
+            completed=conversation.completed,
+            intended_quantity=conversation.intended_quantity,
+        )
+        print(f"[PickupTime] orario non capito dopo 3 tentativi: segnato {slot}, needs_review")
+        if next_state == "awaiting_confirmation":
+            order = _confirm_order(session, conversation, merged_order, restaurant_id)
+            return "completed", f"{note} Grazie, a presto!", order.id
+        conversation.state = next_state
+        return next_state, f"{note} " + build_assistant_response(
+            merged_order=merged_order,
+            state=next_state,
+            missing_messages=[],
+            order_saved=False,
+            intent="set_pickup_time",
+            new_valid_items=[],
+            customer_phone=conversation.customer_phone,
+            day_phrase=_day_phrase,
+            restaurant_id=restaurant_id,
+        ), None
+
+    def _name_miss(merged_order: dict) -> tuple[str, str]:
+        """Nome non capito alla domanda sul nome: (stato, risposta).
+        1° richiesta diversa, 2° proposta di ciò che si è capito, 3° ordine da verificare."""
+        data = _slot_state(conversation)
+        attempts = data.setdefault("customer_name", {})
+        attempts["misses"] = int(attempts.get("misses") or 0) + 1
+        attempts.pop("proposed", None)
+        if attempts["misses"] < 3:
+            guess = _name_guess(request.message) if attempts["misses"] == 2 else None
+            if guess:
+                attempts["proposed"] = guess
+            _store_slot_state(conversation, data)
+            print(f"[Name] nome non capito, fallimenti={attempts['misses']}")
+            if attempts["misses"] == 1:
+                return "collecting_name", NAME_MISS_MESSAGE
+            return "collecting_name", (
+                f"Ho capito {guess}, giusto? Mi dica sì o no." if guess else NAME_MISS_NO_GUESS_MESSAGE
+            )
+        del data["customer_name"]
+        data.setdefault("review", []).append("Nome non capito: chiedere il nome al cliente")
+        _store_slot_state(conversation, data)
+        conversation.customer_name = UNKNOWN_CUSTOMER_NAME
+        merged_order["customer_name"] = UNKNOWN_CUSTOMER_NAME
+        next_state = determine_state(
+            merged_order=merged_order,
+            missing_messages=[],
+            completed=conversation.completed,
+            intended_quantity=conversation.intended_quantity,
+        )
+        print("[Name] nome non capito dopo 3 tentativi: needs_review")
+        conversation.state = next_state
+        return next_state, "Segno l'ordine senza nome, il locale la richiama se serve. " + build_assistant_response(
+            merged_order=merged_order,
+            state=next_state,
+            missing_messages=[],
+            order_saved=False,
+            intent="set_customer_name",
+            new_valid_items=[],
+            customer_phone=conversation.customer_phone,
+            day_phrase=_day_phrase,
+            restaurant_id=restaurant_id,
+        )
+
+    def _current_merged_order() -> dict:
+        merged = {
+            "customer_name": conversation.customer_name,
+            "pickup_time": conversation.pickup_time,
+            "items": json.loads(conversation.items_json),
+        }
+        if _preorder_date:
+            merged["pickup_date"] = _preorder_date.isoformat()
+        return merged
+
+    def _local_reply(state: str, response_message: str, merged_order: dict, intent: str,
+                     order_id: int | None = None) -> ChatResponse:
+        """Turno risolto senza LLM: salva sessione e log, risponde."""
+        extracted_stub = {"intent": intent, "items": [], "customer_name": None, "pickup_time": None}
+        valid = state == "completed"
+        if not conversation.completed:
+            conversation.state = state
+        session.add(conversation)
+        session.add(ConversationLog(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order_json=json.dumps(extracted_stub, ensure_ascii=False),
+            merged_order_json=json.dumps(merged_order, ensure_ascii=False),
+            response_message=response_message,
+            valid=valid,
+            missing_items_json="[]",
+            state=state,
+        ))
+        session.commit()
+        _log_chat_timing(request.session_id, intent, request_started_at, state=state)
+        return ChatResponse(
+            session_id=request.session_id,
+            user_message=request.message,
+            extracted_order=extracted_stub,
+            merged_order=merged_order,
+            valid=valid,
+            missing_items=[],
+            response_message=response_message,
+            order_id=order_id,
+            state=state,
+        )
+
     _reservation_states = {
         "collecting_reservation_date",
         "collecting_reservation_time",
@@ -3394,22 +3694,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
         order = None
         if _is_confirm and not conversation.completed:
-            order, order_created = _persist_order_once(session, conversation, merged_order)
-
-            enriched_items, order_total = enrich_items_with_pricing(session, merged_order["items"], restaurant_id=restaurant_id)
-
-            if order_created:
-                _finalize_new_order(
-                    session=session,
-                    order=order,
-                    conversation=conversation,
-                    merged_order=merged_order,
-                    enriched_items=enriched_items,
-                    total_amount=order_total,
-                    restaurant_id=restaurant_id,
-                    ai_confidence=0.95,
-                    review_reasons=_kg_review_reasons(merged_order["items"]),
-                )
+            order = _confirm_order(session, conversation, merged_order, restaurant_id)
 
             name_part = f", {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
             _resp = (
@@ -3483,10 +3768,17 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # ── FAST PATH: stati stretti senza LLM ───────────────────────────────────
     if conversation.state == "collecting_name":
-        local_name = _extract_local_customer_name(request.message)
+        _name_proposed = _slot_state(conversation).get("customer_name", {}).get("proposed")
+        _name_answer = _yes_no_answer(request.message) if _name_proposed else None
+        if _name_answer == "no":
+            _merged_now = _current_merged_order()
+            _miss_state, _miss_resp = _name_miss(_merged_now)
+            return _local_reply(_miss_state, _miss_resp, _merged_now, "name_not_understood")
+        local_name = _name_proposed if _name_answer == "yes" else _extract_local_customer_name(request.message)
         if local_name:
             existing_items = json.loads(conversation.items_json)
             conversation.customer_name = local_name
+            _clear_slot_attempts(conversation, "customer_name")
             merged_order = {
                 "customer_name": conversation.customer_name,
                 "pickup_time": conversation.pickup_time,
@@ -3544,7 +3836,20 @@ def chat(request: ChatRequest, session: SessionDep):
             )
 
     if conversation.state == "collecting_pickup_time":
-        local_pickup_time = _extract_local_pickup_time(request.message)
+        local_pickup_time = _extract_local_pickup_time(
+            request.message, evening_only=is_evening_only(restaurant_id),
+        )
+        _pt_proposed = _slot_state(conversation).get("pickup_time", {}).get("proposed")
+        _pt_answer = _yes_no_answer(request.message) if _pt_proposed and not local_pickup_time else None
+        if _pt_answer == "yes":
+            local_pickup_time = _pt_proposed
+        elif _pt_answer == "no":
+            _merged_now = _current_merged_order()
+            _miss_state, _miss_resp, _miss_order_id = _pickup_time_miss(_merged_now, None)
+            _log_pickup_time_turn("nessuno", conversation)
+            if conversation.pickup_time:
+                _clear_slot_attempts(conversation, "pickup_time")
+            return _local_reply(_miss_state, _miss_resp, _merged_now, "pickup_time_not_understood", _miss_order_id)
         if local_pickup_time:
             pickup_time = resolve_pickup_time(local_pickup_time, restaurant_id=restaurant_id)
             checked_time, pickup_time_error = _check_pickup_time(pickup_time)
@@ -3585,6 +3890,15 @@ def chat(request: ChatRequest, session: SessionDep):
                 pickup_time_error=pickup_time_error,
                 day_phrase=_day_phrase,
             )
+            order_id = None
+            if state == "collecting_pickup_time":
+                # Orario riconosciuto ma fuori orario: conta come risposta non valida
+                state, response_message, order_id = _pickup_time_miss(merged_order, pickup_time_error)
+                if not conversation.completed:
+                    conversation.state = state
+            _log_pickup_time_turn("regole", conversation)
+            if conversation.pickup_time:
+                _clear_slot_attempts(conversation, "pickup_time")
             extracted_stub = {
                 "intent": "set_pickup_time",
                 "items": [],
@@ -3592,7 +3906,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 "pickup_time": pickup_time,
             }
             valid = bool(
-                not pickup_time_error
+                (not pickup_time_error or state == "completed")
                 and existing_items
                 and conversation.customer_name
                 and conversation.pickup_time
@@ -3624,7 +3938,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 valid=valid,
                 missing_items=[],
                 response_message=response_message,
-                order_id=None,
+                order_id=order_id,
                 state=state,
             )
 
@@ -3637,6 +3951,8 @@ def chat(request: ChatRequest, session: SessionDep):
         applied = _apply_kg_answers_from_message(
             existing_items, request.message, bare_number_ok=slot == "quantity",
         )
+        if slot not in applied and _apply_kg_proposal_answer(existing_items, slot, request.message):
+            applied.add(slot)
         if applied:
             conversation.items_json = json.dumps(existing_items, ensure_ascii=False)
             merged_order = {
@@ -4069,6 +4385,7 @@ def chat(request: ChatRequest, session: SessionDep):
     # Risposte a porzione / caldo-freddo per le voci già nel carrello. Con voci nuove
     # nello stesso messaggio valgono solo i valori estratti per ciascuna voce
     # ("2 etti di porchetta calda" non rende calda anche la bufala di prima).
+    _kg_unresolved_now = False
     if not new_items:
         _kg_applied = _apply_kg_answers_from_message(
             merged_items, request.message, bare_number_ok=_prior_state == "collecting_kg_quantity",
@@ -4079,7 +4396,7 @@ def chat(request: ChatRequest, session: SessionDep):
             and not pickup_time_error  # orario rifiutato: la domanda si ripete dopo l'errore
             and _KG_SLOT_STATES[_prior_state] not in _kg_applied
         ):
-            _register_kg_miss(merged_items, _KG_SLOT_STATES[_prior_state])
+            _kg_unresolved_now = _register_kg_miss(merged_items, _KG_SLOT_STATES[_prior_state])
 
     merged_order = {
         "customer_name": conversation.customer_name,
@@ -4208,6 +4525,23 @@ def chat(request: ChatRequest, session: SessionDep):
     )
     if _next_day_ask:
         response_message = _next_day_question(restaurant_id)
+
+    # Domande obbligatorie rimaste senza risposta: mai la stessa domanda due volte di fila
+    if _kg_unresolved_now:
+        response_message = f"Va bene, lo segno da verificare. {response_message}"
+    if conversation.customer_name:
+        _clear_slot_attempts(conversation, "customer_name")
+    elif _prior_state == "collecting_name" and conversation.state == "collecting_name":
+        conversation.state, response_message = _name_miss(merged_order)
+    if _prior_state == "collecting_pickup_time":
+        if conversation.state == "collecting_pickup_time" and not conversation.pickup_time and intent != "ask_kg_price":
+            conversation.state, response_message, order_id = _pickup_time_miss(merged_order, pickup_time_error)
+            valid = valid or conversation.state == "completed"
+        _log_pickup_time_turn(
+            "llm" if extracted.get("pickup_time") and not pickup_time_error else "nessuno", conversation,
+        )
+    if conversation.pickup_time:
+        _clear_slot_attempts(conversation, "pickup_time")
 
     session.add(conversation)
     session.commit()

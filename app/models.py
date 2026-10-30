@@ -70,6 +70,8 @@ class ConversationSession(SQLModel, table=True):
     restaurant_id: Optional[str] = None
     kg_temperature: Optional[str] = None  # non più usato: la temperatura si chiede per ordine
     pickup_date: Optional[str] = None  # "YYYY-MM-DD": giorno di ritiro del preordine, fissato una volta per sessione
+    # Tentativi falliti per nome/orario, valore proposto al cliente e motivi needs_review
+    slot_attempts_json: str = "{}"
 
 class ConversationLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

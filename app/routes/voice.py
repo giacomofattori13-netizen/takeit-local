@@ -32,6 +32,8 @@ from app.services.conversation_service import (
     resolve_restaurant_from_phone,
 )
 from app.routes.chat import (
+    NAME_MISS_MESSAGE,
+    PICKUP_TIME_MISS_MESSAGE,
     _KG_SLOT_STATES,
     _extract_kg_quantity,
     _extract_kg_size,
@@ -311,6 +313,38 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 _GATHER_ATTRS = (
     'input="speech" language="it-IT" speechTimeout="auto" timeout="5" actionOnEmptyResult="true"'
 )
+# Hints STT per le domande sull'orario: aiutano Twilio a trascrivere "per le otto"
+# invece di "per le hotpoint". Separati da virgola, quindi niente virgole nelle frasi.
+_PICKUP_TIME_HINTS = (
+    "alle sei", "alle sette", "alle otto", "alle nove", "alle dieci",
+    "alle sei e mezza", "alle sette e mezza", "alle otto e mezza", "alle nove e mezza",
+    "alle sette e un quarto", "alle otto e un quarto", "alle otto meno un quarto",
+    "per le sette", "per le otto", "per le nove", "le otto", "le otto e mezza",
+    "alle 18", "alle 19", "alle 20", "alle 21", "alle 22",
+    "prima possibile", "il prima possibile", "subito", "domani", "stasera",
+    "sì", "no",
+)
+_GATHER_HINTS_BY_STATE = {
+    "collecting_pickup_time": _PICKUP_TIME_HINTS,
+    "confirming_next_day": _PICKUP_TIME_HINTS,
+}
+
+
+def _gather_attrs(state: str | None = None) -> str:
+    """Attributi del <Gather>: language="it-IT" sempre, hints per gli stati sull'orario.
+    Un attributo hints già presente viene unito senza duplicati."""
+    attrs = _GATHER_ATTRS if 'language="' in _GATHER_ATTRS else f'{_GATHER_ATTRS} language="it-IT"'
+    extra = _GATHER_HINTS_BY_STATE.get(state or "")
+    if not extra:
+        return attrs
+    existing = re.search(r'\bhints="([^"]*)"', attrs)
+    current = [h.strip() for h in existing.group(1).split(",") if h.strip()] if existing else []
+    hints = escape(",".join(dict.fromkeys([*current, *extra])), {'"': "&quot;"})
+    if existing:
+        return f"{attrs[:existing.start()]}hints=\"{hints}\"{attrs[existing.end():]}"
+    return f'{attrs} hints="{hints}"'
+
+
 _POLLY_FALLBACK = "Polly.Giorgio"
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
 
@@ -352,6 +386,8 @@ _CACHED_PHRASES = [
     "Calda o fredda?",
     "A che nome?",
     "Per che ora?",
+    PICKUP_TIME_MISS_MESSAGE,
+    NAME_MISS_MESSAGE,
     _NO_INPUT_MSG,
     _FILLER_PHRASE,
 ]
@@ -1153,7 +1189,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<Response>\n"
-        f"  <Gather {_GATHER_ATTRS} "
+        f"  <Gather {_gather_attrs(result.state)} "
         f'action="/voice/gather?session_id={session_id}" method="POST">\n'
         f"    {audio}\n"
         "  </Gather>\n"
@@ -1165,6 +1201,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
 async def _build_retry_gather_twiml(
     session_id: str,
     message: str = "Scusi, non ho capito. Può ripetere?",
+    state: str | None = None,
 ) -> str:
     audio, no_input = await asyncio.gather(
         _audio_element_async(message),
@@ -1173,7 +1210,7 @@ async def _build_retry_gather_twiml(
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         "<Response>\n"
-        f"  <Gather {_GATHER_ATTRS} "
+        f"  <Gather {_gather_attrs(state)} "
         f'action="/voice/gather?session_id={session_id}" method="POST">\n'
         f"    {audio}\n"
         "  </Gather>\n"
@@ -1618,7 +1655,7 @@ async def voice_gather(
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             "<Response>\n"
-            f"  <Gather {_GATHER_ATTRS} "
+            f"  <Gather {_gather_attrs(_state)} "
             f'action="/voice/gather?session_id={session_id}" method="POST">\n'
             f"    {audio}\n"
             "  </Gather>\n"
@@ -1753,7 +1790,7 @@ async def voice_gather(
             state=_state,
             error=type(exc).__name__,
         )
-        twiml = await _build_retry_gather_twiml(session_id)
+        twiml = await _build_retry_gather_twiml(session_id, state=_state)
         return Response(content=twiml, media_type="application/xml")
 
     twiml = await _build_response_twiml(result, session_id)

@@ -1390,6 +1390,32 @@ def earliest_pickup_minutes_today(restaurant_id: str = "") -> int | None:
     return earliest if earliest <= max(close_min - 15, open_min) else None
 
 
+def first_pickup_slot(restaurant_id: str = "", pickup_date: datetime.date | None = None) -> str:
+    """Primo orario di ritiro disponibile "HH:MM": oggi ora attuale + preparazione
+    (mai prima dell'apertura); per un preordine l'apertura di quel giorno."""
+    if pickup_date is not None and pickup_date != _rome_now().date():
+        opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+        if isinstance(opening_hours, dict):
+            day_range = _parse_opening_range(opening_hours.get(_WEEKDAY_NAMES[pickup_date.weekday()], ""))
+            if day_range:
+                return _format_minutes(day_range[0])
+    earliest = earliest_pickup_minutes_today(restaurant_id)
+    if earliest is not None:
+        return _format_minutes(earliest)
+    return resolve_pickup_time("prima_possibile", restaurant_id=restaurant_id)
+
+
+def is_evening_only(restaurant_id: str = "") -> bool:
+    """True se il locale apre solo la sera (ogni giorno aperto apre dalle 15 in poi).
+    Senza orari configurati vale True, come la regola del prompt (18:30-22:30)."""
+    opening_hours = get_opening_hours(restaurant_id=restaurant_id)
+    if not opening_hours or not isinstance(opening_hours, dict):
+        return True
+    ranges = [_parse_opening_range(opening_hours.get(day, "")) for day in _WEEKDAY_NAMES]
+    opens = [r[0] for r in ranges if r]
+    return bool(opens) and min(opens) >= 15 * 60
+
+
 def reservation_slots_left_today(restaurant_id: str = "") -> bool:
     """True se oggi c'è ancora almeno un orario prenotabile (dopo l'ora attuale,
     prima della chiusura)."""

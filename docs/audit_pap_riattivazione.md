@@ -4,6 +4,7 @@ Data: 2026-10-26. Prima stesura: solo diagnosi, nessun codice applicativo modifi
 Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e 6; punto 5). Le parti risolte sono segnate con **RISOLTO**.
 Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 1). **In corso, manca il Volume su Railway.**
 Aggiornamento 2026-10-29: riepilogo giornaliero degli ordini al titolare e `owner_order_sms_enabled` (punto 6).
+Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle domande obbligatorie (punto 7).
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -16,6 +17,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 | 4 | Logica PaP | Le 5 domande e il preordine sono implementati | Medio: porzione chiesta solo per i tranci. **RISOLTO**: giorno di ritiro e nome/telefono del locale nell'SMS al cliente |
 | 5 | Notifiche a Fabio | **RISOLTO**: SMS a `Restaurant.owner_notify_phone` a ogni nuovo ordine e per gli ordini non salvati, `OWNER_PHONE` solo come ripiego | Basso, se `owner_notify_phone` è compilato. Restano aperti i comandi SMS (un solo `OWNER_PHONE`) |
 | 6 | Riepilogo giornaliero | Codice pronto, spento su Base44 (`daily_summary_enabled` null) | Basso. Da provare con l'anteprima prima di attivarlo |
+| 7 | Orario non capito | **RISOLTO**: hints STT, parsing tollerante, escalation in tre passi e `needs_review` | Basso. Da verificare in una chiamata di prova che gli hints migliorino la trascrizione |
 
 ---
 
@@ -274,6 +276,24 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 
 **Test**: `tests/test_daily_summary.py` (contenuto, totali con unità e temperature miste, ordinamento, ordini da verificare in cima, zero ordini, split, giorno chiuso, idempotenza dopo riavvio, orario vuoto o non valido) e `OwnerOrderSmsEnabledTests` in `tests/test_owner_notifications.py`.
 
+## 7. Orario non capito
+
+**Caso**: CallLog `6ae3803d9a8552f9999f8609` (Corte del Sole, 29/10 18:20). In `collecting_pickup_time` lo STT di Twilio ha trascritto "per le otto" come "Per le hotpoint." e poi "Parte."; l'agente ha risposto "Per che ora?" tre volte di fila e il cliente ha riattaccato. Lo stesso problema compare nei CallLog di settembre ("Per l'otto? Perde 8"). Modello LLM e `<Gather input="speech">` restano invariati (niente Media Streams).
+
+**Cosa cambia**
+
+1. **Hints STT** (`app/routes/voice.py`, `_gather_attrs`): i `<Gather>` degli stati `collecting_pickup_time` e `confirming_next_day` hanno `hints` con le espressioni orarie frequenti ("alle otto", "alle otto e mezza", "alle 20", "prima possibile", "subito", "domani", "stasera", "sì", "no"…). `language="it-IT"` era già presente. Un attributo `hints` già esistente viene unito senza duplicati. Vale anche per il Gather di "non ho sentito nulla" e per quello di riprova dopo un errore.
+2. **Parsing più tollerante prima dell'LLM** (`_extract_local_pickup_time` in `app/routes/chat.py`): cifre e parole da "sei" a "dieci", "e mezza", "e un quarto", "meno un quarto", e le storpiature di "otto" ("l'otto", "allotto", "ottoe", "8pm"; "ottobre" escluso). Le ore 6-11 valgono come sera solo se il locale apre solo la sera (`is_evening_only`: ogni giorno aperto apre dalle 15 in poi; senza orari vale sera, come prima). Se le regole trovano un orario valido l'LLM non viene chiamato.
+3. **Mai la stessa domanda due volte di fila** (`_pickup_time_miss`): ogni risposta alla domanda sull'orario che non porta a un orario valido conta come fallimento, anche un orario fuori apertura.
+   - 1° fallimento: "Non ho capito l'orario. Mi dica per esempio: alle otto, oppure alle otto e mezza." (per un orario fuori apertura resta il messaggio con gli orari).
+   - 2° fallimento: "Va bene alle <primo orario disponibile>? Mi dica sì o no." Sì → quell'orario; no → 3° fallimento.
+   - 3° fallimento: l'ordine viene salvato al primo orario disponibile (`first_pickup_slot`: oggi ora + preparazione, per un preordine l'apertura di quel giorno), con `review_reasons` "Orario non capito: …" (quindi `needs_review` su Base44 e SMS a Fabio anche con `owner_order_sms_enabled = false`). Al cliente: "Segno alle <orario>, il locale la richiama se serve."
+   - Lo stesso schema vale per le altre domande obbligatorie di PaP: **nome** (1° "Non ho capito il nome…", 2° "Ho capito <nome trascritto>, giusto?", 3° ordine a nome "Cliente" da verificare), **porzione** e **caldo/freddo** (1° "Scusi, …", 2° "Va bene interi/caldi? Mi dica sì o no.", dove "no" vale l'altro valore, 3° campo vuoto da verificare). La quantità resta a due tentativi.
+   - Tentativi, valore proposto e motivi sono in `ConversationSession.slot_attempts_json` (nuova colonna, migrazione all'avvio).
+4. **Log Railway**: per ogni risposta in `collecting_pickup_time` una riga `[PickupTime] riconosciuto=regole|llm|nessuno fallimenti=N stato=…`, senza il testo del cliente.
+
+**Test**: `tests/test_pickup_time_escalation.py` ("per le hotpoint" → primo messaggio; "alle otto" e "per le 8" → 20:00 senza LLM; "le otto e mezza" → 20:30; tre fallimenti → ordine salvato con `review_reasons` al primo orario; sì/no alla proposta; nessuna risposta identica consecutiva; log senza testo; nome; hints nei Gather). Aggiornati i test di porzione/caldo-freddo in `tests/test_next_day_preorder_flow.py`.
+
 ---
 
 ## Checklist prima della riattivazione
@@ -289,3 +309,5 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 - [ ] Chiamata di prova di domenica: il ritiro proposto deve essere martedì
 - [ ] Riepilogo giornaliero: anteprima verificata con Fabio, poi `daily_summary_time` e `daily_summary_enabled` su Base44 (punto 6)
 - [ ] Decidere con Fabio se spegnere l'SMS per ogni ordine (`owner_order_sms_enabled = false`) una volta attivo il riepilogo (punto 6)
+- [x] Orario non capito: hints STT, parsing tollerante, escalation e `needs_review` (punto 7)
+- [ ] Chiamata di prova: dire "per le otto" e controllare nei log `[PickupTime] riconosciuto=regole` (punto 7)
