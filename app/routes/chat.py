@@ -123,7 +123,7 @@ def _resolve_customer_lookup_future(lookup_future, phone: str | None) -> dict | 
     return None
 
 
-def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[str]]:
+def build_missing_item_message(session: Session, item: dict, restaurant_id: str = "") -> tuple[str, list[str]]:
     pizza_name = item["pizza_name"]
     is_sg = pizza_name.upper().endswith("(SG)")
 
@@ -142,6 +142,7 @@ def build_missing_item_message(session: Session, item: dict) -> tuple[str, list[
         session=session,
         requested_name=pizza_name,
         limit=2,
+        restaurant_id=restaurant_id,
     )
     if typo_suggestions:
         suggestions_text = ", ".join(typo_suggestions)
@@ -356,19 +357,22 @@ def format_single_item_for_customer(item: dict) -> str:
     if item.get("sale_unit") == "kg":
         return format_kg_item(item)
 
+    # Pizza fuori menu: è una Margherita base con il nome detto come aggiunta
+    is_margherita_base = pizza_name in ("Margherita", "Personalizzata", "Pizza personalizzata")
+
     is_plain_margherita = (
-        pizza_name == "Margherita"
+        is_margherita_base
         and not add_ingredients
         and not remove_ingredients
     )
 
     is_margherita_with_variants = (
-        pizza_name == "Margherita"
+        is_margherita_base
         and (add_ingredients or remove_ingredients)
     )
 
     is_bianca_style = (
-        pizza_name == "Margherita"
+        is_margherita_base
         and "pomodoro" in remove_ingredients
     )
 
@@ -398,20 +402,9 @@ def format_single_item_for_customer(item: dict) -> str:
                 else:
                     line = f"{quantity} bianche"
         else:
-            if quantity == 1:
-                if len(add_ingredients) == 1:
-                    line = f"una {add_ingredients[0]}"
-                elif len(add_ingredients) > 1:
-                    line = f"una pizza con {', '.join(add_ingredients)}"
-                else:
-                    line = "una margherita"
-            else:
-                if len(add_ingredients) == 1:
-                    line = f"{quantity} {add_ingredients[0]}"
-                elif len(add_ingredients) > 1:
-                    line = f"{quantity} pizze con {', '.join(add_ingredients)}"
-                else:
-                    line = f"{quantity} margherite"
+            line = "una margherita" if quantity == 1 else f"{quantity} margherite"
+            if add_ingredients:
+                line += f" con {_format_pizza_list(add_ingredients)}"
 
         if visible_remove_ingredients:
             line += " senza " + ", ".join(visible_remove_ingredients)
@@ -454,58 +447,12 @@ def pluralize_pizza_name(name: str, quantity: int) -> str:
         "Diavola": "diavole",
         "Capricciosa": "capricciose",
         "Quattro Formaggi": "quattro formaggi",
-        "Personalizzata": "pizze personalizzate",
-        "Pizza personalizzata": "pizze personalizzate",
     }
 
     if name in irregulars:
         return irregulars[name]
 
     return name.lower()
-
-def format_single_item(item: dict) -> str:
-    quantity = item["quantity"]
-    pizza_name = item["pizza_name"]
-    pizza_type = item["pizza_type"]
-    add_ingredients = item.get("add_ingredients", [])
-    remove_ingredients = item.get("remove_ingredients", [])
-    size = item.get("size", "normale")
-
-    if item.get("sale_unit") == "kg":
-        return format_kg_item(item)
-
-    if quantity == 1:
-        if pizza_name in ("Personalizzata", "Pizza personalizzata"):
-            line = "una pizza personalizzata"
-        else:
-            line = f"una {pizza_name.lower()}"
-    else:
-        if pizza_name in ("Personalizzata", "Pizza personalizzata"):
-            line = f"{quantity} pizze personalizzate"
-        else:
-            line = f"{quantity} {pluralize_pizza_name(pizza_name, quantity)}"
-
-    if size == "mini":
-        line += " (mini)"
-    elif size == "doppio":
-        line += " (doppio impasto)"
-
-    if pizza_type == "Senza glutine":
-        line += " senza glutine"
-
-    if add_ingredients:
-        line += " con " + ", ".join(add_ingredients)
-
-    if remove_ingredients:
-        line += " senza " + ", ".join(remove_ingredients)
-
-    return line
-
-def format_items(items: list[dict]) -> str:
-    if not items:
-        return ""
-
-    return ", ".join(format_single_item(item) for item in items)
 
 def split_valid_and_invalid_items(
     session: Session,
@@ -2119,8 +2066,14 @@ def get_typo_correction_suggestions(
     session: Session,
     requested_name: str,
     limit: int = 2,
+    restaurant_id: str = "",
 ) -> list[str]:
-    menu_names = get_menu_names(session)
+    # Solo il menu del locale della chiamata: nello stesso DB ci sono i menu di tutti
+    menu_names = (
+        [entry.name for entry in session.exec(_menu_select(restaurant_id)).all() if entry.available]
+        if restaurant_id
+        else get_menu_names(session)
+    )
 
     scored_matches = []
     requested_lower = requested_name.lower().strip()
@@ -2619,7 +2572,12 @@ def pickup_day_phrase(pickup_date: datetime.date) -> str:
     """'domani, giovedì' oppure solo il giorno ('martedì') se domani il locale è chiuso."""
     today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
     weekday = _WEEKDAY_IT[pickup_date.weekday()]
-    return f"domani, {weekday}" if pickup_date == today + datetime.timedelta(days=1) else weekday
+    if pickup_date == today + datetime.timedelta(days=1):
+        return f"domani, {weekday}"
+    if pickup_date >= today + datetime.timedelta(days=7):
+        # Oltre la settimana il solo giorno della settimana sarebbe ambiguo
+        return f"{weekday} {pickup_date.day} {list(_ITALIAN_MONTHS)[pickup_date.month - 1]}"
+    return weekday
 
 
 def _pickup_day_intro(day_phrase: str) -> str:
@@ -2628,27 +2586,74 @@ def _pickup_day_intro(day_phrase: str) -> str:
     return f"Domani siamo chiusi, il ritiro è per {day_phrase}."
 
 
-def _spoken_pickup_date(message: str, restaurant_id: str = "") -> datetime.date | None:
-    """Giorno di ritiro detto dal cliente: domani, dopodomani o un giorno della settimana
-    (il prossimo, mai oggi). None se non c'è o se quel giorno il locale è chiuso."""
+def _dated_day(today: datetime.date, day: int, month: int, year: int | None = None) -> datetime.date | None:
+    """Data detta dal cliente; senza anno e già passata vale per l'anno prossimo."""
+    try:
+        date = datetime.date(year or today.year, month, day)
+        return date if year or date >= today else datetime.date(today.year + 1, month, day)
+    except ValueError:
+        return None
+
+
+# "Sono Domenica", "a nome Sabato": non sono giorni
+_NOT_A_DAY_LOOKBEHIND = r"(?<!sono )(?<!nome )(?<!chiamo )(?<!signora )(?<!signor )"
+_SPOKEN_DATE_RE = re.compile(r"\b(\d{1,2}|primo)\s+(?:di\s+)?(" + "|".join(_ITALIAN_MONTHS) + r")\b")
+_SLASH_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+_SPOKEN_TODAY_RE = re.compile(r"\b(?:oggi|stasera|sta\s+sera|questa\s+sera|stanotte)\b")
+
+
+def _spoken_pickup_day(message: str, restaurant_id: str = "") -> datetime.date | None:
+    """Giorno di ritiro detto esplicitamente: domani, dopodomani, una data, un giorno
+    della settimana, stasera/oggi. None se non c'è. Il giorno può essere chiuso:
+    lo decide chi chiama. Il giorno della settimana di oggi vale oggi finché restano
+    orari di ritiro, altrimenti la settimana prossima."""
     normalized = _normalize_for_match(message)
     today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
-    days_ahead = None
     if re.search(r"\bdopodomani\b", normalized):
-        days_ahead = 2
-    elif re.search(r"\bdomani\b", normalized):
-        days_ahead = 1
-    else:
-        for name, weekday in _ITALIAN_WEEKDAYS.items():
-            if re.search(rf"\b{name}\b", normalized):
-                days_ahead = (weekday - today.weekday()) % 7 or 7
-                break
-    if days_ahead is None:
-        return None
-    day = today + datetime.timedelta(days=days_ahead)
-    if load_restaurant(restaurant_id=restaurant_id).get("opening_hours") and not get_opening_range_text(restaurant_id, day):
-        return None
-    return day
+        return today + datetime.timedelta(days=2)
+    if re.search(r"\bdomani\b", normalized):
+        return today + datetime.timedelta(days=1)
+    match = _SPOKEN_DATE_RE.search(normalized)
+    if match:
+        day = 1 if match.group(1) == "primo" else int(match.group(1))
+        return _dated_day(today, day, _ITALIAN_MONTHS[match.group(2)])
+    match = _SLASH_DATE_RE.search(normalized)
+    if match:
+        year = int(match.group(3)) if match.group(3) else None
+        return _dated_day(today, int(match.group(1)), int(match.group(2)), year + 2000 if year and year < 100 else year)
+    for name, weekday in _ITALIAN_WEEKDAYS.items():
+        if re.search(rf"{_NOT_A_DAY_LOOKBEHIND}\b{name}\b", normalized):
+            days_ahead = (weekday - today.weekday()) % 7
+            if days_ahead == 0 and earliest_pickup_minutes_today(restaurant_id) is None:
+                days_ahead = 7
+            return today + datetime.timedelta(days=days_ahead)
+    return today if _SPOKEN_TODAY_RE.search(normalized) else None
+
+
+def _is_open_day(day: datetime.date, restaurant_id: str = "") -> bool:
+    if not load_restaurant(restaurant_id=restaurant_id).get("opening_hours"):
+        return True
+    return bool(get_opening_range_text(restaurant_id, day))
+
+
+def _first_open_day_after(day: datetime.date, restaurant_id: str = "") -> datetime.date | None:
+    for days_ahead in range(1, 8):
+        candidate = day + datetime.timedelta(days=days_ahead)
+        if _is_open_day(candidate, restaurant_id):
+            return candidate
+    return None
+
+
+def _closed_day_question(closed_day: datetime.date, proposal: datetime.date) -> str:
+    """"Domani siamo chiusi, il primo giorno disponibile è martedì, va bene?\""""
+    closed = pickup_day_phrase(closed_day).split(",")[0]
+    return f"{closed[0].upper()}{closed[1:]} siamo chiusi, il primo giorno disponibile è {pickup_day_phrase(proposal)}, va bene?"
+
+
+def _time_in_sentence(message: str) -> str | None:
+    """Orario detto dentro una frase ("per domani alle 8"): deve seguire "alle"/"per le"."""
+    match = _TIME_IN_SENTENCE_RE.search(_normalize_for_match(message))
+    return _extract_local_pickup_time(match.group(0)) if match else None
 
 
 # Risposta a "vuole ordinare per domani?" che non aggiunge altro: niente LLM
@@ -2955,7 +2960,7 @@ def chat(request: ChatRequest, session: SessionDep):
         print(f"[Preorder] ritiro {_preorder_date} ({_day_phrase})")
     elif conversation.pickup_date:
         # Altri locali: il ritiro per un giorno successivo vale solo se il cliente
-        # l'ha accettato ("vuole ordinare per domani?" → sì).
+        # l'ha detto o l'ha accettato ("vuole ordinare per domani?" → sì).
         _agreed_date = datetime.date.fromisoformat(conversation.pickup_date)
         if _agreed_date > datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date():
             _preorder_date = _agreed_date
@@ -2990,34 +2995,80 @@ def chat(request: ChatRequest, session: SessionDep):
         hours_part = f" siamo aperti {hours}" if hours else " siamo chiusi a quell'ora"
         return None, f"Mi dispiace, {_day_phrase}{hours_part}. A che ora passa?"
 
-    def _set_pickup_day(day: "datetime.date") -> None:
+    # Giorno cambiato in questo turno e domanda aperta per un giorno in cui si è chiusi
+    _day_changed = False
+    _closed_day_ask: str | None = None
+
+    def _set_pickup_day(day: "datetime.date", said: bool = True) -> None:
         """Il cliente ha scelto il giorno di ritiro: vale per il resto della chiamata e
-        recupera l'orario detto prima, se rientra negli orari di quel giorno."""
+        recupera l'orario detto prima, se rientra negli orari di quel giorno. `said`:
+        la risposta di questo turno nomina già il giorno, non va ripetuto."""
         nonlocal _preorder_date, _day_phrase, _ask_next_day
-        _preorder_date = day
-        _day_phrase = pickup_day_phrase(day)
+        is_today = day == datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+        _preorder_date = None if is_today else day
+        _day_phrase = None if is_today else pickup_day_phrase(day)
         _ask_next_day = False
-        conversation.pickup_date = day.isoformat()
+        conversation.pickup_date = None if is_today else day.isoformat()
         data = _slot_state(conversation)
-        data["pickup_day_said"] = True
+        if said:
+            data["pickup_day_said"] = True
+        else:
+            data.pop("pickup_day_said", None)
         kept_time = data.pop("next_day_pickup_time", None)
+        data.pop("next_day_proposal", None)
         _store_slot_state(conversation, data)
         if conversation.pickup_time and _check_pickup_time(conversation.pickup_time)[1]:
             conversation.pickup_time = None
         if kept_time and not conversation.pickup_time:
             conversation.pickup_time = _check_pickup_time(kept_time)[0]
 
-    def _accept_spoken_day() -> str | None:
-        """Oggi non restano orari e il cliente ha già detto il giorno: niente domanda,
-        restituisce la frase che lo conferma."""
-        if not _ask_next_day or conversation.completed or detect_reservation_intent(request.message):
+    def _propose_day_after_closed(closed_day: "datetime.date", proposal: "datetime.date") -> str:
+        """Giorno chiuso: si propone il primo giorno aperto successivo e si attende sì/no."""
+        nonlocal _closed_day_ask
+        _closed_day_ask = _closed_day_question(closed_day, proposal)
+        data = _slot_state(conversation)
+        data["next_day_proposal"] = {"date": proposal.isoformat(), "question": _closed_day_ask}
+        spoken_time = _time_in_sentence(request.message)
+        if spoken_time and spoken_time != "prima_possibile":
+            data["next_day_pickup_time"] = spoken_time
+        _store_slot_state(conversation, data)
+        print(f"[Pickup] {closed_day} chiuso: propongo {proposal}")
+        return _closed_day_ask
+
+    def _apply_spoken_day() -> str | None:
+        """Un giorno detto esplicitamente vale sempre, anche con la cucina aperta. Restituisce
+        la frase che lo conferma, solo quando oggi non restano orari di ritiro; un giorno
+        chiuso apre la proposta (_closed_day_ask). I locali con preordine fisso hanno il
+        loro giorno, e le prenotazioni il loro flusso."""
+        nonlocal _day_changed
+        if _next_day_only or conversation.completed or detect_reservation_intent(request.message):
             return None
-        day = _spoken_pickup_date(request.message, restaurant_id)
-        if not day:
+        # Alla domanda sul nome "Domenica" è un nome: il giorno deve essere esplicito
+        if conversation.state == "collecting_name" and not re.search(
+            r"\b(?:per|domani|dopodomani)\b", _normalize_for_match(request.message),
+        ):
             return None
-        _set_pickup_day(day)
-        print(f"[Pickup] giorno di ritiro già detto dal cliente: {day}")
-        return f"La cucina stasera è chiusa, segno per {_day_phrase.replace(', ', ' ')}."
+        day = _spoken_pickup_day(request.message, restaurant_id)
+        if day is None:
+            return None
+        if day == datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date():
+            # Stasera: annulla un giorno detto prima; a cucina chiusa resta la domanda
+            if _preorder_date is not None and earliest_pickup_minutes_today(restaurant_id) is not None:
+                _set_pickup_day(day, said=False)
+                _day_changed = True
+            return None
+        if day == _preorder_date:
+            return None
+        if not _is_open_day(day, restaurant_id):
+            proposal = _first_open_day_after(day, restaurant_id)
+            if proposal:
+                _propose_day_after_closed(day, proposal)
+            return None
+        kitchen_closed = _ask_next_day
+        _set_pickup_day(day, said=kitchen_closed)
+        _day_changed = True
+        print(f"[Pickup] giorno di ritiro detto dal cliente: {day}")
+        return f"La cucina stasera è chiusa, segno per {_day_phrase.replace(', ', ' ')}." if kitchen_closed else None
 
     def _keep_time_for_next_day(pickup_time: str, error: str | None) -> None:
         """Orario rifiutato solo perché oggi non si ritira più: si tiene per il giorno scelto."""
@@ -3699,13 +3750,38 @@ def chat(request: ChatRequest, session: SessionDep):
     if conversation.state == "confirming_next_day":
         _yes = re.search(r"\b(s[iì]|ok|va bene|certo|volentieri|d'accordo|perfetto|esatto)\b", message_lower)
         _no = re.search(r"\b(no|niente|lasci|lascia|non importa)\b", message_lower)
-        _nd_spoken_day = _spoken_pickup_date(request.message, restaurant_id)
-        _nd_accepted = bool(_yes or _nd_spoken_day) and not _no
+        _nd_proposal = _slot_state(conversation).get("next_day_proposal") or {}
+        _nd_question = _nd_proposal.get("question") or _next_day_question(restaurant_id)
+        _nd_asked_day = (
+            datetime.date.fromisoformat(_nd_proposal["date"])
+            if _nd_proposal
+            else get_next_open_day(restaurant_id=restaurant_id)[0]
+        )
+        _nd_spoken_day = _spoken_pickup_day(request.message, restaurant_id)
+        if (
+            _nd_spoken_day == datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+            and earliest_pickup_minutes_today(restaurant_id) is None
+        ):
+            _nd_spoken_day = None  # "stasera" a cucina chiusa non è una scelta possibile
+        # "No, venerdì" sceglie un altro giorno; "no, domani no" rifiuta quello proposto
+        _nd_accepted = bool(_yes or _nd_spoken_day) and (
+            not _no or bool(_nd_spoken_day and _nd_spoken_day != _nd_asked_day)
+        )
+        if _nd_accepted and _nd_spoken_day and not _is_open_day(_nd_spoken_day, restaurant_id):
+            _nd_next_open = _first_open_day_after(_nd_spoken_day, restaurant_id)
+            if _nd_next_open:
+                return _local_reply(
+                    "confirming_next_day",
+                    _propose_day_after_closed(_nd_spoken_day, _nd_next_open),
+                    _current_merged_order(),
+                    "closed_day_proposal",
+                )
+            _nd_accepted = False
         if _nd_accepted and not _is_bare_next_day_answer(request.message):
             # "sì, due margherite alle 8": anche il resto della frase va estratto
-            _set_pickup_day(_nd_spoken_day or get_next_open_day(restaurant_id=restaurant_id)[0])
+            _set_pickup_day(_nd_spoken_day or _nd_asked_day)
             conversation.state = "collecting_items"
-            _day_note = f"Perfetto, il ritiro è per {_day_phrase}."
+            _day_note = f"Perfetto, il ritiro è per {_day_phrase or _today_phrase(conversation.pickup_time)}."
             print(f"[Pickup] cliente accetta il ritiro per {_preorder_date} e aggiunge altro")
 
     if conversation.state == "confirming_next_day":
@@ -3716,7 +3792,7 @@ def chat(request: ChatRequest, session: SessionDep):
             "items": _nd_items,
         }
         if _nd_accepted:
-            _set_pickup_day(_nd_spoken_day or get_next_open_day(restaurant_id=restaurant_id)[0])
+            _set_pickup_day(_nd_spoken_day or _nd_asked_day)
             _nd_merged["pickup_date"] = conversation.pickup_date
             _nd_merged["pickup_time"] = conversation.pickup_time
             _nd_state = determine_state(
@@ -3742,7 +3818,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     restaurant_id=restaurant_id,
                     day_said=True,
                 )
-            _nd_resp = f"Perfetto, il ritiro è per {_day_phrase}. {_nd_next}"
+            _nd_resp = f"Perfetto, il ritiro è per {_day_phrase or _today_phrase(conversation.pickup_time)}. {_nd_next}"
             print(f"[Pickup] cliente accetta il ritiro per {_preorder_date}")
         elif _no:
             _nd_state = "completed"
@@ -3750,7 +3826,7 @@ def chat(request: ChatRequest, session: SessionDep):
             print("[Pickup] cliente non vuole ordinare per il giorno dopo: chiusura")
         else:
             _nd_state = "confirming_next_day"
-            _nd_resp = f"Mi scusi, non ho capito. {_next_day_question(restaurant_id)}"
+            _nd_resp = f"Mi scusi, non ho capito. {_nd_question}"
         conversation.state = _nd_state
         session.add(conversation)
         session.add(ConversationLog(
@@ -3815,6 +3891,40 @@ def chat(request: ChatRequest, session: SessionDep):
             state=conversation.state,
         )
 
+    if conversation.state in ("awaiting_confirmation", "collecting_name", "collecting_pickup_time", *_KG_SLOT_STATES):
+        _day_note = _apply_spoken_day()
+        if _closed_day_ask:
+            return _local_reply("confirming_next_day", _closed_day_ask, _current_merged_order(), "closed_day_proposal")
+
+    # Correzione del giorno al riepilogo ("no, per domani"): si aggiorna e si riepiloga,
+    # senza confermare né annullare
+    if conversation.state == "awaiting_confirmation" and _day_changed:
+        _new_day_time = _time_in_sentence(request.message)
+        if _new_day_time and _new_day_time != "prima_possibile":
+            conversation.pickup_time = _check_pickup_time(_new_day_time)[0] or conversation.pickup_time
+        _new_day_merged = _current_merged_order()
+        _new_day_state = determine_state(
+            merged_order=_new_day_merged,
+            missing_messages=[],
+            completed=conversation.completed,
+            intended_quantity=conversation.intended_quantity,
+        )
+        _new_day_resp = build_assistant_response(
+            merged_order=_new_day_merged,
+            state=_new_day_state,
+            missing_messages=[],
+            order_saved=False,
+            intent="change_pickup_day",
+            new_valid_items=[],
+            customer_phone=conversation.customer_phone,
+            day_phrase=_day_phrase,
+            restaurant_id=restaurant_id,
+            day_said=_day_said_for(_new_day_state),
+        )
+        if _day_note:
+            _new_day_resp = f"{_day_note} {_new_day_resp}"
+        return _local_reply(_new_day_state, _new_day_resp, _new_day_merged, "change_pickup_day")
+
     # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
     # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.
     # La risposta del cliente è gestita con puro Python: sì/no/chiedi di nuovo.
@@ -3849,6 +3959,8 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.items_json = "[]"
             conversation.customer_name = None
             conversation.pickup_time = None
+            if not _next_day_only:
+                conversation.pickup_date = None
             conversation.state = "collecting_items"
             conversation.completed = False
             session.add(conversation)
@@ -3916,6 +4028,8 @@ def chat(request: ChatRequest, session: SessionDep):
             _miss_state, _miss_resp = _name_miss(_merged_now)
             return _local_reply(_miss_state, _miss_resp, _merged_now, "name_not_understood")
         local_name = _name_proposed if _name_answer == "yes" else _extract_local_customer_name(request.message)
+        if local_name and _day_changed and _spoken_pickup_day(local_name, restaurant_id):
+            local_name = None  # "per domani": è il giorno, non il nome
         if local_name:
             existing_items = json.loads(conversation.items_json)
             conversation.customer_name = local_name
@@ -3945,6 +4059,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 day_phrase=_day_phrase,
                 day_said=_day_said_for(state),
             )
+            if _day_note:
+                response_message = f"{_day_note} {response_message}"
             extracted_stub = {
                 "intent": "set_customer_name",
                 "items": [],
@@ -3978,7 +4094,6 @@ def chat(request: ChatRequest, session: SessionDep):
             )
 
     if conversation.state == "collecting_pickup_time":
-        _day_note = _accept_spoken_day()
         _pt_data = _slot_state(conversation)
         _pt_slot = _pt_data.get("pickup_time", {})
         local_pickup_time = _extract_local_pickup_time(request.message, evening_only=False)
@@ -4145,6 +4260,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 day_phrase=_day_phrase,
                 day_said=_day_said_for(state),
             )
+            if _day_note:
+                response_message = f"{_day_note} {response_message}"
             extracted_stub = {"intent": f"set_kg_{slot}", "items": [], "customer_name": None, "pickup_time": None}
             session.add(conversation)
             session.add(ConversationLog(
@@ -4216,6 +4333,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 "pickup_time": conversation.pickup_time,
                 "items": merged_items_usual,
             }
+            if _preorder_date:
+                merged_order_usual["pickup_date"] = _preorder_date.isoformat()
             state_usual = determine_state(
                 merged_order=merged_order_usual,
                 missing_messages=[],
@@ -4232,6 +4351,8 @@ def chat(request: ChatRequest, session: SessionDep):
                 intent="add_items",
                 new_valid_items=added,
                 customer_phone=conversation.customer_phone,
+                day_phrase=_day_phrase,
+                day_said=_day_said_for(state_usual),
             )
             session.add(ConversationLog(
                 session_id=request.session_id,
@@ -4340,10 +4461,11 @@ def chat(request: ChatRequest, session: SessionDep):
         conversation.state = "confirming_usual"
         if _declared_qty:
             conversation.intended_quantity = _declared_qty
-        _usual_day_note = _accept_spoken_day()
-        _usual_time_match = _TIME_IN_SENTENCE_RE.search(_normalize_for_match(request.message))
-        _usual_time = _extract_local_pickup_time(_usual_time_match.group(0)) if _usual_time_match else None
-        if _usual_time:
+        _usual_day_note = _apply_spoken_day()
+        if _closed_day_ask:
+            return _local_reply("confirming_next_day", _closed_day_ask, _current_merged_order(), "closed_day_proposal")
+        _usual_time = _time_in_sentence(request.message)
+        if _usual_time and _usual_time != "prima_possibile":
             conversation.pickup_time, _usual_time_error = _check_pickup_time(_usual_time)
             _keep_time_for_next_day(_usual_time, _usual_time_error)
         session.add(conversation)
@@ -4459,6 +4581,7 @@ def chat(request: ChatRequest, session: SessionDep):
 
     existing_items = json.loads(conversation.items_json)
     new_items = extracted.get("items", [])
+    intent = extracted.get("intent", "unknown")
     for item in new_items:
         item.setdefault("add_ingredients", [])
         item.setdefault("remove_ingredients", [])
@@ -4468,9 +4591,20 @@ def chat(request: ChatRequest, session: SessionDep):
                 _menu_select(restaurant_id, MenuItem.name == item["pizza_name"])
             ).first()
             item["sale_unit"] = getattr(_mi, "sale_unit", "piece") if _mi else "piece"
+            # Pizza fuori menu: Margherita base con il nome detto come aggiunta. Un nome
+            # simile a una voce del menu resta così: il backend chiede "Forse intendevi...".
+            if (
+                not _mi
+                and intent in ("add_items", "modify_items", "replace_items")
+                and item["pizza_name"] != "__last__"
+                and not item["pizza_name"].upper().endswith("(SG)")
+                and not get_typo_correction_suggestions(session, item["pizza_name"], limit=1, restaurant_id=restaurant_id)
+            ):
+                print("[Cart] Pizza fuori menu: Margherita base con il nome come aggiunta")
+                item["add_ingredients"] = [item["pizza_name"].lower(), *item["add_ingredients"]]
+                item["pizza_name"] = "Personalizzata"
         else:
             item["sale_unit"] = "piece"
-    intent = extracted.get("intent", "unknown")
 
     # Voci al taglio nuove: si tengono solo quantità, porzione e caldo/freddo detti
     # dal cliente. Nessun default: i campi mancanti vengono chiesti (determine_state).
@@ -4482,13 +4616,13 @@ def chat(request: ChatRequest, session: SessionDep):
                 item["temperature"] = ""
 
     # Giorno già detto dal cliente: va fissato prima di validare l'orario
-    if not _day_note and intent not in ("cancel_order", "clear_cart"):
-        _day_note = _accept_spoken_day()
+    if intent not in ("cancel_order", "clear_cart"):
+        _day_note = _apply_spoken_day() or _day_note
 
     # 2. Aggiorna orario di ritiro (con validazione orari)
     pickup_time_error = None
     _extracted_time = extracted.get("pickup_time")
-    if _day_note and _extracted_time == "prima_possibile":
+    if _preorder_date and not _next_day_only and _extracted_time == "prima_possibile":
         # "Prima possibile" vale per oggi: per un altro giorno è la sua apertura.
         # L'LLM lo restituisce anche per un giorno detto senza orario ("per domani").
         _extracted_time = (
@@ -4496,7 +4630,11 @@ def chat(request: ChatRequest, session: SessionDep):
             if re.search(r"prima|subito|appena", message_lower)
             else None
         )
-    if _extracted_time:
+    if _extracted_time and _closed_day_ask:
+        # Il giorno è ancora da concordare: l'orario si valuta quando il cliente risponde
+        if _extracted_time != "prima_possibile":
+            _keep_time_for_next_day(_extracted_time, _next_day_question(restaurant_id))
+    elif _extracted_time:
         pt = resolve_pickup_time(_extracted_time, restaurant_id=restaurant_id)
         checked_time, pickup_time_error = _check_pickup_time(pt)
         _keep_time_for_next_day(pt, pickup_time_error)
@@ -4516,6 +4654,8 @@ def chat(request: ChatRequest, session: SessionDep):
         conversation.customer_name = None
         conversation.pickup_time = None
         conversation.intended_quantity = None
+        if not _next_day_only:
+            conversation.pickup_date = None
     elif intent == "clear_cart":
         merged_items = []
         conversation.intended_quantity = None
@@ -4643,7 +4783,7 @@ def chat(request: ChatRequest, session: SessionDep):
                     invalid_items.append(item)
                     missing_messages.append(f"L'impasto '{dough_code}' non è disponibile.")
         else:
-            msg, _ = build_missing_item_message(session, item)
+            msg, _ = build_missing_item_message(session, item, restaurant_id)
             missing_messages.append(msg)
             invalid_items.append(item)
 
@@ -4691,7 +4831,7 @@ def chat(request: ChatRequest, session: SessionDep):
         if _collected < conversation.intended_quantity:
             print(f"[State] intended_quantity={conversation.intended_quantity} _collected={_collected} → forza collecting_items")
             state = "collecting_items"
-    _next_day_ask = _ask_next_day and state != "completed" and intent != "cancel_order"
+    _next_day_ask = (_ask_next_day or bool(_closed_day_ask)) and state != "completed" and intent != "cancel_order"
     if _next_day_ask:
         state = "confirming_next_day"
     conversation.state = state
@@ -4713,8 +4853,8 @@ def chat(request: ChatRequest, session: SessionDep):
         day_said=_day_said_for(conversation.state),
     )
     if _next_day_ask:
-        response_message = _next_day_question(restaurant_id)
-    elif _day_note and not merged_items and not missing_messages:
+        response_message = _closed_day_ask or _next_day_question(restaurant_id)
+    elif (_day_note or _day_changed) and not merged_items and not missing_messages:
         response_message = "Cosa desidera ordinare?"
 
     # Domande obbligatorie rimaste senza risposta: mai la stessa domanda due volte di fila
@@ -4722,14 +4862,14 @@ def chat(request: ChatRequest, session: SessionDep):
         response_message = f"Va bene, lo segno da verificare. {response_message}"
     if conversation.customer_name:
         _clear_slot_attempts(conversation, "customer_name")
-    elif _prior_state == "collecting_name" and conversation.state == "collecting_name" and not _day_note:
+    elif _prior_state == "collecting_name" and conversation.state == "collecting_name" and not _day_changed:
         conversation.state, response_message = _name_miss(merged_order)
     if _prior_state == "collecting_pickup_time":
         if (
             conversation.state == "collecting_pickup_time"
             and not conversation.pickup_time
             and intent != "ask_kg_price"
-            and not _day_note  # ha detto il giorno: non è una risposta mancata
+            and not _day_changed  # ha detto il giorno: non è una risposta mancata
         ):
             conversation.state, response_message, order_id = _pickup_time_miss(merged_order, pickup_time_error)
             valid = valid or conversation.state == "completed"

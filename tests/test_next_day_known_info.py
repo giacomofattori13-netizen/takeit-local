@@ -138,11 +138,11 @@ class DayAlreadySaidTests(_ClosedKitchen):
         self.assertTrue(r.response_message.startswith("La cucina stasera è chiusa, segno per domani venerdì."))
         self.assertIn("alle 20", r.response_message)
 
-    def test_closed_day_is_not_valid_and_the_question_stays(self):
+    def test_closed_day_gets_a_proposal_and_the_order_stays(self):
         self.restaurant = {**CDS, "opening_hours": {**CDS["opening_hours"], "saturday": ""}}
         r = self.order_sentence("2 margherite per sabato alle 8", pickup_time="20:00")
         self.assertEqual(r.state, "confirming_next_day")
-        self.assertIn(QUESTION, r.response_message)
+        self.assertEqual(r.response_message, "Sabato siamo chiusi, il primo giorno disponibile è domenica, va bene?")
         self.assertIsNone(self.conversation().pickup_date)
         self.assertEqual(len(chat_module.json.loads(self.conversation().items_json)), 1)
 

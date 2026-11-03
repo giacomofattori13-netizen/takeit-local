@@ -2538,9 +2538,9 @@ Rules:
       quantity=0 (il backend chiederà quanti tranci, interi o mezzi).
 - quantity deve essere ≥ 0.
 - Always use the exact pizza name as it appears in the MENU.
-- If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items so the backend can validate it.
+- If the user explicitly requests a pizza name that is NOT in the MENU, you must STILL include that pizza in items, as "Personalizzata" (see PIZZA FUORI MENU below).
 - Never drop an explicitly requested pizza just because it is not present in the MENU.
-- If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request even if it is not in the MENU.
+- If the user says something like "vorrei una gustosa", "una diavola", "due capricciose", you must extract that pizza request.
 - If no pizza is clearly mentioned, return an empty items array.
 - REGOLA ASSOLUTA — MESSAGGIO CORRENTE ONLY: Analizza ESCLUSIVAMENTE l'ultimo messaggio dell'utente (l'ultimo turno). NON guardare i messaggi precedenti per estrarre pizze. Gli item già ordinati sono salvati dal backend — non riestrarre mai pizze dalla storia. Se l'ultimo messaggio non contiene nuove pizze (es. è un orario, un nome, una conferma, una risposta sì/no), restituisci items=[]. Esempi: "alle 20:30" → items=[], "Mario" → items=[], "sì" → items=[], "una capricciosa" → items=[Capricciosa].
 - pickup_time should be a simple string in 24h format like "20:30" when present. If the user says "prima possibile", "il prima possibile", "subito" or similar expressions meaning "as soon as possible", output "prima_possibile" as pickup_time. TIME RULE: this is an evening-only pizzeria (18:30-22:30). Hours 6-11 with no explicit AM/PM → ALWAYS add 12: "alle 7"→"19:00", "alle 8"→"20:00", "alle 8:30"→"20:30", "alle 9"→"21:00". Hours 12-22 → use as-is. Never output a time before 18:00 unless the customer explicitly says "di mattina".
@@ -2567,6 +2567,10 @@ Rules:
   * "una melanzane e gorgonzola" → pizza_name="Personalizzata", add_ingredients=["melanzane", "gorgonzola"]
   * "una pizza con würstel e patatine" → pizza_name="Personalizzata", add_ingredients=["würstel", "patatine"]
   * "una bianca con prosciutto" → pizza_name="Personalizzata", add_ingredients=["prosciutto"], remove_ingredients=["pomodoro"]
+- REGOLA PRIORITARIA, PIZZA FUORI MENU: dopo un numero o un articolo ("una", "un", "due", "2") una parola che non è nel MENU è il nome di una pizza, anche se non sembra una pizza (tonno, hot dog, hamburger). Non è mai un messaggio senza pizze: items NON è vuoto, pizza_name="Personalizzata", quantity è il numero detto, il nome va in add_ingredients. "senza X" va in remove_ingredients e non toglie il nome da add_ingredients: add_ingredients non resta mai vuoto.
+  * "una tonno senza cipolla" → pizza_name="Personalizzata", quantity=1, add_ingredients=["tonno"], remove_ingredients=["cipolla"]
+  * "tre hot dog senza senape" → pizza_name="Personalizzata", quantity=3, add_ingredients=["hot dog"], remove_ingredients=["senape"]
+  * "una hamburger e patatine senza pomodoro" → pizza_name="Personalizzata", quantity=1, add_ingredients=["hamburger", "patatine"], remove_ingredients=["pomodoro"]
 - If the user describes a pizza by ingredients without naming it, use pizza_name="Personalizzata" with the ingredients in add_ingredients.
 - If using "Personalizzata", still fill add_ingredients and remove_ingredients correctly. Never use "Pizza personalizzata" — always just "Personalizzata".
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"].
@@ -3035,6 +3039,36 @@ def _normalize_extracted_payload(payload: Any, dough_items: list[dict] | None = 
     }
 
 
+_OFF_MENU_COUNT = r"(?:una|un|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci|\d+)"
+_NOT_AN_OFF_MENU_NAME = {"pizza", "pizze", "bianca", "bianche", "rossa", "rosse", "margherita", "margherite"}
+
+
+def _off_menu_name_before_removal(message: str, remove_ingredients: list[str]) -> list[str]:
+    """Nome detto prima di "senza X" ("tre porchetta senza rucola" → ["porchetta"]), preso
+    dopo l'ultimo numero o articolo. Vuoto se la frase non ha questa forma."""
+    lowered = message.lower()
+    for removed in remove_ingredients:
+        match = re.search(
+            rf".*\b{_OFF_MENU_COUNT}\s+((?:(?!\b{_OFF_MENU_COUNT}\b).)+?)\s+senza\s+(?:il\s+|la\s+|lo\s+|le\s+|i\s+|gli\s+|l')?{re.escape(removed.lower())}\b",
+            lowered,
+        )
+        if match:
+            names = [name.strip() for name in re.split(r"\s+e\s+|,", match.group(1)) if name.strip()]
+            return [] if any(name in _NOT_AN_OFF_MENU_NAME for name in names) else names
+    return []
+
+
+def _restore_off_menu_names(items: list[dict], message: str) -> None:
+    """L'LLM a volte perde il nome di una pizza fuori menu quando c'è anche una rimozione
+    ("una speck senza origano" → nessuna aggiunta): si recupera dalla frase del cliente."""
+    for item in items:
+        if item.get("pizza_name") == "Personalizzata" and not item.get("add_ingredients") and item.get("remove_ingredients"):
+            names = _off_menu_name_before_removal(message, item["remove_ingredients"])
+            if names:
+                print(f"[LLM] Pizza fuori menu: nome recuperato dalla frase ({len(names)} aggiunte)")
+                item["add_ingredients"] = names
+
+
 def _apply_aliases(text: str) -> str:
     """Sostituisce gli alias fonetici nel testo (case-insensitive, parola intera)."""
     for alias, canonical in PIZZA_ALIASES.items():
@@ -3138,6 +3172,7 @@ def extract_order_from_text(
     parsed = _normalize_extracted_payload(parsed, dough_items)
     if parsed.get("_llm_fallback"):
         return parsed
+    _restore_off_menu_names(parsed["items"], normalized)
 
     # Normalizza dough_type → pizza_type per compatibilità con il DB locale
     for item in parsed["items"]:

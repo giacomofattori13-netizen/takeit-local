@@ -6,6 +6,7 @@ Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 
 Aggiornamento 2026-10-29: riepilogo giornaliero degli ordini al titolare e `owner_order_sms_enabled` (punto 6).
 Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle domande obbligatorie (punto 7). Corretto lo stesso giorno: dopo un "no" alla proposta l'ordine non viene mai salvato all'orario rifiutato; mattina/sera decise dagli orari del giorno.
 Aggiornamento 2026-11-03: a cucina chiusa ciò che il cliente ha già detto non si richiede, giorno di ritiro detto una volta, conferma al cliente via SMS e WhatsApp spento con il numero sandbox (punto 8).
+Aggiornamento 2026-11-03: giorno detto rispettato anche a cucina aperta, proposta per i giorni chiusi, pizze fuori menu dette "margherita con…", regressione delle regole d'ordine in `tests/test_order_rules_golden.py` e `docs/regole_ordine.md` (punto 9).
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -20,6 +21,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 | 6 | Riepilogo giornaliero | Codice pronto, spento su Base44 (`daily_summary_enabled` null) | Basso. Da provare con l'anteprima prima di attivarlo |
 | 7 | Orario non capito | **RISOLTO**: hints STT, parsing tollerante, escalation in tre passi e `needs_review` | Basso. Da verificare in una chiamata di prova che gli hints migliorino la trascrizione |
 | 8 | Informazioni ripetute a cucina chiusa | **RISOLTO**: prodotti, giorno, orario e nome si conservano, il giorno si dice una volta, conferma via SMS | Basso. Da verificare in una chiamata di prova dopo la chiusura |
+| 9 | Giorno detto, pizze fuori menu, regole d'ordine | **RISOLTO**: giorno rispettato sempre, proposta per i giorni chiusi, "margherita con…" a voce, regressione con LLM vero. Aperti: nome salvato su Base44, Margherita assente a PaP, alias "bondola" | Medio finché quei tre punti non sono decisi |
 
 ---
 
@@ -331,10 +333,58 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 
 **Valutazione live del 2026-11-03**: 10 casi su 11. Fallisce `remove_named_item` (quantità attesa 1, ottenuta 0), che fallisce allo stesso modo con il prompt precedente. La rimozione non usa quella quantità.
 
-**Ancora aperto**
+I due punti rimasti aperti qui (giorno detto a cucina aperta, pizza fuori menu) sono trattati al punto 9.
 
-- **Giorno detto mentre la cucina è aperta**: alle 16:00 "una margherita per domani alle 8" viene ancora trattata come ordine per stasera, e il riepilogo dice "per stasera". Il cliente può accorgersene solo dal riepilogo. Non fa parte di questa modifica.
-- **Pizza fuori menu**: `Personalizzata` usa il prezzo della Margherita, e nell'SMS appare come "Margherita + salamino". Il nome richiesto arriva in cucina, ma il prezzo può non essere corretto.
+## 9. Giorno detto, pizze fuori menu, regole d'ordine
+
+### Giorno detto
+
+**Prima**: alle 16:00 "una margherita per domani alle 8" veniva salvata per stasera. Il giorno detto contava solo a cucina chiusa.
+
+**Cosa cambia** (`_spoken_pickup_day`, `_apply_spoken_day` in `app/routes/chat.py`)
+
+1. **Il giorno detto vale sempre**: domani, dopodomani, un giorno della settimana, una data ("il 21 ottobre", "21/10"), stasera/oggi. Vale in ogni stato dell'ordine, anche alla domanda sul nome, a quella sull'orario e al riepilogo. "No, per domani" al riepilogo aggiorna il giorno, senza annullare l'ordine. "No, stasera" annulla un giorno detto prima.
+2. **Giorno chiuso**: "Domani siamo chiusi, il primo giorno disponibile è martedì, va bene?" (primo giorno aperto dopo quello chiesto). Stato `confirming_next_day`, con la proposta in `slot_attempts_json` (`next_day_proposal`). Il giorno non cambia finché il cliente non dice sì. L'orario detto nella stessa frase si conserva e si valuta sul giorno accettato. "No" chiude la chiamata senza salvare, come la domanda sul giorno dopo. Un altro giorno detto in risposta vale al posto della proposta, e se è chiuso riparte una nuova proposta.
+3. **Riepilogo**: nomina sempre il giorno. "Stasera" solo se il ritiro è oggi. Oltre la settimana dice anche la data ("mercoledì 21 ottobre"). Corretto anche il riepilogo delle pizze abituali, che diceva "per stasera" su un ordine per domani.
+4. **Casi particolari**: il giorno della settimana di oggi vale oggi finché restano orari, poi la settimana prossima. "Sono Domenica" è un nome. "8 2" non è una data. Un annullamento dimentica il giorno.
+5. **Non cambia per Pizza a Pezzi**: con `phone_orders_next_day_only` il ritiro resta il prossimo giorno di apertura, e un giorno detto dal cliente non viene usato. Il riepilogo dice comunque il giorno vero.
+
+### Pizze fuori menu: verifica della regola
+
+Regola: Margherita base, con il nome detto come aggiunta. Prezzo Margherita + €2,00 per aggiunta.
+
+| Controllo | Esito |
+|---|---|
+| Prezzo Margherita + €2,00 per aggiunta, per ogni pizza | **Già corretto**, nessuna modifica (`enrich_items_with_pricing`). A CdS: salamino €7,80, due salamino €15,60, melanzane e gorgonzola €9,80. Ora coperto da test |
+| SMS al cliente | **Già corretto**: "2x Margherita / + salamino" |
+| A voce | **Corretto**: "margherita con salamino", mai "pizza personalizzata". Lo stesso per una Margherita del menu con aggiunte, che prima diceva "una patatine" |
+| Estrazione | **Corretta** (vedi sotto) |
+| Nome salvato su Base44 | **Difforme, non modificato**: `pizza_name` resta "Personalizzata", quindi dashboard e riepilogo giornaliero non mostrano "Margherita". Le aggiunte e il prezzo ci sono |
+| Pizza a Pezzi | **Difforme, non modificato**: il menu di PaP non ha una Margherita, quindi la base vale €0: una pizza fuori menu costerebbe €2,00 e a voce sarebbe "margherita con…" in un locale che non la vende |
+
+### Estrazione
+
+I casi con l'LLM vero hanno trovato difetti che i test con estrazione simulata non potevano vedere:
+
+- **"Una wurstel senza pomodoro"**: il würstel spariva 5 volte su 5. Le altre frasi della stessa forma sbagliavano anch'esse ("due kebab senza cipolla" 4 su 5, a volte con carrello vuoto). Il prompt conteneva regole in conflitto: ora ha una regola prioritaria sulle pizze fuori menu.
+- **Nome perso con una rimozione**: anche col prompt nuovo capitava ("tre porchetta senza rucola"). `_restore_off_menu_names` lo recupera dalla frase del cliente, senza toccare le aggiunte già estratte.
+- **Nome restituito tale e quale** (`pizza_name: "Porchetta"`): ora diventa Margherita + porchetta. Un refuso di una voce del menu mantiene "Forse intendevi…", e una voce esaurita viene rifiutata.
+- **Suggerimenti tra locali**: i suggerimenti per i refusi guardavano i menu di tutti i locali, quindi a CdS "Porchetta" sarebbe sembrato un refuso. Ora guardano solo il menu del locale.
+
+### Regressione delle regole d'ordine
+
+- **`tests/test_order_rules_golden.py`**: frasi reali con prodotti, quantità, aggiunte, rimozioni, impasto, giorno, orario e nome attesi, sul menu reale di CdS (`tests/fixtures/cds_menu.json`). Senza rete girano con l'estrazione registrata. Con `--run-llm` i casi marcati `llm_live` chiamano l'LLM vero 5 volte ciascuno, e una sola run sbagliata fa fallire il caso. I test con LLM vero possono raggiungere solo `api.openai.com`.
+- **`docs/regole_ordine.md`**: tutte le regole trovate, una riga per regola, con il test che la copre. Un test automatico fallisce se il documento cita un test inesistente o se un caso golden non è citato. Il documento elenca anche le regole non coperte e i difetti noti.
+- **Esito del 2026-11-03**: 41 casi su 41, 5 run ciascuno, 205 run senza errori.
+- **Test che dipendeva dall'orologio**: `test_full_cds_order_by_piece_without_pickup_date_and_nonzero_price` falliva dopo le 23:30 anche prima di questa modifica. Ora non dipende dall'ora.
+
+### Ancora aperto
+
+- **Alias "bondola"**: a CdS "una bondola" (€11,00) diventa Margherita + mortadella (€7,80), per l'alias "bondola" → "mortadella" in `PIZZA_ALIASES`. Verificato con l'LLM vero, 4 volte su 4. Esisteva già. **Da decidere**.
+- **`pizza_name` su Base44**: da decidere se salvare "Margherita" invece di "Personalizzata".
+- **Pizza fuori menu a PaP**: da decidere prima della riattivazione.
+- **"No" alla proposta di un giorno**: chiude la chiamata anche a cucina aperta, quando il cliente potrebbe volere stasera.
+- **Altre regole non coperte**: l'elenco è in `docs/regole_ordine.md`.
 
 ---
 
@@ -357,3 +407,7 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 - [x] A cucina chiusa niente domande ripetute, giorno detto una volta, conferma via SMS (punto 8)
 - [ ] Chiamata di prova dopo la chiusura: "due margherite per domani alle 8" deve portare a nome e riepilogo, senza "vuole ordinare per domani?" (punto 8)
 - [ ] Verificare che gli SMS al titolare arrivino ora che WhatsApp è spento con il numero sandbox (punto 8)
+- [x] Giorno detto rispettato anche a cucina aperta, proposta per i giorni chiusi (punto 9)
+- [ ] Chiamata di prova a cucina aperta: "una margherita per domani alle 8" deve portare al riepilogo "per domani" (punto 9)
+- [ ] Decidere il prezzo e il nome delle pizze fuori menu per PaP, che non ha una Margherita (punto 9)
+- [ ] Decidere l'alias "bondola", che a CdS cambia la pizza ordinata (punto 9)

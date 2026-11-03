@@ -1,0 +1,176 @@
+# Regole d'ordine
+
+Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, con il test che la copre. Aggiornato il 2026-11-03.
+
+- **Fonti**: `chat.py` è `app/routes/chat.py`, `service` è `app/services/conversation_service.py`, `prompt` è il prompt di estrazione in `service`.
+- **Casi golden**: ``caso `x` `` è un caso di `CASES` in `tests/test_order_rules_golden.py`. Gira con l'estrazione registrata in `test_golden_with_recorded_extraction` e con l'LLM vero, 5 run per caso, in `test_golden_with_real_llm`. Una sola run sbagliata fa fallire il caso.
+- **Comandi**: `pytest tests` senza rete; `pytest tests/test_order_rules_golden.py --run-llm -k real_llm` con l'LLM vero (circa 5 minuti).
+- **Controllo**: `test_rules_document_only_cites_tests_that_exist` fallisce se questo documento cita un test che non esiste, e `test_rules_document_cites_every_golden_case` se un caso golden non è citato qui.
+- **NON COPERTA**: nessun test verifica la regola. Sono elencate in fondo.
+
+## Pizze fuori menu
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Una pizza fuori menu è una Margherita base con il nome detto come aggiunta | prompt | caso `melanzane_gorgonzola` |
+| Anche se non sembra una pizza, con quantità, giorno e orario | prompt | caso `salamino_domani_alle_8` |
+| Più parole dette sono più aggiunte, nell'ordine | prompt | caso `melanzane_salamino_gorgonzola` |
+| "senza X" va nelle rimozioni e non toglie il nome dalle aggiunte | prompt | casi `wurstel_senza_pomodoro`, `salamino_senza_mozzarella`, `due_kebab_senza_cipolla`, `salamino_e_rucola_senza_pomodoro`, `speck_senza_origano` |
+| Nome perso dall'LLM con una rimozione: si recupera dalla frase | service `_restore_off_menu_names` | `tests/test_order_rules_golden.py::test_off_menu_name_lost_by_the_llm_is_recovered_from_the_sentence`, caso `porchetta_senza_rucola` |
+| Le aggiunte dette dall'LLM non si sovrascrivono | service | `tests/test_order_rules_golden.py::test_additions_said_by_the_llm_are_never_overwritten` |
+| Nome fuori menu restituito dall'LLM: diventa Margherita + nome | chat.py | `tests/test_order_rules_golden.py::test_off_menu_name_returned_by_the_llm_becomes_margherita_with_the_addition` |
+| Nome venduto solo da un altro locale: per questo locale è fuori menu | chat.py | `tests/test_order_rules_golden.py::test_item_sold_only_by_another_restaurant_is_off_menu_here` |
+| Nome simile a una voce del menu (refuso, soglia 0,82): "Forse intendevi…" | chat.py | `tests/test_order_rules_golden.py::test_typo_of_a_menu_item_keeps_the_suggestion` |
+| Voce esaurita: si rifiuta, non diventa una Margherita | chat.py | `tests/test_order_rules_golden.py::test_sold_out_menu_item_is_refused_and_not_turned_into_a_margherita` |
+| A voce "margherita con X", mai "pizza personalizzata" | chat.py `format_single_item_for_customer` | `tests/test_order_rules_golden.py::test_off_menu_pizza_is_spoken_as_margherita`, `tests/test_order_rules_golden.py::test_recap_of_the_real_call_never_says_personalizzata` |
+| Margherita senza pomodoro: a voce "bianca" | chat.py | `tests/test_order_rules_golden.py::test_off_menu_pizza_is_spoken_as_margherita`, caso `bianca_con_prosciutto` |
+| Nell'SMS al cliente: "Margherita" con le aggiunte a parte | service `_build_pizza_lines` | `tests/test_order_rules_golden.py::test_customer_sms_shows_margherita_plus_the_addition` |
+
+## Prezzi
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Fuori menu: prezzo Margherita + €2,00 per ogni aggiunta, per ogni pizza | chat.py `enrich_items_with_pricing` | `tests/test_order_rules_golden.py::test_off_menu_price_is_margherita_plus_two_euro_per_addition` |
+| L'ordine salvato porta base, extra e totale | chat.py | `tests/test_order_rules_golden.py::test_off_menu_order_is_saved_with_the_addition_and_the_price` |
+| Aggiunta su una pizza del menu: +€2,00; supplemento impasto; regole condivise | chat.py, service | `tests/test_chat_logic.py::test_enrich_items_with_pricing_uses_shared_rules` |
+| Prezzi sempre del menu del locale della chiamata | chat.py | `tests/test_restaurant_pricing.py::test_cds_items_use_cds_prices_even_when_name_exists_at_pap`, `tests/test_restaurant_pricing.py::test_item_of_other_restaurant_is_not_priced` |
+| Al taglio a peso: tariffa al kg calda o fredda per il peso | chat.py | `tests/test_restaurant_pricing.py::test_full_pap_order_by_weight_cold_and_hot_for_tomorrow` |
+| Al taglio a tranci: totale vuoto, si pesa al ritiro | chat.py | `tests/test_next_day_preorder_flow.py::test_call_in_slices_asks_only_what_is_missing_and_recap_matches_saved_order` |
+| Domanda sul prezzo al taglio: tariffe al kg e ripete la domanda aperta | chat.py, prompt | `tests/test_next_day_preorder_flow.py::test_price_question_gives_kg_prices_and_repeats_the_open_question` |
+
+## Prodotti, aggiunte e rimozioni
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Quantità detta con la pizza; quantità intere senza decimali | prompt, service | caso `impasto_per_tutte`, `tests/test_next_day_known_info.py::test_whole_quantity_becomes_int_and_weight_stays_decimal` |
+| "con X" è un'aggiunta, mai parte del nome | prompt | caso `capricciosa_con_rucola` |
+| "senza X" è una rimozione | prompt | caso `capricciosa_senza_olive` |
+| Aggiunte e rimozioni nella stessa frase | prompt | caso `aggiunta_e_rimozione` |
+| Alias fonetici ("wurstel" → "würstel", "verde" → "gorgonzola") | service `PIZZA_ALIASES` | caso `alias_verde_gorgonzola`, caso `wurstel_senza_pomodoro`, `tests/test_extraction_validation.py::test_extract_order_masks_alias_and_item_logs` |
+| Stessa pizza e stesso impasto: si sommano le quantità | chat.py | `tests/test_chat_logic.py::test_merge_same_item_accumulates_quantity` |
+| Misura diversa: voci separate | chat.py | `tests/test_chat_logic.py::test_merge_different_size_keeps_separate_items` |
+| Si estrae solo dall'ultimo messaggio | prompt | caso `per_le_8` (il carrello resta invariato) |
+| Quantità dichiarata ("2 pizze"): si raccoglie fino a quel numero | chat.py `determine_state` | `tests/test_chat_logic.py::test_determine_state_waits_for_declared_quantity` |
+| Cliente abituale e "2 pizze": "Le preparo le solite?", giorno e orario restano | chat.py | `tests/test_next_day_known_info.py::test_day_and_time_survive_the_usual_question`, `tests/test_order_rules_golden.py::test_usual_order_recap_names_the_day` |
+
+## Impasto e misura
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Impasto detto con la pizza; senza, "classica" | prompt | caso `margherita_integrale` |
+| L'impasto vale solo per la sua pizza | prompt | caso `impasto_solo_alla_sua_pizza` |
+| "Tutte napoletane" vale per tutte le pizze della frase | prompt | caso `impasto_per_tutte` |
+| Impasto non valido: "classica" | service | `tests/test_extraction_validation.py::test_invalid_dough_falls_back_to_classica` |
+| "Mini": −€1,50 sulla base | prompt, chat.py | caso `margherita_mini`, `tests/test_chat_logic.py::test_enrich_items_with_pricing_uses_shared_rules` |
+| "Doppio impasto": +€2,00 | prompt, chat.py | caso `capricciosa_doppio_impasto`, caso `doppia_pasta_e_impasto` |
+
+## Carrello
+
+| Regola | Fonte | Test |
+|---|---|---|
+| "Togli la X": rimuove quella pizza | prompt, chat.py | caso `togli_una_pizza` |
+| "Togli l'ultima": rimuove l'ultima | prompt, chat.py | caso `togli_l_ultima` |
+| Rimozione con quantità residua: restano le modifiche | chat.py | `tests/test_chat_logic.py::test_remove_items_preserves_modifiers_when_quantity_remains` |
+| "Fai X invece": sostituisce | prompt, chat.py | caso `sostituisci` |
+| "Cancella tutto": svuota il carrello, nome e orario restano | prompt, chat.py | caso `cancella_tutto` |
+| "Annulla l'ordine": azzera anche nome, orario e giorno | prompt, chat.py | caso `annulla_ordine`, `tests/test_order_rules_golden.py::test_cancel_forgets_the_day` |
+
+## Giorno di ritiro
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Un giorno detto vale anche a cucina aperta | chat.py `_apply_spoken_day` | caso `per_domani_a_cucina_aperta`, caso `margherita_domani_alle_8`, `tests/test_order_rules_golden.py::test_tomorrow_with_open_kitchen_is_saved_for_tomorrow_and_the_recap_says_so` |
+| Vale per domani, dopodomani, giorno della settimana, data | chat.py `_spoken_pickup_day` | caso `giorno_della_settimana`, caso `data`, `tests/test_next_day_known_info.py::test_day_after_tomorrow_is_not_tomorrow` |
+| "Stasera" vale oggi; annulla un giorno detto prima | chat.py | caso `stasera_alle_8`, `tests/test_order_rules_golden.py::test_tonight_at_the_recap_cancels_a_day_said_earlier` |
+| Data già passata: l'anno prossimo; "8 2" non è una data | chat.py | `tests/test_order_rules_golden.py::test_past_date_means_next_year` |
+| Giorno della settimana di oggi: oggi finché restano orari | chat.py | `tests/test_order_rules_golden.py::test_today_weekday_means_today_while_slots_are_left` |
+| Giorno della settimana di oggi a cucina chiusa: settimana prossima | chat.py | `tests/test_order_rules_golden.py::test_today_weekday_means_next_week_when_the_kitchen_is_closed` |
+| Giorno detto alla domanda sull'orario: vale, e non conta come risposta mancata | chat.py | `tests/test_order_rules_golden.py::test_day_at_the_pickup_time_question_is_respected`, `tests/test_order_rules_golden.py::test_day_alone_at_the_pickup_time_question_is_not_a_failure` |
+| Giorno detto alla domanda sul nome: vale, e non è un nome | chat.py | `tests/test_order_rules_golden.py::test_day_at_the_name_question_is_not_a_name` |
+| "Domenica" come nome non è un giorno | chat.py | `tests/test_order_rules_golden.py::test_weekday_used_as_a_name_is_not_a_day`, `tests/test_order_rules_golden.py::test_weekday_as_a_name_inside_an_order_is_not_a_day` |
+| Correzione al riepilogo ("no, per domani"): aggiorna, non conferma né annulla | chat.py | `tests/test_order_rules_golden.py::test_day_change_at_the_recap_updates_without_confirming_or_cancelling` |
+| Giorno chiuso: "<giorno> siamo chiusi, il primo giorno disponibile è <giorno>, va bene?" | chat.py `_closed_day_question` | caso `domani_chiuso_propone_martedi`, `tests/test_order_rules_golden.py::test_closed_named_weekday_proposes_the_next_open_day` |
+| Giorno chiuso: si attende sì/no, poi vale il giorno proposto | chat.py | `tests/test_order_rules_golden.py::test_closed_tomorrow_on_sunday_proposes_tuesday_and_waits` |
+| "No" alla proposta: chiusura senza salvare | chat.py | `tests/test_order_rules_golden.py::test_closed_day_refused_closes_the_call_without_saving` |
+| Risposta alla proposta con un altro giorno aperto: vale quello | chat.py | `tests/test_order_rules_golden.py::test_answer_with_another_day_wins_over_the_proposal` |
+| Risposta con un altro giorno chiuso: nuova proposta | chat.py | `tests/test_order_rules_golden.py::test_answer_with_another_closed_day_gets_a_new_proposal` |
+| "Stasera" come risposta alla proposta: resta oggi | chat.py | `tests/test_order_rules_golden.py::test_tonight_as_answer_to_the_proposal_keeps_today` |
+| Le prenotazioni non toccano il giorno di ritiro | chat.py | `tests/test_order_rules_golden.py::test_reservation_for_tomorrow_does_not_touch_the_pickup_day` |
+| Cucina chiusa e giorno detto: niente domanda, "segno per domani <giorno>" | chat.py | caso `domani_a_cucina_chiusa`, `tests/test_next_day_known_info.py::test_replay_of_the_real_call` |
+| Cucina chiusa senza giorno: "vuole ordinare per domani?", i dati restano | chat.py | `tests/test_next_day_known_info.py::test_time_and_products_survive_the_question`, `tests/test_next_day_known_info.py::test_name_survives_the_question` |
+| Risposta alla domanda con prodotti e orario: si estrae anche il resto | chat.py | `tests/test_next_day_known_info.py::test_answer_with_products_and_time_is_extracted` |
+| Preordine fisso (PaP): sempre il prossimo giorno di apertura | chat.py `phone_orders_next_day_only` | `tests/test_next_day_preorder_flow.py::test_call_in_slices_asks_only_what_is_missing_and_recap_matches_saved_order`, `tests/test_chat_logic.py::test_persist_order_sets_pickup_date_tomorrow` |
+| Preordine fisso: "per stasera" rimanda in negozio | chat.py | `tests/test_next_day_preorder_flow.py::test_request_for_tonight_is_redirected_to_the_shop` |
+| Prossimo giorno di apertura: salta i giorni chiusi | service `get_next_open_day` | `tests/test_chat_logic.py::test_get_next_open_day_skips_closed_days` |
+| "Il ritiro è per <giorno>" una volta per chiamata | chat.py `_day_said_for` | `tests/test_next_day_preorder_flow.py::test_pickup_day_is_said_once_per_call`, `tests/test_next_day_known_info.py::test_bare_yes_with_empty_cart_asks_for_products` |
+
+## Orario di ritiro
+
+| Regola | Fonte | Test |
+|---|---|---|
+| "Alle 7" → 19:00, "per le 8" → 20:00, "alle 9" → 21:00 | prompt, chat.py | casi `alle_7`, `per_le_8`, `alle_9`, `alle_7_alla_domanda_sull_orario`, `per_le_8_alla_domanda_sull_orario` |
+| Orario con i minuti | prompt | caso `orario_con_minuti` |
+| "Prima possibile": primo orario di oggi | prompt, service | caso `prima_possibile` |
+| "Domani il prima possibile": apertura di quel giorno | chat.py | `tests/test_next_day_known_info.py::test_as_soon_as_possible_tomorrow_is_the_opening_time` |
+| Un giorno da solo non è un orario | prompt, chat.py | caso `per_domani_a_cucina_aperta`, `tests/test_next_day_known_info.py::test_only_tomorrow_skips_the_question` |
+| Ore 1-11: vale l'ora negli orari del giorno, altrimenti +12 | chat.py `_choose_pickup_hour` | `tests/test_pickup_time_escalation.py::test_evening_opening_alle_otto_is_20`, `tests/test_pickup_time_escalation.py::test_lunch_opening_alle_undici_is_11` |
+| Vanno bene mattina e sera: si chiede | chat.py | `tests/test_pickup_time_escalation.py::test_all_day_opening_asks_morning_or_evening` |
+| "Di mattina"/"di sera" detto: non si chiede | chat.py | `tests/test_pickup_time_escalation.py::test_explicit_day_part_is_not_asked` |
+| Parsing tollerante e storpiature di "otto" | chat.py `_extract_local_pickup_time` | `tests/test_pickup_time_escalation.py::test_spoken_times`, `tests/test_pickup_time_escalation.py::test_stt_distortions_of_otto` |
+| Orario prima dell'apertura o troppo vicino: rifiutato col primo disponibile | service `validate_pickup_time` | `tests/test_opening_hours_flow.py::test_time_before_opening_is_refused_with_first_pickup`, `tests/test_opening_hours_flow.py::test_pickup_closer_than_prep_time_is_refused` |
+| Orario fuori apertura per quel giorno: rifiutato, il giorno resta | chat.py | `tests/test_next_day_known_info.py::test_time_outside_the_hours_of_that_day_is_refused_but_the_day_stays`, `tests/test_next_day_preorder_flow.py::test_pickup_time_after_closing_is_refused_with_that_days_hours` |
+| Orario non capito: frase d'esempio, proposta, poi primo orario con needs_review | chat.py `_pickup_time_miss` | `tests/test_pickup_time_escalation.py::test_hotpoint_gets_the_first_escalation_message`, `tests/test_pickup_time_escalation.py::test_three_failures_save_the_order_at_the_first_slot_with_needs_review` |
+| "No" alla proposta di orario: mai l'orario rifiutato | chat.py | `tests/test_pickup_time_escalation.py::test_no_to_the_proposal_then_a_valid_time_is_used` |
+| Mai la stessa risposta due volte di fila | chat.py | `tests/test_pickup_time_escalation.py::test_never_the_same_answer_twice_in_a_row` |
+
+## Nome
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Nome detto da solo o nella frase | prompt | caso `solo_il_nome`, caso `nome_nella_frase` |
+| Risposta locale: accetta solo un nome puro | chat.py `_extract_local_customer_name` | `tests/test_chat_logic.py::test_local_customer_name_accepts_plain_name_only`, `tests/test_chat_logic.py::test_local_customer_name_rejects_order_fragments` |
+| Parole d'ordine non sono un nome | service | `tests/test_chat_logic.py::test_normalize_extracted_payload_rejects_order_vocab_customer_name` |
+| Nome non capito: nuova richiesta, proposta, poi ordine da verificare | chat.py `_name_miss` | `tests/test_pickup_time_escalation.py::test_second_failure_proposes_what_was_heard`, `tests/test_pickup_time_escalation.py::test_three_failures_continue_without_name_and_need_review` |
+
+## Pizza al taglio (voci al kg)
+
+| Regola | Fonte | Test |
+|---|---|---|
+| A peso: la porzione non si chiede | prompt, chat.py | `tests/test_next_day_preorder_flow.py::test_weight_order_skips_the_portion_question` |
+| A tranci: si chiedono quantità, porzione e caldo/freddo | prompt, chat.py | `tests/test_next_day_preorder_flow.py::test_slices_without_portion_ask_portion_and_temperature_together` |
+| Più campi in una risposta: si applicano tutti | chat.py | `tests/test_next_day_preorder_flow.py::test_quantity_portion_and_temperature_in_one_answer` |
+| Sinonimi di porzione e di temperatura | chat.py | `tests/test_next_day_preorder_flow.py::test_portion_synonyms`, `tests/test_next_day_preorder_flow.py::test_temperature_synonyms` |
+| Temperatura e porzione mai predefinite | chat.py | `tests/test_next_day_preorder_flow.py::test_skipped_temperature_is_asked_again_never_defaulted`, `tests/test_next_day_preorder_flow.py::test_unrecognised_portion_three_times_saves_without_default_and_needs_review` |
+| Quantità non capita due volte: ordine da verificare | chat.py | `tests/test_next_day_preorder_flow.py::test_unrecognised_quantity_twice_saves_without_default_and_needs_review` |
+| Il prodotto si nomina solo con più voci al taglio | chat.py | `tests/test_next_day_preorder_flow.py::test_product_is_named_only_with_more_than_one_slice_item` |
+
+## Riepilogo e conferma
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Il riepilogo nomina sempre il giorno; "stasera" solo se il ritiro è oggi | chat.py `build_confirmation_recap` | `tests/test_order_rules_golden.py::test_tonight_recap_says_tonight_and_nothing_else`, `tests/test_order_rules_golden.py::test_tomorrow_with_open_kitchen_is_saved_for_tomorrow_and_the_recap_says_so` |
+| Oltre la settimana il riepilogo dice anche la data | chat.py `pickup_day_phrase` | `tests/test_order_rules_golden.py::test_far_date_recap_names_the_date` |
+| Si conferma solo dopo il riepilogo | chat.py | `tests/test_next_day_preorder_flow.py::test_call_in_slices_asks_only_what_is_missing_and_recap_matches_saved_order` |
+| Conferma al cellulare: "Le arriva un SMS di conferma" | chat.py | `tests/test_next_day_known_info.py::test_mobile_is_told_about_the_sms` |
+| Conferma al fisso: nessun messaggio promesso | chat.py | `tests/test_next_day_known_info.py::test_landline_is_not_promised_a_message` |
+| WhatsApp spento con il numero sandbox | service `whatsapp_sender` | `tests/test_next_day_known_info.py::test_customer_confirmation_never_tries_the_sandbox`, `tests/test_next_day_known_info.py::test_owner_alert_goes_by_sms_with_the_sandbox` |
+| Un ordine si salva una sola volta per conversazione | chat.py | `tests/test_chat_logic.py::test_persist_order_once_is_idempotent_per_conversation` |
+
+## Difetti noti
+
+| Difetto | Fonte | Effetto |
+|---|---|---|
+| L'alias "bondola" → "mortadella" vale anche dove Bondola è una pizza del menu | service `PIZZA_ALIASES` | A CdS "una bondola" (€11,00) diventa Margherita + mortadella (€7,80). Verificato con l'LLM vero: 4 volte su 4. Da decidere, non corretto |
+
+## NON COPERTE
+
+Regole presenti nel prompt o nel codice che nessun test verifica. L'elenco serve a decidere se aggiungere i test.
+
+| Regola | Fonte | Motivo |
+|---|---|---|
+| "Senza glutine" usa la voce "(SG)" del menu | prompt | Il menu di CdS non ha voci "(SG)": serve un menu di prova che le abbia |
+| Mai proporre una voce "(SG)" come alternativa a un impasto | prompt | Come sopra |
+| "Rossa": nessuna aggiunta automatica | prompt | NON COPERTA |
+| Temperatura: "da asporto" significa "fredda" per le voci al kg | prompt | NON COPERTA. Da rivedere: nelle frasi di CdS "da asporto" è solo il modo di ritiro |
+| Domande sugli impasti e i loro prezzi: risposta dalla lista | prompt | NON COPERTA. `extract_order_from_text` restituisce solo JSON, quindi la regola potrebbe non avere effetto |
+| Segnale "ho finito" (`is_done_signal`) | chat.py | La funzione non è chiamata da nessuna parte |
