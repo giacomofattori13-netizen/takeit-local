@@ -177,7 +177,7 @@ class OwnerAlertTests(unittest.TestCase):
         "OWNER_PHONE": "+393339990000",
         "TWILIO_ACCOUNT_SID": "AC-test",
         "TWILIO_AUTH_TOKEN": "tok",
-        "TWILIO_WHATSAPP_FROM": "whatsapp:+14155238886",
+        "TWILIO_WHATSAPP_FROM": "whatsapp:+393330001111",
         "TWILIO_NUMBER": "+16067334996",
     }
 
@@ -198,7 +198,7 @@ class OwnerAlertTests(unittest.TestCase):
             status = conversation_service.send_owner_alert("avviso")
 
         self.assertEqual(status, "wa_inviato:201")
-        self.assertEqual(self.sent, [("whatsapp:+393339990000", "whatsapp:+14155238886")])
+        self.assertEqual(self.sent, [("whatsapp:+393339990000", "whatsapp:+393330001111")])
 
     def test_falls_back_to_sms_when_whatsapp_is_refused(self):
         with patch.object(

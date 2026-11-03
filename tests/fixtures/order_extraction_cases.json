@@ -165,5 +165,9 @@
       "intent": "clear_cart",
       "items": []
     }
-  }
+  },
+  {"id": "off_menu_pizza_with_day_and_time", "state": "collecting_items", "message": "Ciao, posso ordinarti 2 kebab da asporto per domani alle 8.", "existing_items": [], "customer_name": null, "expected": {"intent": "add_items", "pickup_time": "20:00", "items": [{"pizza_name": "Personalizzata", "quantity": 2, "add_ingredients": ["kebab"]}]}},
+  {"id": "menu_pizza_with_day_and_time", "state": "collecting_items", "message": "due margherite per venerdì alle 8, sono Marco", "existing_items": [], "customer_name": null, "expected": {"intent": "add_items", "pickup_time": "20:00", "customer_name": "Marco", "items": [{"pizza_name": "Margherita", "quantity": 2}]}},
+  {"id": "yes_with_pizza_and_time", "state": "collecting_items", "message": "sì, due margherite alle 8", "existing_items": [], "customer_name": null, "expected": {"intent": "add_items", "pickup_time": "20:00", "items": [{"pizza_name": "Margherita", "quantity": 2}]}},
+  {"id": "day_alone_is_not_a_time", "state": "collecting_items", "message": "vorrei ordinare per domani", "existing_items": [], "customer_name": null, "expected": {"intent": "unknown", "pickup_time": null, "items": []}}
 ]

@@ -718,6 +718,19 @@ def _send_sms(
         return f"sms_errore:{type(e).__name__}"
 
 
+# Numero sandbox di Twilio: recapita solo a chi ha fatto "join", quindi per i clienti
+# e per i titolari non è un canale reale. Con questo mittente WhatsApp resta spento.
+TWILIO_WHATSAPP_SANDBOX_NUMBER = "+14155238886"
+
+
+def whatsapp_sender() -> str | None:
+    """Mittente WhatsApp utilizzabile (senza prefisso): None se assente o se è il sandbox."""
+    sender = (os.getenv("TWILIO_WHATSAPP_FROM") or "").strip().removeprefix("whatsapp:").strip()
+    if not sender or sender == TWILIO_WHATSAPP_SANDBOX_NUMBER:
+        return None
+    return sender
+
+
 def _send_whatsapp(
     phone: str,
     pickup_time: str,
@@ -780,7 +793,7 @@ def send_whatsapp_confirmation(
     Restituisce una stringa di stato con i risultati dei canali usati."""
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    wa_from_number = os.getenv("TWILIO_WHATSAPP_FROM")
+    wa_from_number = whatsapp_sender()
 
     print(f"[Conferma] === INIZIO INVIO CONFERMA ORDINE ===")
     print(f"[Conferma] customer_name={mask_name(customer_name)} customer_phone={mask_phone(customer_phone)}")
@@ -904,7 +917,7 @@ def owner_phone_for_restaurant(restaurant: dict, restaurant_id: str = "") -> str
 
 def send_owner_alert(body: str, restaurant_id: str = "") -> str:
     """Avvisa il titolare del locale (owner_notify_phone, ripiego OWNER_PHONE):
-    WhatsApp, e SMS se WhatsApp non parte.
+    WhatsApp, e SMS se WhatsApp non parte. Con il numero sandbox solo SMS.
 
     WhatsApp accetta testo libero solo entro 24 ore dall'ultimo messaggio del
     titolare: fuori da quella finestra Twilio rifiuta l'invio e si passa all'SMS.
@@ -917,7 +930,7 @@ def send_owner_alert(body: str, restaurant_id: str = "") -> str:
         return "skip:configurazione_mancante"
 
     statuses = []
-    wa_from = (os.getenv("TWILIO_WHATSAPP_FROM") or "").removeprefix("whatsapp:")
+    wa_from = whatsapp_sender()
     if wa_from:
         wa_status = _send_twilio_message(
             f"whatsapp:{owner_phone}", body, f"whatsapp:{wa_from}", account_sid, auth_token,
@@ -2591,6 +2604,11 @@ Intent rules:
 - Use "add_items" when the user is adding pizzas.
 - Use "set_customer_name" when the user is mainly providing the customer name.
 - Use "set_pickup_time" when the user is mainly providing the pickup time.
+- A message that names a pizza AND gives a time or a day is ALWAYS "add_items": fill items AND pickup_time, even when the pizza is not in the MENU (use "Personalizzata" as above). Never return items=[] because a time or a day is present.
+  * "2 salamino da asporto per domani alle 8" with salamino not in the MENU → intent="add_items", pizza_name="Personalizzata", quantity=2, add_ingredients=["salamino"], pickup_time="20:00"
+  * "due margherite per venerdì alle 8" → intent="add_items", Margherita quantity=2, pickup_time="20:00"
+  * "sì, due margherite alle 8" → intent="add_items", Margherita quantity=2, pickup_time="20:00"
+- A day alone ("domani", "per venerdì") is not a time: pickup_time=null. Use "prima_possibile" only when the customer really asks for as soon as possible.
 - Use "modify_items" when the user is clearly correcting previously mentioned pizzas but the action is ambiguous.
 - Use "remove_items" when the user wants to remove one or more specific pizzas already present in the order (togliete, rimuovi, non voglio più, cancella la ...).
 - Use "replace_items" when the user wants to replace previous pizzas with new ones.
@@ -3004,6 +3022,9 @@ def _normalize_extracted_payload(payload: Any, dough_items: list[dict] | None = 
             data["dough_type"] = "classica"
         if data["size"] not in _ALLOWED_SIZES:
             data["size"] = "normale"
+        # 2.0 → 2: il riepilogo e l'SMS non devono dire "2.0 margherite"; 0.5 kg resta così
+        if float(data["quantity"]).is_integer():
+            data["quantity"] = int(data["quantity"])
         items.append(data)
 
     return {

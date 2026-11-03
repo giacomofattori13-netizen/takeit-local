@@ -7,6 +7,7 @@ Caso reale: CallLog 6ae3803d9a8552f9999f8609, "per le otto" trascritto
 import asyncio
 import contextlib
 import io
+import json
 import os
 import types
 import unittest
@@ -154,7 +155,7 @@ class PickupTimeEscalationTests(_AtPickupTime):
         self.say("Per le hotpoint.")
         r = self.say("alle otto")
         self.assertEqual(r.state, "awaiting_confirmation")
-        self.assertEqual(self.conversation().slot_attempts_json, "{}")
+        self.assertNotIn("pickup_time", json.loads(self.conversation().slot_attempts_json))
 
     def test_never_the_same_answer_twice_in_a_row(self):
         responses = [self.entry.response_message]

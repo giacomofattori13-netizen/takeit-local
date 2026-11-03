@@ -178,7 +178,7 @@ class PreorderFlowTests(_FlowHarness):
 
         r = self.say("sì")
         self.assertEqual(r.state, "completed")
-        self.assertEqual(r.response_message, "Perfetto, Giacomo! Le arriverà la conferma su WhatsApp.")
+        self.assertEqual(r.response_message, "Perfetto, Giacomo! Le arriva un SMS di conferma.")
         saved = self.saved[0]
         self.assertEqual(saved["pickup_date"], TUESDAY.isoformat())
         self.assertEqual(saved["pickup_time"], "20:00")
@@ -387,6 +387,14 @@ class PreorderFlowTests(_FlowHarness):
         self.assertIn("per stasera può passare direttamente in negozio", r.response_message)
         self.assertIn("il ritiro è per martedì", r.response_message)
         self.assertEqual(self.conversation().items_json, "[]")
+
+    def test_pickup_day_is_said_once_per_call(self):
+        self.order_up_to_name()
+        r = self.say("Giacomo")
+        self.assertIn("il ritiro è per martedì", r.response_message)
+        r = self.say("stasera alle 8")
+        self.assertNotIn("il ritiro è per", r.response_message.lower())
+        self.assertIn("Vuole ordinare per martedì?", r.response_message)
 
     def test_request_for_tonight_at_pickup_time_question_is_not_taken_as_tomorrow(self):
         self.order_up_to_name()

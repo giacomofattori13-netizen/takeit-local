@@ -5,6 +5,7 @@ Aggiornamento 2026-10-26: notifiche e SMS resi per locale (punto 4, buchi 2, 5 e
 Aggiornamento 2026-10-29: percorso di SQLite configurabile con `DB_PATH` (punto 1). **In corso, manca il Volume su Railway.**
 Aggiornamento 2026-10-29: riepilogo giornaliero degli ordini al titolare e `owner_order_sms_enabled` (punto 6).
 Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle domande obbligatorie (punto 7). Corretto lo stesso giorno: dopo un "no" alla proposta l'ordine non viene mai salvato all'orario rifiutato; mattina/sera decise dagli orari del giorno.
+Aggiornamento 2026-11-03: a cucina chiusa ciò che il cliente ha già detto non si richiede, giorno di ritiro detto una volta, conferma al cliente via SMS e WhatsApp spento con il numero sandbox (punto 8).
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -18,6 +19,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 | 5 | Notifiche a Fabio | **RISOLTO**: SMS a `Restaurant.owner_notify_phone` a ogni nuovo ordine e per gli ordini non salvati, `OWNER_PHONE` solo come ripiego | Basso, se `owner_notify_phone` è compilato. Restano aperti i comandi SMS (un solo `OWNER_PHONE`) |
 | 6 | Riepilogo giornaliero | Codice pronto, spento su Base44 (`daily_summary_enabled` null) | Basso. Da provare con l'anteprima prima di attivarlo |
 | 7 | Orario non capito | **RISOLTO**: hints STT, parsing tollerante, escalation in tre passi e `needs_review` | Basso. Da verificare in una chiamata di prova che gli hints migliorino la trascrizione |
+| 8 | Informazioni ripetute a cucina chiusa | **RISOLTO**: prodotti, giorno, orario e nome si conservano, il giorno si dice una volta, conferma via SMS | Basso. Da verificare in una chiamata di prova dopo la chiusura |
 
 ---
 
@@ -211,6 +213,7 @@ Lo stato successivo è deciso da `determine_state` (`app/routes/chat.py:1639-167
 - **Da fare su Base44**: compilare `owner_notify_phone` (in formato E.164) per Pizza a Pezzi e per Corte del Sole.
 - **Ancora aperto**: i comandi SMS del titolare accettano ancora un solo `OWNER_PHONE` per tutti i locali.
 - **Aggiornamento 2026-10-29**: con `Restaurant.owner_order_sms_enabled = false` la notifica per ogni nuovo ordine non parte, tranne per gli ordini da verificare (vedi punto 6).
+- **Aggiornamento 2026-11-03**: con `TWILIO_WHATSAPP_FROM` uguale al numero sandbox (+14155238886) `send_owner_alert` non tenta WhatsApp e invia solo SMS (vedi punto 8).
 
 **Correzione proposta originale**
 
@@ -298,6 +301,41 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 
 **Dashboard Base44**: l'app della dashboard non è in questo repository. Gli ordini senza orario arrivano con `needs_review = true`, il motivo in `review_reason` e `pickup_time` vuoto: va verificato che le pagine Ordini e Cucina li mostrino come "orario da definire" e non li nascondano o li mettano in fondo senza segnalarli.
 
+## 8. Informazioni ripetute a cucina chiusa
+
+**Caso**: CallLog `ffbebdcb-54db-4c91-930b-ad023289d3e8` (id `6aea568b44243ed1e8c84c72`, Corte del Sole, 03/11 21:47). Il cliente ha detto subito "2 salamino da asporto per domani alle 8". L'agente ha chiesto "vuole ordinare per domani?", poi ha richiesto prodotti e orario, ha ripetuto due volte "il ritiro è per domani, mercoledì" e ha promesso la conferma su WhatsApp. L'ordine salvato è una margherita: i due salamino sono andati persi.
+
+**Cause**
+
+1. **Prodotti**: con un prodotto fuori menu e un orario nella stessa frase, l'LLM rispondeva `set_pickup_time` con `items: []`. Su 6 prove con il menu reale di CdS, 5 volte su 6 il prodotto spariva. Il menu di CdS non ha "Salamino".
+2. **Orario**: veniva validato su oggi, rifiutato perché oggi non restano ritiri, e scartato.
+3. **Giorno**: "domani" non veniva letto. Nemmeno "domani" come risposta alla domanda era accettato: solo le parole di assenso.
+4. **Risposta alla domanda**: `confirming_next_day` leggeva solo sì/no, quindi "sì, due margherite alle 8" perdeva il resto.
+
+**Cosa cambia**
+
+1. **Giorno già detto** (`_spoken_pickup_date`, `_accept_spoken_day` in `app/routes/chat.py`): se oggi non restano ritiri e il cliente ha detto "domani", "dopodomani" o un giorno della settimana in cui il locale è aperto, la domanda non si fa. L'agente dice "La cucina stasera è chiusa, segno per domani mercoledì." e passa alla prima informazione mancante (prodotti, nome, orario) o direttamente al riepilogo. Il giorno viene fissato prima di validare l'orario, quindi "alle 8" vale per quel giorno.
+   - Non valgono come giorno detto: un giorno in cui il locale è chiuso e una data come "il 21 maggio". In questi casi la domanda resta, e i dati si conservano comunque.
+   - Non si applica alle prenotazioni e agli annullamenti.
+   - "Domani" senza orario non è un orario: l'LLM restituiva a volte `prima_possibile`, ora viene ignorato. "Domani il prima possibile" vale come apertura di quel giorno.
+2. **Dati conservati attraverso la domanda**: l'orario rifiutato solo perché oggi non si ritira più resta in `slot_attempts_json` (`next_day_pickup_time`) e viene recuperato quando il cliente accetta, se rientra negli orari del nuovo giorno. Prodotti e nome erano già in sessione.
+3. **Risposte a "vuole ordinare per domani?"**: "domani" o un giorno della settimana valgono come sì, e il giorno detto vale al posto del prossimo giorno di apertura. Se la risposta aggiunge altro ("sì, due margherite alle 8") passa dall'LLM (`_is_bare_next_day_answer`).
+4. **Estrazione** (prompt in `conversation_service.py`): una frase con una pizza e un orario o un giorno è sempre `add_items`, anche con una pizza fuori menu, che diventa `Personalizzata` con il nome in `add_ingredients`. Un giorno da solo non è un orario. Con il prompt nuovo la frase della chiamata viene estratta bene 10 volte su 10 (LLM reale, menu reale di CdS).
+5. **Clienti con pizze abituali**: anche "2 pizze per domani alle 20", che apre "Le preparo le solite?" senza LLM, conserva giorno e orario.
+6. **Giorno detto una sola volta** (`pickup_day_said` in `slot_attempts_json`, `_day_said_for`): "il ritiro è per domani, <giorno>" si dice una volta per chiamata, più il riepilogo finale. Vale per tutti i locali, compresa la frase "Domani siamo chiusi, il ritiro è per martedì" di PaP. Dopo la prima volta la domanda è solo "A che ora passa?".
+7. **Conferma al cliente**: "Le arriva un SMS di conferma." al posto di "Le arriverà la conferma su WhatsApp." Ai numeri fissi resta "a presto", senza promettere messaggi.
+8. **WhatsApp e numero sandbox** (`whatsapp_sender` in `conversation_service.py`): se `TWILIO_WHATSAPP_FROM` è +14155238886, con o senza prefisso `whatsapp:`, WhatsApp non viene tentato né come ripiego della conferma al cliente né negli avvisi al titolare (`send_owner_alert`, solo SMS). Con un mittente reale il comportamento resta quello di prima. **Per riattivarlo basta impostare un numero WhatsApp reale.**
+9. **Quantità**: l'LLM restituisce le quantità come numeri decimali e il riepilogo diceva "2.0 margherite", anche al telefono. Le quantità intere ora sono intere; i pesi come 0,5 kg restano decimali (`_normalize_extracted_payload`).
+
+**Test**: `tests/test_next_day_known_info.py` (replica della chiamata reale; prodotti, domani e orario portano al riepilogo diretto; solo "domani" salta la domanda; giorno della settimana, dopodomani e giorno chiuso; orario fuori apertura; orario e nome conservati attraverso la domanda; "domani" come risposta senza LLM; risposta con prodotti e orario; prenotazioni e annullamenti; "le solite"; testo della conferma; WhatsApp con numero sandbox e reale; quantità). In `tests/test_next_day_preorder_flow.py` il giorno detto una volta per PaP. In `tests/fixtures/order_extraction_cases.json` 4 casi nuovi per `scripts/evaluate_order_extraction.py --live`.
+
+**Valutazione live del 2026-11-03**: 10 casi su 11. Fallisce `remove_named_item` (quantità attesa 1, ottenuta 0), che fallisce allo stesso modo con il prompt precedente. La rimozione non usa quella quantità.
+
+**Ancora aperto**
+
+- **Giorno detto mentre la cucina è aperta**: alle 16:00 "una margherita per domani alle 8" viene ancora trattata come ordine per stasera, e il riepilogo dice "per stasera". Il cliente può accorgersene solo dal riepilogo. Non fa parte di questa modifica.
+- **Pizza fuori menu**: `Personalizzata` usa il prezzo della Margherita, e nell'SMS appare come "Margherita + salamino". Il nome richiesto arriva in cucina, ma il prezzo può non essere corretto.
+
 ---
 
 ## Checklist prima della riattivazione
@@ -316,3 +354,6 @@ python scripts/set_restaurant_field.py 6a22d781b615baedb412be35 owner_order_sms_
 - [x] Orario non capito: hints STT, parsing tollerante, escalation e `needs_review` (punto 7)
 - [ ] Chiamata di prova: dire "per le otto" e controllare nei log `[PickupTime] riconosciuto=regole` (punto 7)
 - [ ] Dashboard Base44: ordine con `pickup_time` vuoto e `needs_review` visibile come "orario da definire" (punto 7)
+- [x] A cucina chiusa niente domande ripetute, giorno detto una volta, conferma via SMS (punto 8)
+- [ ] Chiamata di prova dopo la chiusura: "due margherite per domani alle 8" deve portare a nome e riepilogo, senza "vuole ordinare per domani?" (punto 8)
+- [ ] Verificare che gli SMS al titolare arrivino ora che WhatsApp è spento con il numero sandbox (punto 8)

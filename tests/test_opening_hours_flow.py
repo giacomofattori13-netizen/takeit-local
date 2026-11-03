@@ -196,7 +196,7 @@ class CallAfterLastPickupTests(_CorteHarness):
         self.assertEqual(self.conversation().pickup_date, FRIDAY.isoformat())
 
         r = self.say("Giacomo")
-        self.assertEqual(r.response_message, "Il ritiro è per domani, venerdì. A che ora passa?")
+        self.assertEqual(r.response_message, "A che ora passa?")  # il giorno è già stato detto
         r = self.say("alle 8")
         self.assertEqual(r.response_message, "Allora: una margherita, per domani venerdì alle 20, a nome Giacomo. Confermo?")
         self.say("sì")
