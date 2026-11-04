@@ -1,10 +1,10 @@
 # Regole d'ordine
 
-Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, con il test che la copre. Aggiornato il 2026-11-03.
+Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, con il test che la copre. Aggiornato il 2026-11-04.
 
 - **Fonti**: `chat.py` è `app/routes/chat.py`, `service` è `app/services/conversation_service.py`, `prompt` è il prompt di estrazione in `service`.
-- **Casi golden**: ``caso `x` `` è un caso di `CASES` in `tests/test_order_rules_golden.py`. Gira con l'estrazione registrata in `test_golden_with_recorded_extraction` e con l'LLM vero, 5 run per caso, in `test_golden_with_real_llm`. Una sola run sbagliata fa fallire il caso.
-- **Comandi**: `pytest tests` senza rete; `pytest tests/test_order_rules_golden.py --run-llm -k real_llm` con l'LLM vero (circa 5 minuti).
+- **Casi golden**: ``caso `x` `` è un caso di `CASES` in `tests/test_order_rules_golden.py`. Gira con l'estrazione registrata in `test_golden_with_recorded_extraction` e con l'LLM vero, una run per caso, in `test_golden_with_real_llm`.
+- **Comandi**: `pytest tests` senza rete; `pytest tests/test_order_rules_golden.py --run-llm -k real_llm` con l'LLM vero (circa un minuto). L'LLM vero si usa solo se il commit modifica il prompt o l'estrazione dell'ordine.
 - **Controllo**: `test_rules_document_only_cites_tests_that_exist` fallisce se questo documento cita un test che non esiste, e `test_rules_document_cites_every_golden_case` se un caso golden non è citato qui.
 - **NON COPERTA**: nessun test verifica la regola. Sono elencate in fondo.
 
@@ -25,6 +25,16 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 | A voce "margherita con X", mai "pizza personalizzata" | chat.py `format_single_item_for_customer` | `tests/test_order_rules_golden.py::test_off_menu_pizza_is_spoken_as_margherita`, `tests/test_order_rules_golden.py::test_recap_of_the_real_call_never_says_personalizzata` |
 | Margherita senza pomodoro: a voce "bianca" | chat.py | `tests/test_order_rules_golden.py::test_off_menu_pizza_is_spoken_as_margherita`, caso `bianca_con_prosciutto` |
 | Nell'SMS al cliente: "Margherita" con le aggiunte a parte | service `_build_pizza_lines` | `tests/test_order_rules_golden.py::test_customer_sms_shows_margherita_plus_the_addition` |
+| Su Base44: `pizza_name` "Margherita" con le aggiunte in `add_ingredients` | `order_sync.py` `build_order_items` | `tests/test_order_rules_golden.py::test_off_menu_is_saved_on_base44_as_margherita_with_the_additions`, `tests/test_order_rules_golden.py::test_menu_names_are_saved_on_base44_unchanged` |
+| Riepilogo giornaliero: somma per "Margherita +<aggiunte>", anche con gli ordini salvati prima come "Personalizzata" | `daily_summary.py` `_flavour_name` | `tests/test_order_rules_golden.py::test_daily_summary_sums_margherite_by_additions`, `tests/test_order_rules_golden.py::test_daily_summary_sums_orders_saved_before_the_rename_with_the_new_ones` |
+| Una pizza fuori menu non entra nelle "solite" | chat.py | `tests/test_order_rules_golden.py::test_off_menu_pizza_is_not_stored_as_a_favourite`, `tests/test_order_rules_golden.py::test_favourite_saved_as_personalizzata_is_never_proposed`, `tests/test_order_rules_golden.py::test_other_favourites_are_still_proposed` |
+| `custom_pizza_enabled` null o assente vale true | service `is_custom_pizza_enabled` | `tests/test_order_rules_golden.py::test_custom_pizza_flag_defaults_to_true`, `tests/test_order_rules_golden.py::test_custom_pizza_null_still_becomes_margherita` |
+| `custom_pizza_enabled` false: "<nome> oggi non c'è, abbiamo <3 gusti>. Quale vuole?", niente Margherita | chat.py `_off_menu_question` | caso `fuori_menu_rifiutata`, `tests/test_order_rules_golden.py::test_off_menu_refused_names_three_similar_flavours_and_saves_nothing`, `tests/test_order_rules_golden.py::test_off_menu_refused_when_the_llm_returns_the_bare_name` |
+| I 3 gusti sono i più simili per nome e ingredienti; a pari somiglianza il più semplice | chat.py `_similar_menu_flavours` | `tests/test_order_rules_golden.py::test_similar_flavours_look_at_names_and_ingredients`, `tests/test_order_rules_golden.py::test_simplest_flavour_wins_a_tie` |
+| Il rifiuto lascia altre pizze, giorno e orario | chat.py | caso `fuori_menu_rifiutata_giorno_e_orario_restano`, `tests/test_order_rules_golden.py::test_off_menu_refused_keeps_the_other_pizzas_day_and_time` |
+| La quantità detta vale per il gusto scelto, se non ne dice un'altra | chat.py | `tests/test_order_rules_golden.py::test_chosen_flavour_gets_the_quantity_said_before`, `tests/test_order_rules_golden.py::test_chosen_flavour_with_its_own_quantity_keeps_it` |
+| A cucina chiusa si concorda prima il giorno, poi la pizza che non c'è | chat.py | `tests/test_order_rules_golden.py::test_off_menu_refused_at_closed_kitchen_agrees_the_day_first` |
+| Il flag non tocca le pizze del menu con aggiunte né i refusi | chat.py | caso `flag_spento_pizza_del_menu_con_aggiunta`, `tests/test_order_rules_golden.py::test_sold_out_and_typos_are_not_affected_by_the_flag` |
 
 ## Prezzi
 
@@ -46,7 +56,8 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 | "con X" è un'aggiunta, mai parte del nome | prompt | caso `capricciosa_con_rucola` |
 | "senza X" è una rimozione | prompt | caso `capricciosa_senza_olive` |
 | Aggiunte e rimozioni nella stessa frase | prompt | caso `aggiunta_e_rimozione` |
-| Alias fonetici ("wurstel" → "würstel", "verde" → "gorgonzola") | service `PIZZA_ALIASES` | caso `alias_verde_gorgonzola`, caso `wurstel_senza_pomodoro`, `tests/test_extraction_validation.py::test_extract_order_masks_alias_and_item_logs` |
+| Alias fonetici ("wurstel" → "würstel", "verde" → "gorgonzola") | service `PIZZA_ALIASES` | caso `alias_verde_gorgonzola`, caso `wurstel_senza_pomodoro`, `tests/test_extraction_validation.py::test_extract_order_masks_alias_and_item_logs`, `tests/test_order_rules_golden.py::test_alias_applies_where_the_word_is_not_on_the_menu` |
+| Un alias non vale se la parola è una voce del menu del locale ("bondola" a CdS è la pizza, €11,00) | service `_apply_aliases` | casi `bondola_e_una_pizza_del_menu`, `due_bondola_con_orario`, `tests/test_order_rules_golden.py::test_alias_is_skipped_when_the_word_is_on_the_menu_of_the_restaurant`, `tests/test_order_rules_golden.py::test_bondola_is_the_pizza_at_its_menu_price` |
 | Stessa pizza e stesso impasto: si sommano le quantità | chat.py | `tests/test_chat_logic.py::test_merge_same_item_accumulates_quantity` |
 | Misura diversa: voci separate | chat.py | `tests/test_chat_logic.py::test_merge_different_size_keeps_separate_items` |
 | Si estrae solo dall'ultimo messaggio | prompt | caso `per_le_8` (il carrello resta invariato) |
@@ -91,7 +102,10 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 | Correzione al riepilogo ("no, per domani"): aggiorna, non conferma né annulla | chat.py | `tests/test_order_rules_golden.py::test_day_change_at_the_recap_updates_without_confirming_or_cancelling` |
 | Giorno chiuso: "<giorno> siamo chiusi, il primo giorno disponibile è <giorno>, va bene?" | chat.py `_closed_day_question` | caso `domani_chiuso_propone_martedi`, `tests/test_order_rules_golden.py::test_closed_named_weekday_proposes_the_next_open_day` |
 | Giorno chiuso: si attende sì/no, poi vale il giorno proposto | chat.py | `tests/test_order_rules_golden.py::test_closed_tomorrow_on_sunday_proposes_tuesday_and_waits` |
-| "No" alla proposta: chiusura senza salvare | chat.py | `tests/test_order_rules_golden.py::test_closed_day_refused_closes_the_call_without_saving` |
+| "No" al giorno proposto: "Per quale giorno le serve?", l'ordine resta | chat.py | `tests/test_order_rules_golden.py::test_no_to_the_closed_day_proposal_asks_for_the_day_and_keeps_the_order`, `tests/test_order_rules_golden.py::test_no_to_the_next_day_question_with_the_kitchen_closed_asks_for_the_day`, `tests/test_next_day_known_info.py::test_no_asks_for_the_day_and_keeps_order_and_time` |
+| La risposta riapplica le regole del locale (giorno chiuso, stasera) | chat.py | `tests/test_order_rules_golden.py::test_no_then_a_closed_day_reapplies_the_rules`, `tests/test_order_rules_golden.py::test_no_then_tonight_with_the_kitchen_open_is_for_today` |
+| "Sì" a "Per quale giorno le serve?" non è una risposta | chat.py | `tests/test_order_rules_golden.py::test_yes_to_the_day_question_is_not_an_answer` |
+| "No" a "Per quale giorno le serve?": chiusura senza salvare | chat.py | `tests/test_order_rules_golden.py::test_no_to_the_day_question_closes_the_call_without_saving`, `tests/test_opening_hours_flow.py::test_customer_says_no_twice_and_the_call_closes` |
 | Risposta alla proposta con un altro giorno aperto: vale quello | chat.py | `tests/test_order_rules_golden.py::test_answer_with_another_day_wins_over_the_proposal` |
 | Risposta con un altro giorno chiuso: nuova proposta | chat.py | `tests/test_order_rules_golden.py::test_answer_with_another_closed_day_gets_a_new_proposal` |
 | "Stasera" come risposta alla proposta: resta oggi | chat.py | `tests/test_order_rules_golden.py::test_tonight_as_answer_to_the_proposal_keeps_today` |
@@ -101,6 +115,10 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 | Risposta alla domanda con prodotti e orario: si estrae anche il resto | chat.py | `tests/test_next_day_known_info.py::test_answer_with_products_and_time_is_extracted` |
 | Preordine fisso (PaP): sempre il prossimo giorno di apertura | chat.py `phone_orders_next_day_only` | `tests/test_next_day_preorder_flow.py::test_call_in_slices_asks_only_what_is_missing_and_recap_matches_saved_order`, `tests/test_chat_logic.py::test_persist_order_sets_pickup_date_tomorrow` |
 | Preordine fisso: "per stasera" rimanda in negozio | chat.py | `tests/test_next_day_preorder_flow.py::test_request_for_tonight_is_redirected_to_the_shop` |
+| Preordine fisso, altro giorno: "Prendiamo ordini solo per <giorno>, va bene?", ordine e orario restano | chat.py `_propose_only_order_day` | caso `preordine_altro_giorno`, `tests/test_order_rules_golden.py::test_fixed_day_other_day_is_asked_and_yes_keeps_order_and_time`, `tests/test_order_rules_golden.py::test_fixed_day_with_tomorrow_closed_names_the_next_open_day` |
+| Preordine fisso, stesso giorno: nessuna domanda | chat.py | caso `preordine_stesso_giorno` |
+| Preordine fisso: "no" chiede il giorno e riapplica la regola | chat.py | `tests/test_order_rules_golden.py::test_fixed_day_no_asks_for_the_day_and_reapplies_the_rule` |
+| Preordine fisso: vale anche al riepilogo e alla domanda sull'orario | chat.py | `tests/test_order_rules_golden.py::test_fixed_day_other_day_at_the_recap_is_asked_and_not_confirmed`, `tests/test_order_rules_golden.py::test_fixed_day_other_day_at_the_pickup_time_question_is_asked` |
 | Prossimo giorno di apertura: salta i giorni chiusi | service `get_next_open_day` | `tests/test_chat_logic.py::test_get_next_open_day_skips_closed_days` |
 | "Il ritiro è per <giorno>" una volta per chiamata | chat.py `_day_said_for` | `tests/test_next_day_preorder_flow.py::test_pickup_day_is_said_once_per_call`, `tests/test_next_day_known_info.py::test_bare_yes_with_empty_cart_asks_for_products` |
 
@@ -155,12 +173,6 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 | Conferma al fisso: nessun messaggio promesso | chat.py | `tests/test_next_day_known_info.py::test_landline_is_not_promised_a_message` |
 | WhatsApp spento con il numero sandbox | service `whatsapp_sender` | `tests/test_next_day_known_info.py::test_customer_confirmation_never_tries_the_sandbox`, `tests/test_next_day_known_info.py::test_owner_alert_goes_by_sms_with_the_sandbox` |
 | Un ordine si salva una sola volta per conversazione | chat.py | `tests/test_chat_logic.py::test_persist_order_once_is_idempotent_per_conversation` |
-
-## Difetti noti
-
-| Difetto | Fonte | Effetto |
-|---|---|---|
-| L'alias "bondola" → "mortadella" vale anche dove Bondola è una pizza del menu | service `PIZZA_ALIASES` | A CdS "una bondola" (€11,00) diventa Margherita + mortadella (€7,80). Verificato con l'LLM vero: 4 volte su 4. Da decidere, non corretto |
 
 ## NON COPERTE
 

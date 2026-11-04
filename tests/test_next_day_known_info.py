@@ -204,11 +204,16 @@ class InformationKeptAcrossTheQuestionTests(_ClosedKitchen):
         self.assertEqual(r.response_message, "A che ora passa?")
         self.assert_day_never_repeated()
 
-    def test_no_still_closes_the_call_and_drops_the_kept_time(self):
+    def test_no_asks_for_the_day_and_keeps_order_and_time(self):
         self.order_sentence("2 margherite alle 8", pickup_time="20:00")
         r = self.say("no grazie")
-        self.assertEqual(r.state, "completed")
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", "Per quale giorno le serve?"))
         self.assertEqual(self.saved, [])
+        r = self.say("sabato")
+        self.assertEqual(r.state, "collecting_name")
+        self.say("Giacomo")
+        self.say("sì")
+        self.assertEqual((self.saved[0]["pickup_date"], self.saved[0]["pickup_time"]), ("2026-10-03", "20:00"))
 
 
 class UsualOrderTests(_ClosedKitchen):

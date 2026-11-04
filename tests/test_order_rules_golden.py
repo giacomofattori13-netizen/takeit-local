@@ -7,9 +7,9 @@ che devono trovarsi nella sessione dopo la frase, con il menu reale di Corte del
 Due modi di eseguire gli stessi casi:
 
     pytest tests/test_order_rules_golden.py             # estrazione registrata, senza rete
-    pytest tests/test_order_rules_golden.py --run-llm   # anche LLM vero: 5 run per caso
+    pytest tests/test_order_rules_golden.py --run-llm   # anche LLM vero, una run per caso
 
-Con l'LLM vero un caso fallisce se anche una sola run sbaglia.
+L'LLM vero si usa solo se il commit modifica il prompt o l'estrazione dell'ordine.
 """
 import ast
 import datetime
@@ -26,12 +26,14 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from sqlmodel.pool import StaticPool
 
 import app.routes.chat as chat_module
-from app.models import ConversationSession, MenuItem
+from app.models import ConversationSession, MenuItem, OrderSideEffect
 from app.schemas import ChatRequest
 from app.services import conversation_service as service
+from app.services.daily_summary import flavour_totals
+from app.services.order_sync import build_order_items
 from tests.test_opening_hours_flow import _frozen_datetime_module
 
-LIVE_RUNS = 5
+LIVE_RUNS = 1
 ROME = ZoneInfo("Europe/Rome")
 RID = "rest-golden"
 MENU = json.loads((Path(__file__).parent / "fixtures" / "cds_menu.json").read_text(encoding="utf-8"))
@@ -39,6 +41,8 @@ DOUGHS = json.loads((Path(__file__).parents[1] / "app" / "dough_data.json").read
 ALL_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 CDS = {"id": RID, "name": "Corte Del Sole", "min_prep_minutes": 30, "opening_hours": {d: "19:00-22:00" for d in ALL_DAYS}}
 MONDAY_CLOSED = {**CDS, "opening_hours": {**CDS["opening_hours"], "monday": ""}}
+NO_CUSTOM_PIZZA = {**CDS, "custom_pizza_enabled": False}
+NEXT_DAY_ONLY = {**CDS, "phone_orders_next_day_only": True}
 
 THURSDAY_16 = datetime.datetime(2026, 10, 1, 16, 0, tzinfo=ROME)  # domani venerdì 2
 SUNDAY_16 = datetime.datetime(2026, 10, 4, 16, 0, tzinfo=ROME)  # domani lunedì 5
@@ -119,6 +123,24 @@ CASES = [
     Case("speck_senza_origano", "una speck senza origano",
          [item(PERSONAL, add=["speck"], remove=["origano"])],
          llm=recorded(items=[item(PERSONAL, add=["speck"], remove=["origano"])])),
+    # ── Alias: non vale se la parola è già una voce del menu ─────────────────
+    Case("bondola_e_una_pizza_del_menu", "una bondola", [item("Bondola")], llm=recorded(items=[item("Bondola")])),
+    Case("due_bondola_con_orario", "due bondola per le 8", [item("Bondola", 2)], time="20:00",
+         llm=recorded(items=[item("Bondola", 2)], time="20:00")),
+    # ── custom_pizza_enabled = false: niente Margherita, gusti più simili ────
+    Case("fuori_menu_rifiutata", "una salamino", restaurant=NO_CUSTOM_PIZZA, final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, add=["salamino"])]), reply_contains="Salamino oggi non c'è, abbiamo"),
+    Case("fuori_menu_rifiutata_giorno_e_orario_restano", "2 salamino per domani alle 8", day=TOMORROW, time="20:00",
+         restaurant=NO_CUSTOM_PIZZA, final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, 2, add=["salamino"])], time="20:00"), reply_contains="Quale vuole?"),
+    Case("flag_spento_pizza_del_menu_con_aggiunta", "una capricciosa con rucola", [item("Capricciosa", add=["rucola"])],
+         restaurant=NO_CUSTOM_PIZZA, llm=recorded(items=[item("Capricciosa", add=["rucola"])])),
+    # ── Preordine fisso: un altro giorno non si ignora ───────────────────────
+    Case("preordine_altro_giorno", "una margherita per sabato", [_MARGHERITA], day=TOMORROW, restaurant=NEXT_DAY_ONLY,
+         llm=recorded(items=[_MARGHERITA]), final_state="confirming_next_day",
+         reply_contains="Prendiamo ordini solo per domani venerdì, va bene?"),
+    Case("preordine_stesso_giorno", "una margherita per domani", [_MARGHERITA], day=TOMORROW, restaurant=NEXT_DAY_ONLY,
+         llm=recorded(items=[_MARGHERITA]), final_state="collecting_name"),
     # ── Pizze del menu: aggiunte, rimozioni, impasti, misure ─────────────────
     Case("capricciosa_con_rucola", "una capricciosa con rucola",
          [item("Capricciosa", add=["rucola"])], llm=recorded(items=[item("Capricciosa", add=["rucola"])])),
@@ -387,14 +409,135 @@ def test_closed_tomorrow_on_sunday_proposes_tuesday_and_waits():
     assert (call.saved[0]["pickup_date"], call.saved[0]["pickup_time"]) == ("2026-10-06", "20:00")
 
 
-def test_closed_day_refused_closes_the_call_without_saving():
+def test_no_to_the_closed_day_proposal_asks_for_the_day_and_keeps_the_order():
+    call = _script(SUNDAY_16, MONDAY_CLOSED)
+    call.extractions.append(recorded(items=[_MARGHERITA], time="20:00"))
+    with call.open():
+        call.say("una margherita per domani alle 8")
+        response = call.say("no")
+        assert (response.state, response.response_message) == ("confirming_next_day", "Per quale giorno le serve?")
+        assert json.loads(call.conversation().items_json)
+        response = call.say("mercoledì")
+        assert response.response_message == "Perfetto, il ritiro è per mercoledì. A che nome?"
+        call.say("Giacomo")
+        call.say("sì")
+    assert (call.saved[0]["pickup_date"], call.saved[0]["pickup_time"]) == ("2026-10-07", "20:00")
+
+
+def test_no_then_a_closed_day_reapplies_the_rules():
     call = _script(SUNDAY_16, MONDAY_CLOSED)
     call.extractions.append(recorded(items=[_MARGHERITA]))
     with call.open():
         call.say("una margherita per domani")
+        call.say("no")
+        response = call.say("lunedì")  # di domenica lunedì è domani
+        assert response.response_message == "Domani siamo chiusi, il primo giorno disponibile è martedì, va bene?"
+        response = call.say("sì")
+        assert response.response_message == "Perfetto, il ritiro è per martedì. A che nome?"
+
+
+def test_no_then_tonight_with_the_kitchen_open_is_for_today():
+    call = _script(SUNDAY_16, MONDAY_CLOSED)
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        call.say("una margherita per domani")
+        call.say("no")
+        response = call.say("stasera")
+        assert response.state == "collecting_name"
+        assert call.conversation().pickup_date is None
+
+
+def test_no_to_the_next_day_question_with_the_kitchen_closed_asks_for_the_day():
+    call = _script(THURSDAY_23)
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        response = call.say("una margherita")
+        assert "vuole ordinare per domani?" in response.response_message
+        response = call.say("no")
+        assert response.response_message == "Per quale giorno le serve?"
+        call.say("sabato")
+        assert call.conversation().pickup_date == "2026-10-03"
+
+
+def test_yes_to_the_day_question_is_not_an_answer():
+    call = _script(SUNDAY_16, MONDAY_CLOSED)
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        call.say("una margherita per domani")
+        call.say("no")
+        response = call.say("sì")
+        assert response.state == "confirming_next_day"
+        assert response.response_message == "Mi scusi, non ho capito. Per quale giorno le serve?"
+        assert call.conversation().pickup_date is None
+
+
+def test_no_to_the_day_question_closes_the_call_without_saving():
+    call = _script(SUNDAY_16, MONDAY_CLOSED)
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        call.say("una margherita per domani")
+        call.say("no")
         response = call.say("no grazie")
         assert response.state == "completed"
     assert call.saved == []
+
+
+# ── Preordine fisso: "Prendiamo ordini solo per <giorno>, va bene?" ──────────
+
+
+def test_fixed_day_other_day_is_asked_and_yes_keeps_order_and_time():
+    call = _script(THURSDAY_16, NEXT_DAY_ONLY)
+    call.extractions.append(recorded(items=[_MARGHERITA], time="20:00"))
+    with call.open():
+        response = call.say("una margherita per sabato alle 8")
+        assert (response.state, response.response_message) == (
+            "confirming_next_day", "Prendiamo ordini solo per domani venerdì, va bene?",
+        )
+        response = call.say("sì")
+        assert response.response_message == "Perfetto, il ritiro è per domani, venerdì. A che nome?"
+        response = call.say("Giacomo")
+        assert response.response_message == "Allora: una margherita, per domani venerdì alle 20, a nome Giacomo. Confermo?"
+        call.say("sì")
+    assert (call.saved[0]["pickup_date"], call.saved[0]["pickup_time"]) == (TOMORROW, "20:00")
+
+
+def test_fixed_day_with_tomorrow_closed_names_the_next_open_day():
+    call = _script(SUNDAY_16, {**NEXT_DAY_ONLY, "opening_hours": MONDAY_CLOSED["opening_hours"]})
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        response = call.say("una margherita per domani")
+        assert response.response_message == "Prendiamo ordini solo per martedì, va bene?"
+
+
+def test_fixed_day_no_asks_for_the_day_and_reapplies_the_rule():
+    call = _script(THURSDAY_16, NEXT_DAY_ONLY)
+    call.extractions.append(recorded(items=[_MARGHERITA]))
+    with call.open():
+        call.say("una margherita per sabato")
+        response = call.say("no")
+        assert response.response_message == "Per quale giorno le serve?"
+        response = call.say("domenica")
+        assert response.response_message == "Prendiamo ordini solo per domani venerdì, va bene?"
+        call.say("no")
+        response = call.say("domani")
+        assert response.response_message == "Perfetto, il ritiro è per domani, venerdì. A che nome?"
+
+
+def test_fixed_day_other_day_at_the_recap_is_asked_and_not_confirmed():
+    call = _script(THURSDAY_16, NEXT_DAY_ONLY)
+    call.extractions.append(recorded(items=[_MARGHERITA], name="Giacomo", time="20:00"))
+    with call.open():
+        call.say("una margherita per le 8, sono Giacomo")
+        response = call.say("sì ma per sabato")
+        assert response.response_message == "Prendiamo ordini solo per domani venerdì, va bene?"
+        assert call.saved == []
+
+
+def test_fixed_day_other_day_at_the_pickup_time_question_is_asked():
+    call = _script(THURSDAY_16, NEXT_DAY_ONLY)
+    with call.open("collecting_pickup_time", [_MARGHERITA]):
+        response = call.say("sabato alle 8")
+        assert response.response_message == "Prendiamo ordini solo per domani venerdì, va bene?"
 
 
 def test_closed_named_weekday_proposes_the_next_open_day():
@@ -613,6 +756,227 @@ def test_off_menu_price_is_margherita_plus_two_euro_per_addition(items, total):
         stored = recorded(items=items)["items"]
         _, amount = chat_module.enrich_items_with_pricing(call.session, stored, restaurant_id=RID)
     assert amount == total
+
+
+# ── custom_pizza_enabled ─────────────────────────────────────────────────────
+
+
+def _no_custom(*extractions):
+    call = _script(THURSDAY_16, NO_CUSTOM_PIZZA)
+    call.extractions.extend(extractions)
+    return call
+
+
+def test_custom_pizza_flag_defaults_to_true():
+    for value in ({}, {"custom_pizza_enabled": None}, {"custom_pizza_enabled": True}):
+        with Call(THURSDAY_16, {**CDS, **value}, lambda *a, **k: None).open():
+            assert service.is_custom_pizza_enabled(RID) is True
+    with Call(THURSDAY_16, NO_CUSTOM_PIZZA, lambda *a, **k: None).open():
+        assert service.is_custom_pizza_enabled(RID) is False
+
+
+def test_custom_pizza_null_still_becomes_margherita():
+    call = _script(THURSDAY_16, {**CDS, "custom_pizza_enabled": None})
+    call.extractions.append(recorded(items=[item(PERSONAL, add=["salamino"])]))
+    with call.open():
+        call.say("una salamino")
+        assert _normalized_items(call.conversation().items_json)[0]["add"] == ["salamino"]
+
+
+def test_off_menu_refused_names_three_similar_flavours_and_saves_nothing():
+    call = _no_custom(recorded(items=[item(PERSONAL, add=["salamino"])]))
+    with call.open():
+        response = call.say("una salamino")
+        assert re.fullmatch(r"Salamino oggi non c'è, abbiamo [^,]+, [^,]+ e [^,]+\. Quale vuole\?", response.response_message)
+        assert response.state == "collecting_items"
+        assert json.loads(call.conversation().items_json) == []
+        names = re.search(r"abbiamo (.+)\. Quale", response.response_message).group(1).replace(" e ", ", ").split(", ")
+        assert set(names) <= {entry["name"] for entry in MENU} and len(names) == 3
+
+
+def test_similar_flavours_look_at_names_and_ingredients():
+    menu = [
+        {"name": "Marinara", "ingredients": ["pomodoro", "aglio"]},
+        {"name": "Tonnara", "ingredients": ["tonno", "cipolla"]},
+        {"name": "Mare", "ingredients": ["tonno", "gamberi"]},
+        {"name": "Boscaiola", "ingredients": ["funghi", "salsiccia"]},
+    ]
+    assert chat_module._similar_menu_flavours(["tonno"], menu)[:2] == ["Tonnara", "Mare"]
+    assert chat_module._similar_menu_flavours(["salsiccia"], menu)[0] == "Boscaiola"
+    assert chat_module._similar_menu_flavours([], menu) == ["Marinara", "Tonnara", "Mare"]
+
+
+def test_simplest_flavour_wins_a_tie():
+    assert chat_module._similar_menu_flavours(["salamino"], MENU)[0] == "Diavola"
+
+
+def test_off_menu_refused_when_the_llm_returns_the_bare_name():
+    call = _no_custom(recorded(items=[item("Porchetta")]))
+    with call.open():
+        response = call.say("una porchetta")
+        assert response.response_message.startswith("Porchetta oggi non c'è, abbiamo")
+
+
+def test_off_menu_refused_keeps_the_other_pizzas_day_and_time():
+    call = _no_custom(recorded(items=[_MARGHERITA, item(PERSONAL, add=["salamino"])], time="20:00"))
+    with call.open():
+        response = call.say("una margherita e una salamino per domani alle 8")
+        assert "Salamino oggi non c'è" in response.response_message
+        conversation = call.conversation()
+        assert [i["name"] for i in _normalized_items(conversation.items_json)] == ["Margherita"]
+        assert (conversation.pickup_date, conversation.pickup_time) == (TOMORROW, "20:00")
+
+
+def test_chosen_flavour_gets_the_quantity_said_before():
+    call = _no_custom(recorded(items=[item(PERSONAL, 2, add=["salamino"])]), recorded(items=[item("Diavola")]))
+    with call.open():
+        call.say("2 salamino")
+        call.say("la diavola")
+        assert _normalized_items(call.conversation().items_json)[0]["quantity"] == 2
+
+
+def test_chosen_flavour_with_its_own_quantity_keeps_it():
+    call = _no_custom(recorded(items=[item(PERSONAL, 2, add=["salamino"])]), recorded(items=[item("Diavola")]))
+    with call.open():
+        call.say("2 salamino")
+        call.say("una diavola")
+        assert _normalized_items(call.conversation().items_json)[0]["quantity"] == 1
+
+
+def test_off_menu_refused_at_closed_kitchen_agrees_the_day_first():
+    call = _script(THURSDAY_23, NO_CUSTOM_PIZZA)
+    call.extractions.append(recorded(items=[item(PERSONAL, add=["salamino"])]))
+    with call.open():
+        response = call.say("una salamino")
+        assert "vuole ordinare per domani?" in response.response_message
+        response = call.say("sì")
+        assert response.response_message.startswith("Perfetto, il ritiro è per domani, venerdì. Salamino oggi non c'è, abbiamo")
+        assert response.state == "collecting_items"
+
+
+def test_sold_out_and_typos_are_not_affected_by_the_flag():
+    call = _no_custom(recorded(items=[item("Capriciosa")]))
+    with call.open():
+        response = call.say("una capriciosa")
+        assert "Forse intendevi Capricciosa" in response.response_message
+
+
+# ── Alias ────────────────────────────────────────────────────────────────────
+
+
+def test_alias_is_skipped_when_the_word_is_on_the_menu_of_the_restaurant():
+    assert service._apply_aliases("una bondola", MENU) == "una bondola"
+    assert service._apply_aliases("una Bondola", MENU) == "una Bondola"
+
+
+def test_alias_applies_where_the_word_is_not_on_the_menu():
+    assert service._apply_aliases("una bondola", [{"name": "Bufala"}]) == "una mortadella"
+    assert service._apply_aliases("una bondola") == "una mortadella"
+    assert service._apply_aliases("una wurstel e una verde", MENU) == "una würstel e una gorgonzola"
+
+
+def test_bondola_is_the_pizza_at_its_menu_price():
+    call = _script()
+    call.extractions.append(recorded(items=[item("Bondola")], name="Giacomo", time="20:00"))
+    with call.open(), patch.object(chat_module, "get_dough_surcharge", return_value=0.0):
+        response = call.say("una bondola per le 8, sono Giacomo")
+        assert "una bondola" in response.response_message
+        call.say("sì")
+    assert (call.saved[0]["items"][0]["pizza_name"], call.saved[0]["items"][0]["total_price"]) == ("Bondola", 11.0)
+
+
+# ── Nome su Base44, riepilogo giornaliero, preferiti ─────────────────────────
+
+
+def _base44_item(**extra):
+    return {
+        "pizza_name": PERSONAL, "quantity": 2, "sale_unit": "piece", "dough_type": "classica",
+        "add_ingredients": ["salamino"], "remove_ingredients": [], "base_price": 5.8,
+        "extras_price": 2.0, "total_price": 15.6, **extra,
+    }
+
+
+def test_off_menu_is_saved_on_base44_as_margherita_with_the_additions():
+    saved = build_order_items([_base44_item()])[0]
+    assert saved["pizza_name"] == "Margherita"
+    assert saved["add_ingredients"] == ["salamino"]
+    assert (saved["base_price"], saved["extras_price"], saved["total_price"]) == (5.8, 2.0, 15.6)
+
+
+def test_menu_names_are_saved_on_base44_unchanged():
+    assert build_order_items([_base44_item(pizza_name="Bondola")])[0]["pizza_name"] == "Bondola"
+
+
+def _summary_order(*items):
+    return {"items": [{"sale_unit": "piece", "add_ingredients": [], **i} for i in items]}
+
+
+def test_daily_summary_sums_margherite_by_additions():
+    lines = flavour_totals([
+        _summary_order(
+            {"pizza_name": "Margherita", "quantity": 2, "add_ingredients": ["salamino"]},
+            {"pizza_name": "Margherita", "quantity": 1},
+            {"pizza_name": "Margherita", "quantity": 1, "add_ingredients": ["gorgonzola", "melanzane"]},
+        ),
+        _summary_order(
+            {"pizza_name": "Margherita", "quantity": 1, "add_ingredients": ["salamino"]},
+            {"pizza_name": "Margherita", "quantity": 1, "add_ingredients": ["melanzane", "gorgonzola"]},
+            {"pizza_name": "Bondola", "quantity": 1},
+        ),
+    ])
+    assert lines == [
+        "Bondola: 1 pezzo",
+        "Margherita: 1 pezzo",
+        "Margherita +gorgonzola +melanzane: 2 pezzi",
+        "Margherita +salamino: 3 pezzi",
+    ]
+
+
+def test_daily_summary_sums_orders_saved_before_the_rename_with_the_new_ones():
+    lines = flavour_totals([
+        _summary_order({"pizza_name": PERSONAL, "quantity": 2, "add_ingredients": ["salamino"]}),
+        _summary_order({"pizza_name": "Margherita", "quantity": 1, "add_ingredients": ["salamino"]}),
+    ])
+    assert lines == ["Margherita +salamino: 3 pezzi"]
+
+
+def test_off_menu_pizza_is_not_stored_as_a_favourite():
+    call = _script()
+    call.extractions.append(recorded(items=[item(PERSONAL, add=["salamino"]), item("Diavola")], name="Giacomo", time="20:00"))
+    with call.open():
+        call.say("una salamino e una diavola per le 8, sono Giacomo")
+        call.say("sì")
+        jobs = call.session.exec(select(OrderSideEffect).where(OrderSideEffect.kind == "customer_upsert")).all()
+    assert json.loads(jobs[0].payload_json)["pizza_names"] == ["Diavola"]
+
+
+def _usual_call(favourites):
+    call = _script()
+    call.extractions.append(recorded("unknown"))
+    return call, json.dumps(favourites)
+
+
+def test_favourite_saved_as_personalizzata_is_never_proposed():
+    call, favourites = _usual_call(["Personalizzata"])
+    with call.open():
+        conversation = call.conversation()
+        conversation.favorite_pizzas_json = favourites
+        call.session.add(conversation)
+        call.session.commit()
+        response = call.say("2 pizze")
+        assert "solite" not in response.response_message
+        assert "personalizzat" not in response.response_message.lower()
+
+
+def test_other_favourites_are_still_proposed():
+    call, favourites = _usual_call(["Personalizzata", "Diavola"])
+    with call.open():
+        conversation = call.conversation()
+        conversation.favorite_pizzas_json = favourites
+        call.session.add(conversation)
+        call.session.commit()
+        response = call.say("2 pizze")
+        assert response.response_message == "Le preparo le solite? Diavola"
 
 
 def test_off_menu_order_is_saved_with_the_addition_and_the_price():

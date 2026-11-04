@@ -63,7 +63,8 @@ def build_order_items(items: list[dict]) -> list[dict]:
         is_kg = item.get("sale_unit") == "kg"
         size = item.get("size") or "normale"
         b44_item = {
-            "pizza_name": item["pizza_name"],
+            # Pizza fuori menu: su Base44 è una Margherita con le aggiunte
+            "pizza_name": "Margherita" if item["pizza_name"] == "Personalizzata" else item["pizza_name"],
             "quantity": item["quantity"],
             "sale_unit": item.get("sale_unit", "piece"),
             "dough_type": (

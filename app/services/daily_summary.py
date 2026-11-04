@@ -155,6 +155,16 @@ def _slices_part(count: int, portion: str | None, temperature: str | None) -> st
     return f"{count} {'tranci' if plural else 'trancio'} {portion_str} {temperature_str}"
 
 
+def _flavour_name(item: dict) -> str:
+    """Le Margherite si sommano per aggiunte: "Margherita +salamino". "Personalizzata"
+    è il nome degli ordini salvati prima di usare "Margherita"."""
+    name = item.get("pizza_name") or "?"
+    if name not in ("Margherita", "Personalizzata"):
+        return name
+    additions = sorted(item.get("add_ingredients") or [], key=str.lower)
+    return " ".join(["Margherita", *(f"+{addition}" for addition in additions)])
+
+
 def flavour_totals(orders: list[dict]) -> list[str]:
     """Righe "Bufala: 3,5 kg (calda 2 kg, fredda 1,5 kg) · 6 tranci interi freddi",
     una per prodotto in ordine alfabetico; unità e temperature non si sommano tra loro."""
@@ -164,7 +174,7 @@ def flavour_totals(orders: list[dict]) -> list[str]:
     undefined: dict[str, int] = defaultdict(int)
     for order in orders:
         for item in order.get("items") or []:
-            name = item.get("pizza_name") or "?"
+            name = _flavour_name(item)
             unit = _slice_unit(item)
             if unit == "kg":
                 kg[name][_temperature(item)] += float(item.get("quantity") or 0)

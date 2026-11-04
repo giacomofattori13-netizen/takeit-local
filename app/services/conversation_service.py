@@ -1122,6 +1122,12 @@ def is_phone_orders_next_day_only(restaurant_id: str = "") -> bool:
     return restaurant_flag(load_restaurant(restaurant_id=restaurant_id), "phone_orders_next_day_only", default=False)
 
 
+def is_custom_pizza_enabled(restaurant_id: str = "") -> bool:
+    """True se una pizza fuori menu diventa Margherita + aggiunte. Con false l'agente
+    propone i gusti del menu (Restaurant.custom_pizza_enabled, null = true)."""
+    return restaurant_flag(load_restaurant(restaurant_id=restaurant_id), "custom_pizza_enabled", default=True)
+
+
 def fetch_and_save_restaurant(restaurant_id: str = "") -> dict:
     """Alias usato all'avvio in main.py: prova un refresh Base44 breve, poi fallback locale."""
     fresh = _refresh_restaurant_cache_blocking(restaurant_id)
@@ -3069,9 +3075,14 @@ def _restore_off_menu_names(items: list[dict], message: str) -> None:
                 item["add_ingredients"] = names
 
 
-def _apply_aliases(text: str) -> str:
-    """Sostituisce gli alias fonetici nel testo (case-insensitive, parola intera)."""
+def _apply_aliases(text: str, menu_items: list[dict] | None = None) -> str:
+    """Sostituisce gli alias fonetici nel testo (case-insensitive, parola intera).
+    Un alias non vale se è già il nome di una voce del menu del locale: a Corte del
+    Sole "bondola" è la pizza Bondola, non la mortadella."""
+    menu_names = {str(item.get("name") or "").strip().lower() for item in menu_items or []}
     for alias, canonical in PIZZA_ALIASES.items():
+        if alias.lower() in menu_names:
+            continue
         text = re.sub(rf"\b{re.escape(alias)}\b", canonical, text, flags=re.IGNORECASE)
     return text
 
@@ -3087,7 +3098,7 @@ def extract_order_from_text(
 ) -> dict:
     system_prompt = _get_system_prompt(menu_items, dough_items, state, restaurant_id=restaurant_id)
 
-    normalized = _apply_aliases(message)
+    normalized = _apply_aliases(message, menu_items)
     if normalized != message:
         print(
             "[LLM] Alias applicati: "

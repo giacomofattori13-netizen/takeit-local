@@ -203,8 +203,10 @@ class CallAfterLastPickupTests(_CorteHarness):
         self.assertEqual(self.saved[0]["pickup_date"], FRIDAY.isoformat())
         self.assertEqual(self.saved[0]["pickup_time"], "20:00")
 
-    def test_customer_says_no_and_the_call_closes(self):
+    def test_customer_says_no_twice_and_the_call_closes(self):
         self.order()
+        r = self.say("no grazie")
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", "Per quale giorno le serve?"))
         r = self.say("no grazie")
         self.assertEqual(r.state, "completed")
         self.assertEqual(r.response_message, "Va bene, nessun problema. La aspettiamo un'altra volta, buona serata!")
