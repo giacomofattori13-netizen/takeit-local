@@ -23,6 +23,7 @@ from app.privacy import describe_text_for_log, mask_name, mask_phone
 from app.schemas import ChatRequest
 from app import turn_latency
 from app.telemetry import record_latency
+from app.services.call_log_outcome import order_summary, reservation_summary
 from app.services.conversation_service import (
     SERVICE_UNAVAILABLE_MESSAGE,
     build_closed_message,
@@ -185,6 +186,39 @@ def _order_ref_for_session(session_id: str) -> tuple[str | None, int | None]:
     return order.base44_id, order.order_number
 
 
+def _session_saved_outcome_sync(session_id: str) -> tuple[str, str] | None:
+    """(esito, riassunto) di ciò che la sessione ha salvato, o None se non ha salvato niente.
+
+    Ordine e prenotazione restano l'esito della chiamata qualunque cosa succeda dopo
+    (silenzio, chiamante che riattacca). Per un ordine il riassunto si compone con il
+    suo numero in _call_log_update."""
+    from sqlmodel import select as _select
+
+    with Session(_db_engine) as db:
+        order = db.exec(_select(Order).where(Order.conversation_session_id == session_id)).first()
+        conversation = db.exec(
+            _select(ConversationSession).where(ConversationSession.session_id == session_id)
+        ).first()
+    if order is not None:
+        return "ordine", ""
+    if conversation is None:
+        return None
+    if conversation.state == "reservation_completed":
+        return "prenotazione", _reservation_call_summary(json.loads(conversation.reservation_json or "{}"))
+    pending = _pending_group_request_sync(session_id)
+    return ("prenotazione", pending) if pending else None
+
+
+def _reservation_call_summary(res: dict) -> str:
+    return reservation_summary(
+        res.get("party_size"),
+        res.get("date"),
+        res.get("time"),
+        pending=bool(res.get("large_group")),
+        reference=res.get("reservation_id") or res.get("pending_reservation_id"),
+    )
+
+
 async def _call_log_update(
     session_id: str,
     call_sid: str,
@@ -192,13 +226,19 @@ async def _call_log_update(
     *,
     summary: str = "",
 ) -> None:
-    """Fire-and-forget: finalise the CallLog of `call_sid` with the real outcome."""
+    """Fire-and-forget: finalise the CallLog of `call_sid` with the real outcome.
+
+    Quello che la sessione ha salvato vince su `outcome`: un silenzio dopo la conferma
+    non cancella la prenotazione o l'ordine."""
     from app.services.base44_client import find_call_log_by_sid, update_call_log
 
     record = await asyncio.to_thread(find_call_log_by_sid, call_sid)
     if not record or not record.get("id"):
         print(f"[CallLog] Nessun CallLog per call_sid={call_sid!r} session={session_id!r}")
         return
+    saved = await asyncio.to_thread(_session_saved_outcome_sync, session_id)
+    if saved:
+        outcome, summary = saved
     patch: dict = {"ended_at": _now_iso(), "outcome": outcome}
     duration = _duration_since(record.get("started_at"))
     if duration is not None:
@@ -207,10 +247,7 @@ async def _call_log_update(
         base44_order_id, order_number = await asyncio.to_thread(_order_ref_for_session, session_id)
         if base44_order_id:
             patch["order_id"] = base44_order_id
-        summary = (
-            f"Ordine #{order_number} confermato" if order_number
-            else "Ordine confermato (numero in assegnazione: Base44 non disponibile)"
-        )
+        summary = order_summary(order_number)
     if summary:
         patch["summary"] = summary
     transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
@@ -226,9 +263,9 @@ async def _call_log_close_from_status(call_sid: str, call_status: str, call_dura
     """Chiude il CallLog quando Twilio segnala la fine della chiamata.
 
     Se il CallLog è già chiuso (ordine o prenotazione confermati, nessun input) non lo
-    tocca. Altrimenti è il cliente che ha riattaccato: la trascrizione si salva sempre;
-    l'esito resta "abbandonata" solo se il cliente non ha detto niente, altrimenti
-    diventa "nessun_ordine".
+    tocca. Altrimenti è il cliente che ha riattaccato: la trascrizione si salva sempre.
+    Se la sessione ha salvato un ordine o una prenotazione l'esito è quello; se no resta
+    "abbandonata" solo se il cliente non ha detto niente, altrimenti "nessun_ordine".
     """
     from app.services.base44_client import find_call_log_by_sid, update_call_log
 
@@ -244,17 +281,23 @@ async def _call_log_close_from_status(call_sid: str, call_status: str, call_dura
         patch["duration_seconds"] = duration
     session_id = record.get("session_id") or ""
     turns = await asyncio.to_thread(_customer_turns_sync, session_id) if session_id else 0
-    if turns:
-        patch["outcome"] = "nessun_ordine"
-        patch["summary"] = (
-            f"Chiamata chiusa dal chiamante dopo {turns} {'turno' if turns == 1 else 'turni'} "
-            f"(Twilio: {call_status})"
-        )
-        pending = await asyncio.to_thread(_pending_group_request_sync, session_id)
-        if pending:
-            # Richiesta di gruppo già salvata prima del trasferimento: non è persa
-            patch["outcome"] = "prenotazione"
-            patch["summary"] = f"{pending} (Twilio: {call_status})"
+    saved = await asyncio.to_thread(_session_saved_outcome_sync, session_id) if session_id else None
+    if turns or saved:
+        if saved:
+            # Salvato prima che il cliente riattaccasse: non è perso
+            patch["outcome"], saved_summary = saved
+            if patch["outcome"] == "ordine":
+                base44_order_id, order_number = await asyncio.to_thread(_order_ref_for_session, session_id)
+                if base44_order_id:
+                    patch["order_id"] = base44_order_id
+                saved_summary = order_summary(order_number)
+            patch["summary"] = f"{saved_summary} (Twilio: {call_status})"
+        else:
+            patch["outcome"] = "nessun_ordine"
+            patch["summary"] = (
+                f"Chiamata chiusa dal chiamante dopo {turns} {'turno' if turns == 1 else 'turni'} "
+                f"(Twilio: {call_status})"
+            )
         transcript = await asyncio.to_thread(_fetch_transcript_sync, session_id)
         if transcript:
             patch["transcript"] = transcript
@@ -279,7 +322,8 @@ def _pending_group_request_sync(session_id: str) -> str | None:
     status = "passata al locale" if res.get("handoff_accepted") else "richiamare il cliente"
     return (
         f"Richiesta prenotazione per {res.get('party_size')} persone, "
-        f"{res.get('date', '')} alle {res.get('time', '')}, da confermare: {status}"
+        f"{res.get('date', '')} alle {res.get('time', '')}, da confermare: {status} "
+        f"(rif. {res['pending_reservation_id']})"
     )
 
 
@@ -291,11 +335,7 @@ def _call_log_outcome_for_result(result) -> tuple[str, str] | None:
             return "ordine", ""
         return "nessun_ordine", "Chiamata terminata senza ordine"
     if result.state == "reservation_completed":
-        res = result.merged_order or {}
-        party = res.get("party_size")
-        when = f"{res.get('date', '')} alle {res.get('time', '')}".strip()
-        pending = " (da confermare: richiamare il cliente)" if res.get("large_group") else ""
-        return "prenotazione", f"Prenotazione per {party} persone, {when}{pending}"
+        return "prenotazione", _reservation_call_summary(result.merged_order or {})
     return None
 
 

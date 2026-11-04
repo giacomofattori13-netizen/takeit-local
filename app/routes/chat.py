@@ -1026,6 +1026,30 @@ def _format_reservation_date_it(date_str: str) -> str:
     return text
 
 
+def _reservation_date_retry_message(restaurant_id: str = "") -> str:
+    """Richiesta di ripetere la data, con esempi vicini a oggi e in giorni di apertura:
+    'domani' e il prossimo sabato (o, se è chiuso, il primo giorno aperto).
+
+    Si cerca da 2 a 7 giorni da oggi: così il giorno della settimana detto dal cliente
+    ripetendo l'esempio è proprio quella data."""
+    _dt = datetime
+    today = _dt.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+
+    def is_open(day) -> bool:
+        return _reservation_day_error(day.isoformat(), restaurant_id) is None
+
+    open_days = [today + _dt.timedelta(days=n) for n in range(2, 8)]
+    open_days = [day for day in open_days if is_open(day)]
+    examples = []
+    if is_open(today + _dt.timedelta(days=1)):
+        examples.append("domani")
+    if open_days:
+        day = next((d for d in open_days if d.weekday() == 5), open_days[0])
+        examples.append(_format_reservation_date_it(day.isoformat()))
+    question = "Non ho capito la data. Può dirmi il giorno?"
+    return f"{question} (Es: {', o '.join(examples)})" if examples else question
+
+
 def _apply_reservation_table_info(res_data: dict, table_info: dict | None) -> None:
     """Aggiorna il riepilogo prenotazione con l'ultima assegnazione tavolo."""
     if not table_info:
@@ -3409,7 +3433,7 @@ def chat(request: ChatRequest, session: SessionDep):
         _log_chat_timing(request.session_id, "reservation_date_retry", request_started_at)
         return _res_response(
             "collecting_reservation_date",
-            "Non ho capito la data. Può dirmi il giorno? (Es: sabato, 21 maggio)",
+            _reservation_date_retry_message(restaurant_id),
         )
 
     if conversation.state == "collecting_reservation_time":
@@ -3736,6 +3760,8 @@ def chat(request: ChatRequest, session: SessionDep):
                     "awaiting_reservation_confirmation",
                     "Mi dispiace, al momento non riesco a registrare la prenotazione. Vuole che riprovi tra un attimo?",
                 )
+            res_data["reservation_id"] = reservation_id  # riferimento per il CallLog
+            conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
             print(
                 f"[Reservation] Confermata session={request.session_id} "
                 f"id={reservation_id} date={res_data.get('date')} time={res_data.get('time')} "
