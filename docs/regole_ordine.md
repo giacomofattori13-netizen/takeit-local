@@ -6,17 +6,45 @@ Tutte le regole d'ordine trovate nel codice e nel prompt, una riga per regola, c
 - **Casi golden**: ``caso `x` `` è un caso di `CASES` in `tests/test_order_rules_golden.py`. Gira con l'estrazione registrata in `test_golden_with_recorded_extraction` e con l'LLM vero, una run per caso, in `test_golden_with_real_llm`.
 - **Comandi**: `pytest tests` senza rete; `pytest tests/test_order_rules_golden.py --run-llm -k real_llm` con l'LLM vero (circa un minuto). L'LLM vero si usa solo se il commit modifica il prompt o l'estrazione dell'ordine.
 - **Controllo**: `test_rules_document_only_cites_tests_that_exist` fallisce se questo documento cita un test che non esiste, e `test_rules_document_cites_every_golden_case` se un caso golden non è citato qui.
+- **Chiamate di prova**: ogni chiamata di test fallita si aggiunge ai casi golden con le sue parole esatte. I casi `reale_*` vengono dalle chiamate del 4 novembre a Corte del Sole.
 - **NON COPERTA**: nessun test verifica la regola. Sono elencate in fondo.
+
+## Ordine o prenotazione
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Decide il contenuto, non la parola "prenotare": un prodotto nominato è un ordine, anche con "prenotarmi" o "mi tiene da parte" | service `classify_call_intent`, prompt | casi `reale_prenotare_una_margherita`, `prenotarmi_una_capricciosa`, `mi_tiene_da_parte`, `tests/test_call_intent_flow.py::test_c2dbefef_a_margherita_is_an_order_not_a_table`, `tests/test_call_intent_flow.py::test_classifier` |
+| "tavolo", "posti", "persone", "siamo in N": prenotazione. "Tavolo" vince su un prodotto; un prodotto vince su "persone" | service `classify_call_intent` | casi `reale_tavolo_dentro_un_ordine`, `siamo_in_quattro`, `tests/test_call_intent_flow.py::test_377c8aa0_a_real_table_is_still_a_table`, `tests/test_call_intent_flow.py::test_classifier` |
+| Né prodotti né tavolo: "Vuole ordinare da asporto o prenotare un tavolo?", una sola volta | chat.py `INTENT_QUESTION` | caso `vorrei_prenotare_e_basta`, `tests/test_call_intent_flow.py::test_no_product_and_no_table_asks`, `tests/test_call_intent_flow.py::test_unknown_first_sentence_asks_once` |
+| La risposta conserva giorno e orario detti prima | chat.py | `tests/test_call_intent_flow.py::test_the_answer_keeps_what_was_said_for_a_table`, `tests/test_call_intent_flow.py::test_the_answer_keeps_what_was_said_for_an_order` |
+| Da ordine a tavolo a metà chiamata: giorno, orario e nome restano, gli articoli non confermati no. Con articoli nel carrello serve la parola "tavolo" | chat.py | `tests/test_call_intent_flow.py::test_fb627c3b_corte_del_sole_then_a_table`, `tests/test_call_intent_flow.py::test_order_to_table_keeps_day_time_name_and_drops_the_items`, `tests/test_call_intent_flow.py::test_a_cart_is_not_dropped_for_persone_alone` |
+| Da tavolo a ordine a metà chiamata: giorno, orario e nome restano. Il prodotto deve seguire un numero o un articolo, perché "Monti" può essere un nome | chat.py, service `mentions_product` | `tests/test_call_intent_flow.py::test_table_to_order_keeps_day_time_and_name`, `tests/test_call_intent_flow.py::test_correction_to_an_order_from_a_reservation` |
+| Prenotazioni spente: "prenotare" senza prodotti riceve "solo ordini da asporto", con un prodotto è un ordine | chat.py | `tests/test_call_intent_flow.py::test_reservations_off_turns_prenotare_away_but_not_a_product` |
+| Cucina chiusa e intento non noto: "La cucina stasera è chiusa. Vuole ordinare per domani o prenotare un tavolo?". Il sì da solo non sceglie | chat.py `_closed_kitchen_intent_question` | caso `reale_corte_del_sole_cucina_chiusa`, `tests/test_call_intent_flow.py::test_answers_to_the_closed_kitchen_question`, `tests/test_call_intent_flow.py::test_prenotare_answers_the_closed_kitchen_question` |
+| Cucina chiusa con un prodotto nominato: resta "vuole ordinare per domani?" | chat.py | `tests/test_call_intent_flow.py::test_a_product_at_closed_kitchen_keeps_the_usual_question` |
+
+## "No" a una domanda
+
+| Regola | Fonte | Test |
+|---|---|---|
+| Un "no", anche ripetuto, a una domanda aperta: "Va bene, cosa devo correggere?" | chat.py `_is_bare_no`, `CORRECTION_QUESTION` | caso `reale_no_alla_domanda_sulle_persone`, `tests/test_call_intent_flow.py::test_no_at_the_party_question_is_not_a_failure` |
+| Mai la stessa frase dopo un "no": la seconda volta si elencano i dati, la terza si saluta e si chiude | chat.py `_ask_correction` | `tests/test_call_intent_flow.py::test_repeated_no_never_repeats_and_ends` |
+| La correzione vale su intento, prodotti, giorno, ora, persone e nome | chat.py | `tests/test_call_intent_flow.py::test_correction_of_each_field_in_a_reservation`, `tests/test_call_intent_flow.py::test_correction_with_the_value_goes_on`, `tests/test_call_intent_flow.py::test_correction_at_the_recap_rechecks_and_recaps`, `tests/test_call_intent_flow.py::test_order_correction_by_field`, `tests/test_call_intent_flow.py::test_order_correction_of_the_day_by_field` |
+| "No" al riepilogo dell'ordine non annulla più: "annulla" e "no grazie" sì | chat.py | `tests/test_call_intent_flow.py::test_no_at_the_order_recap_does_not_cancel_the_order`, `tests/test_call_intent_flow.py::test_explicit_cancel_at_the_recap_still_cancels` |
+| "No, per le 9" è una correzione; "nome" non contiene un "no" | chat.py | `tests/test_call_intent_flow.py::test_no_with_a_value_at_the_order_recap_is_a_correction`, `tests/test_call_intent_flow.py::test_no_with_a_value_in_a_reservation`, `tests/test_call_intent_flow.py::test_nome_at_the_recap_does_not_read_no_inside_the_word` |
+| Il "no" conserva il suo significato dove è una risposta: proposta di orario o nome, giorno proposto, "Va bene interi?" | chat.py | `tests/test_call_intent_flow.py::test_no_keeps_its_meaning_on_a_proposal`, `tests/test_pickup_time_escalation.py::test_no_to_the_proposal_then_a_valid_time_is_used`, `tests/test_order_rules_golden.py::test_no_to_the_closed_day_proposal_asks_for_the_day_and_keeps_the_order` |
 
 ## Pizze fuori menu
 
 | Regola | Fonte | Test |
 |---|---|---|
-| Una pizza fuori menu è una Margherita base con il nome detto come aggiunta | prompt | caso `melanzane_gorgonzola` |
+| Una pizza fuori menu è una Margherita base con il nome detto come aggiunta, solo se le parole sono ingredienti del menu del locale o alias | prompt, service `is_ingredient`, chat.py | caso `melanzane_gorgonzola` |
+| Il resto non diventa un'aggiunta: "Cosa desidera ordinare?" | service `is_ingredient`, chat.py | casi `non_ingrediente_kebab`, `non_ingrediente_porchetta`, `nome_di_persona_non_e_aggiunta` |
+| Saluti e nome del locale non sono un ordine, neppure su una pizza del menu. "Corte del sole" non è la pizza Corte | service `is_only_greeting`, `strip_restaurant_name` | casi `reale_corte_del_sole`, `nome_del_locale_su_una_pizza_del_menu` |
 | Anche se non sembra una pizza, con quantità, giorno e orario | prompt | caso `salamino_domani_alle_8` |
 | Più parole dette sono più aggiunte, nell'ordine | prompt | caso `melanzane_salamino_gorgonzola` |
-| "senza X" va nelle rimozioni e non toglie il nome dalle aggiunte | prompt | casi `wurstel_senza_pomodoro`, `salamino_senza_mozzarella`, `due_kebab_senza_cipolla`, `salamino_e_rucola_senza_pomodoro`, `speck_senza_origano` |
-| Nome perso dall'LLM con una rimozione: si recupera dalla frase | service `_restore_off_menu_names` | `tests/test_order_rules_golden.py::test_off_menu_name_lost_by_the_llm_is_recovered_from_the_sentence`, caso `porchetta_senza_rucola` |
+| "senza X" va nelle rimozioni e non toglie il nome dalle aggiunte | prompt | casi `wurstel_senza_pomodoro`, `salamino_senza_mozzarella`, `due_tonno_senza_cipolla`, `salamino_e_rucola_senza_pomodoro`, `speck_senza_origano` |
+| Nome perso dall'LLM con una rimozione: si recupera dalla frase | service `_restore_off_menu_names` | `tests/test_order_rules_golden.py::test_off_menu_name_lost_by_the_llm_is_recovered_from_the_sentence`, caso `salsiccia_senza_rucola` |
 | Le aggiunte dette dall'LLM non si sovrascrivono | service | `tests/test_order_rules_golden.py::test_additions_said_by_the_llm_are_never_overwritten` |
 | Nome fuori menu restituito dall'LLM: diventa Margherita + nome | chat.py | `tests/test_order_rules_golden.py::test_off_menu_name_returned_by_the_llm_becomes_margherita_with_the_addition` |
 | Nome venduto solo da un altro locale: per questo locale è fuori menu | chat.py | `tests/test_order_rules_golden.py::test_item_sold_only_by_another_restaurant_is_off_menu_here` |

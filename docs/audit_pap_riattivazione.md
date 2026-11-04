@@ -8,6 +8,7 @@ Aggiornamento 2026-10-30: orario non capito, hints STT ed escalation sulle doman
 Aggiornamento 2026-11-03: a cucina chiusa ciò che il cliente ha già detto non si richiede, giorno di ritiro detto una volta, conferma al cliente via SMS e WhatsApp spento con il numero sandbox (punto 8).
 Aggiornamento 2026-11-03: giorno detto rispettato anche a cucina aperta, proposta per i giorni chiusi, pizze fuori menu dette "margherita con…", regressione delle regole d'ordine in `tests/test_order_rules_golden.py` e `docs/regole_ordine.md` (punto 9).
 Aggiornamento 2026-11-04: decisioni sulle domande aperte: alias, nome "Margherita" su Base44, `custom_pizza_enabled`, giorno fisso dei preordini, "no" al giorno proposto (punto 10).
+Aggiornamento 2026-11-04: errori di intento nelle chiamate reali a Corte del Sole: ordine o prenotazione dal contenuto, cucina chiusa, aggiunte solo da ingredienti, "no" a una domanda (punto 11).
 Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in sola lettura dall'API Base44 il 2026-10-26 alle 13:00.
 
 ## Sintesi
@@ -24,6 +25,7 @@ Base44 appId `69c54bc5c44250d7da397903`. I record Restaurant sono stati letti in
 | 8 | Informazioni ripetute a cucina chiusa | **RISOLTO**: prodotti, giorno, orario e nome si conservano, il giorno si dice una volta, conferma via SMS | Basso. Da verificare in una chiamata di prova dopo la chiusura |
 | 9 | Giorno detto, pizze fuori menu, regole d'ordine | **RISOLTO**: giorno rispettato sempre, proposta per i giorni chiusi, "margherita con…" a voce, regressione con LLM vero. Decisioni nel punto 10 | Basso |
 | 10 | Decisioni su alias, nome su Base44, pizze fuori menu per locale, giorno fisso, "no" al giorno | **RISOLTO** nel codice. Da fare su Base44: dichiarare e impostare `custom_pizza_enabled`. Da controllare: la dashboard Base44 | Basso, una volta fatti i due controlli |
+| 11 | Errori di intento nelle chiamate reali | **RISOLTO**: ordine o prenotazione dal contenuto, cucina chiusa, aggiunte solo da ingredienti, "no" a una domanda | Basso. Da verificare in una chiamata di prova, e su PaP che il menu abbia gli ingredienti |
 
 ---
 
@@ -408,6 +410,35 @@ Le domande rimaste aperte qui sono decise al punto 10. Le regole non coperte da 
 
 ---
 
+## 11. Errori di intento nelle chiamate del 2026-11-04
+
+Tre chiamate di prova a Corte del Sole, a cucina chiusa. Le trascrizioni su Base44 sono state lette prima delle modifiche.
+
+| Sessione | Cosa ha detto il cliente | Cosa è successo |
+|---|---|---|
+| `fb627c3b` | "Corte del sole." | L'LLM ne ha fatto una Margherita con aggiunta "Corte del sole" |
+| `fb627c3b` | "Posso prenotare un tavolo per 2 sabato 20 novembre" | Il tavolo è stato ignorato: la frase è stata letta come giorno di ritiro, e l'ordine #3 è stato salvato al posto della prenotazione |
+| `c2dbefef` | "Vorrei prenotare una margherita per domani." | È partito il flusso prenotazione, per via della parola "prenotare" |
+| `c2dbefef` | "No no no no." alla domanda sulle persone | "Non ho capito", e la stessa domanda ripetuta |
+| `377c8aa0` | "Vorrei prenotare un tavolo per 3 persone domani alle 8." | Corretta: resta il caso di controllo |
+
+**Correzioni**, con il dettaglio e i test in `docs/regole_ordine.md`:
+
+- Ordine o prenotazione si decide dal contenuto (`classify_call_intent`), non dalla parola "prenotare". Se la frase non lo dice, si chiede.
+- Il cambio di intento a metà chiamata conserva giorno, orario e nome e scarta gli articoli non confermati.
+- A cucina chiusa, con intento non noto, la domanda offre sia l'ordine per domani sia il tavolo.
+- La Margherita con aggiunte vale solo per ingredienti del menu del locale o alias (`is_ingredient`).
+- Un "no" a una domanda porta a "Va bene, cosa devo correggere?". Al riepilogo dell'ordine un "no" non annulla più tutto.
+
+**Conseguenze da conoscere:**
+
+- A CdS "kebab" e "porchetta" non sono ingredienti: non diventano più una Margherita con aggiunta. Per accettarli basta aggiungerli agli ingredienti del menu o a `PIZZA_ALIASES`.
+- Se il menu di un locale non ha ingredienti, il controllo non può giudicare: si scartano solo saluti e nome del locale. Va verificato su PaP.
+
+**Dati corretti:** l'ordine `6aeb99eb73bfcfc4bed909a3` (Margherita + "Corte del sole", sessione `fb627c3b`) è stato impostato a `status = "cancellato"`, senza cancellarlo. Il suo CallLog resta `ordine`, perché l'ordine è stato davvero creato in quella sessione.
+
+**Golden test:** le frasi esatte sono nei casi `reale_*` di `tests/test_order_rules_golden.py`, le chiamate intere in `tests/test_call_intent_flow.py`. Da ora ogni chiamata di test fallita si aggiunge ai golden con le sue parole esatte.
+
 ## Checklist prima della riattivazione
 
 - [ ] Volume Railway su `/data` e `DB_PATH=/data/takeit.db` (punto 1: codice pronto, manca il Volume)
@@ -432,3 +463,7 @@ Le domande rimaste aperte qui sono decise al punto 10. Le regole non coperte da 
 - [ ] Base44: dichiarare `custom_pizza_enabled` e impostarlo a false per PaP, che non ha una Margherita (punto 10)
 - [ ] Dashboard Base44: controllare che nessuna pagina filtri o conti "Personalizzata" (punto 10)
 - [ ] Chiamata di prova a PaP: "una margherita per sabato" deve portare a "Prendiamo ordini solo per…" (punto 10)
+- [x] Ordine o prenotazione dal contenuto, cucina chiusa, aggiunte solo da ingredienti, "no" a una domanda (punto 11)
+- [ ] Chiamata di prova a cucina chiusa: "Corte del sole." e poi "Posso prenotare un tavolo per 2 sabato 20 novembre" devono portare a una prenotazione (punto 11)
+- [ ] Chiamata di prova: "Vorrei prenotare una margherita per domani" deve portare a un ordine (punto 11)
+- [ ] Controllare che i prodotti di PaP passino `is_ingredient`: il menu ha gli ingredienti? (punto 11)

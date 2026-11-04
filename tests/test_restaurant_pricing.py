@@ -229,7 +229,6 @@ class FullOrderNonRegressionTests(_DbTestCase):
             patch.object(chat_module, "validate_pickup_time", return_value=(True, None, None)),
             # Indipendente dall'ora in cui girano i test: dopo le 23:30 non resterebbero orari
             patch.object(chat_module, "earliest_pickup_minutes_today", return_value=20 * 60),
-            patch.object(chat_module, "detect_reservation_intent", return_value=False),
             patch.object(chat_module, "is_dough_available", return_value=True),
             patch.object(chat_module, "_schedule_order_side_effect_job", return_value=None),
             patch.object(chat_module, "extract_order_from_text", side_effect=lambda *a, **k: self.extracted),

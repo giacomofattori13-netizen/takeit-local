@@ -111,15 +111,47 @@ CASES = [
     Case("salamino_senza_mozzarella", "una salamino senza mozzarella",
          [item(PERSONAL, add=["salamino"], remove=["mozzarella"])],
          llm=recorded(items=[item(PERSONAL, add=["salamino"], remove=["mozzarella"])])),
-    Case("due_kebab_senza_cipolla", "due kebab senza cipolla",
-         [item(PERSONAL, 2, add=["kebab"], remove=["cipolla"])],
-         llm=recorded(items=[item(PERSONAL, 2, add=["kebab"], remove=["cipolla"])])),
+    Case("due_tonno_senza_cipolla", "due tonno senza cipolla",
+         [item(PERSONAL, 2, add=["tonno"], remove=["cipolla"])],
+         llm=recorded(items=[item(PERSONAL, 2, add=["tonno"], remove=["cipolla"])])),
     Case("salamino_e_rucola_senza_pomodoro", "una salamino e rucola senza pomodoro",
          [item(PERSONAL, add=["salamino", "rucola"], remove=["pomodoro"])],
          llm=recorded(items=[item(PERSONAL, add=["salamino", "rucola"], remove=["pomodoro"])])),
-    Case("porchetta_senza_rucola", "tre porchetta senza rucola",
-         [item(PERSONAL, 3, add=["porchetta"], remove=["rucola"])],
-         llm=recorded(items=[item(PERSONAL, 3, add=["porchetta"], remove=["rucola"])])),
+    Case("salsiccia_senza_rucola", "tre salsiccia senza rucola",
+         [item(PERSONAL, 3, add=["salsiccia"], remove=["rucola"])],
+         llm=recorded(items=[item(PERSONAL, 3, add=["salsiccia"], remove=["rucola"])])),
+    # ── Solo ingredienti del locale o alias: il resto non diventa un'aggiunta ─
+    Case("non_ingrediente_kebab", "due kebab senza cipolla", final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, 2, add=["kebab"], remove=["cipolla"])]),
+         reply_contains="Cosa desidera ordinare?"),
+    Case("non_ingrediente_porchetta", "tre porchetta senza rucola", final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, 3, add=["porchetta"], remove=["rucola"])]),
+         reply_contains="Cosa desidera ordinare?"),
+    Case("nome_di_persona_non_e_aggiunta", "una Mario", final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, add=["mario"])]), reply_contains="Cosa desidera ordinare?"),
+    Case("nome_del_locale_su_una_pizza_del_menu", "una margherita con Corte del sole", [_MARGHERITA],
+         llm=recorded(items=[item("Margherita", add=["Corte del sole"])])),
+    # ── Dalle chiamate reali del 4 novembre, con le parole esatte ────────────
+    Case("reale_corte_del_sole", "Corte del sole.", final_state="collecting_items",
+         reply_contains="Cosa desidera ordinare?"),
+    Case("reale_corte_del_sole_cucina_chiusa", "Corte del sole.", now=THURSDAY_23, final_state="confirming_next_day",
+         reply_contains="La cucina stasera è chiusa. Vuole ordinare per domani o prenotare un tavolo?"),
+    Case("reale_tavolo_dentro_un_ordine", "Posso prenotare un tavolo per 2 sabato 20 novembre", now=THURSDAY_23,
+         state="confirming_next_day", final_state="collecting_reservation_date",
+         reply_contains="Venerdì è il 20, sabato è il 21: quale dei due?"),
+    Case("reale_prenotare_una_margherita", "Vorrei prenotare una margherita per domani", [_MARGHERITA], day=TOMORROW,
+         llm=recorded(items=[_MARGHERITA]), final_state="collecting_name"),
+    Case("reale_no_alla_domanda_sulle_persone", "No no no no.", state="collecting_reservation_party",
+         final_state="collecting_reservation_party", reply_contains="Va bene, cosa devo correggere?"),
+    # ── Ordine o prenotazione: decide il contenuto ───────────────────────────
+    Case("prenotarmi_una_capricciosa", "vorrei prenotarmi una capricciosa", [item("Capricciosa")],
+         llm=recorded(items=[item("Capricciosa")])),
+    Case("mi_tiene_da_parte", "mi tiene da parte una margherita per domani", [_MARGHERITA], day=TOMORROW,
+         llm=recorded(items=[_MARGHERITA]), final_state="collecting_name"),
+    Case("vorrei_prenotare_e_basta", "vorrei prenotare", final_state="collecting_items",
+         reply_contains="Vuole ordinare da asporto o prenotare un tavolo?"),
+    Case("siamo_in_quattro", "siamo in 4 per domani", final_state="collecting_reservation_time",
+         reply_contains="A che ora?"),
     Case("speck_senza_origano", "una speck senza origano",
          [item(PERSONAL, add=["speck"], remove=["origano"])],
          llm=recorded(items=[item(PERSONAL, add=["speck"], remove=["origano"])])),
@@ -811,10 +843,10 @@ def test_simplest_flavour_wins_a_tie():
 
 
 def test_off_menu_refused_when_the_llm_returns_the_bare_name():
-    call = _no_custom(recorded(items=[item("Porchetta")]))
+    call = _no_custom(recorded(items=[item("Speck")]))
     with call.open():
-        response = call.say("una porchetta")
-        assert response.response_message.startswith("Porchetta oggi non c'è, abbiamo")
+        response = call.say("una speck")
+        assert response.response_message.startswith("Speck oggi non c'è, abbiamo")
 
 
 def test_off_menu_refused_keeps_the_other_pizzas_day_and_time():
@@ -1015,21 +1047,21 @@ def _say_with_llm_item(name, intent="add_items", sold_out=()):
 
 
 def test_off_menu_name_returned_by_the_llm_becomes_margherita_with_the_addition():
-    response, items = _say_with_llm_item("Porchetta")
-    assert (items[0]["name"], items[0]["add"], items[0]["remove"]) == (PERSONAL, ["porchetta"], ["rucola"])
+    response, items = _say_with_llm_item("Speck")
+    assert (items[0]["name"], items[0]["add"], items[0]["remove"]) == (PERSONAL, ["speck"], ["rucola"])
     assert "menu" not in response.response_message
 
 
 def test_item_sold_only_by_another_restaurant_is_off_menu_here():
-    """Porchetta è di Pizza a Pezzi: stesso DB, ma per CdS è fuori menu, non un refuso."""
+    """Speck è solo di un altro locale: stesso DB, ma per CdS è fuori menu, non un refuso."""
     call = _script()
-    call.extractions.append(recorded(items=[item("Porchetta", 3, remove=["rucola"])]))
+    call.extractions.append(recorded(items=[item("Speck", 3, remove=["rucola"])]))
     with call.open():
-        call.session.add(MenuItem(name="Porchetta", category="pizza", pizza_type="Normale", price=19.9, restaurant_id="altro-locale"))
+        call.session.add(MenuItem(name="Speck", category="pizza", pizza_type="Normale", price=19.9, restaurant_id="altro-locale"))
         call.session.commit()
-        response = call.say("tre porchetta senza rucola")
+        response = call.say("tre speck senza rucola")
         items = _normalized_items(call.conversation().items_json)
-    assert (items[0]["name"], items[0]["add"]) == (PERSONAL, ["porchetta"])
+    assert (items[0]["name"], items[0]["add"]) == (PERSONAL, ["speck"])
     assert "Forse intendevi" not in response.response_message
 
 

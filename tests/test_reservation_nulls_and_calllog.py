@@ -51,13 +51,6 @@ class _NullReservationsAt2302(covers._ReservationHarness):
     now = datetime.datetime(2026, 10, 1, 23, 2, tzinfo=covers.hours.ROME)
     restaurant = {**covers.CDS_RESERVATIONS, "reservations_enabled": None}
 
-    def setUp(self):
-        super().setUp()
-        # Riconoscimento reale dell'intento di prenotazione, come nella chiamata
-        p = patch.object(chat_module, "detect_reservation_intent", service.detect_reservation_intent)
-        p.start()
-        self.addCleanup(p.stop)
-
 
 class NullReservationsTests(_NullReservationsAt2302):
     def test_table_for_tomorrow_at_2302_with_null_reservations(self):

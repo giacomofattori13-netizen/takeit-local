@@ -1882,17 +1882,132 @@ def upsert_customer(
             print(f"[Customer] Errore create: {type(e).__name__}: {_mask_b44(e)}")
 
 
-_RESERVATION_INTENT_PATTERNS = re.compile(
-    r"vorrei\s+prenotar|prenotar|prenot|ho\s+un\s+tavolo|posso\s+prenotar"
-    r"|un\s+tavolo|tavolo\s+per|posto\s+per|cena\s+per|pranzo\s+per"
-    r"|riservare?\s+un\s+tavolo|riservazione",
-    re.IGNORECASE,
+# ── Ordine o prenotazione: decide il contenuto, non la parola "prenotare" ───────
+_TABLE_WORDS_RE = re.compile(r"\btavol[oi]\b|\briservazione\b")
+_SEAT_WORDS_RE = re.compile(
+    r"\bposti\b|\bposto\s+per\b|\bperson[ae]\b|\bsiamo\s+in\b|\bcopert[oi]\b|\b(?:cena|pranzo)\s+per\b"
 )
+_BOOKING_WORDS_RE = re.compile(r"prenot|riserv")
+_HOLD_WORDS_RE = re.compile(r"\b(?:tien|tenet|mett|metti)\w*\s+da\s+parte\b")
+_PRODUCT_WORDS_RE = re.compile(r"\bpizz[ae]\b|\btranci[o]?\b|\bmargherit[ae]\b")
+_COUNT_WORDS = {"una", "un", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci"}
+_NOT_INGREDIENT_WORDS = {
+    "del", "dello", "della", "dei", "degli", "delle", "di", "al", "allo", "alla", "ai", "agli", "alle",
+    "nel", "nella", "con", "e", "ed", "la", "il", "lo", "le", "gli", "i", "un", "una", "uno",
+}
+_GREETING_WORDS = {
+    "buonasera", "buongiorno", "salve", "ciao", "pronto", "buon", "giorno", "sera", "buona",
+    "ristorante", "pizzeria", "parlo", "con", "la", "il", "alla", "della", "del", "e",
+}
 
 
-def detect_reservation_intent(message: str) -> bool:
-    """Restituisce True se il messaggio indica una richiesta di prenotazione tavolo."""
-    return bool(_RESERVATION_INTENT_PATTERNS.search(message))
+def _plain_words(text: str) -> list[str]:
+    """Parole minuscole senza accenti e senza punteggiatura."""
+    normalized = unicodedata.normalize("NFD", (text or "").lower())
+    plain = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+    return re.findall(r"[a-z0-9]+", plain)
+
+
+def _word_stem(word: str) -> str:
+    """Singolare e plurale coincidono: funghi/fungo, oliva/olive, margherita/margherite."""
+    return re.sub(r"h?[aeiou]$", "", word)
+
+
+def strip_restaurant_name(message: str, restaurant_name: str = "") -> str:
+    """Il messaggio senza il nome del locale: "Corte del sole" non è la pizza Corte."""
+    words = _plain_words(restaurant_name)
+    if not words:
+        return message
+    pattern = r"[\s,.;:!?'-]+".join(re.escape(word) for word in words)
+    return re.sub(rf"\b{pattern}\b", " ", message, flags=re.IGNORECASE).strip(" ,.;:!?-")
+
+
+def is_only_greeting(message: str, restaurant_name: str = "") -> bool:
+    """Solo saluti e nome del locale: nessuna richiesta nella frase."""
+    if not _plain_words(message):
+        return False
+    return all(word in _GREETING_WORDS for word in _plain_words(strip_restaurant_name(message, restaurant_name)))
+
+
+def known_ingredient_words(menu_items: list[dict] | None) -> set[str]:
+    """Radici delle parole negli ingredienti del menu del locale. Vuoto se il menu non li ha."""
+    stems: set[str] = set()
+    for item in menu_items or []:
+        ingredients = item.get("ingredients") or []
+        if isinstance(ingredients, str):
+            ingredients = ingredients.split(",")
+        for ingredient in ingredients:
+            stems.update(_word_stem(w) for w in _plain_words(str(ingredient)) if w not in _NOT_INGREDIENT_WORDS)
+    return stems
+
+
+def _alias_words() -> set[str]:
+    return {
+        _word_stem(word)
+        for pair in PIZZA_ALIASES.items()
+        for side in pair
+        for word in _plain_words(side)
+        if word not in _NOT_INGREDIENT_WORDS
+    }
+
+
+def is_ingredient(addition: str, menu_items: list[dict] | None, restaurant_name: str = "") -> bool:
+    """True se le parole di un'aggiunta sono ingredienti del locale o alias. Saluti, nome del
+    locale e nomi di persona non lo sono. Senza ingredienti nel menu non si può giudicare:
+    si scartano solo saluti e nome del locale."""
+    words = [w for w in _plain_words(addition) if w not in _NOT_INGREDIENT_WORDS]
+    if not words or _plain_words(addition) == _plain_words(restaurant_name) or is_only_greeting(addition, restaurant_name):
+        return False
+    known = known_ingredient_words(menu_items)
+    if not known:
+        return True
+    known |= _alias_words()
+    return all(_word_stem(word) in known for word in words)
+
+
+def mentions_product(message: str, menu_items: list[dict] | None, strict: bool = False) -> bool:
+    """La frase nomina un prodotto: "pizza", una voce del menu, un ingrediente del locale.
+    `strict`: la voce deve seguire un numero o un articolo ("una margherita"), perché
+    durante una prenotazione "Monti" può essere un nome."""
+    plain = " ".join(_plain_words(message))
+    if _PRODUCT_WORDS_RE.search(plain):
+        return True
+    words = plain.split()
+    stems = [_word_stem(word) for word in words]
+    for item in menu_items or []:
+        name = [_word_stem(word) for word in _plain_words(item.get("name", ""))]
+        for start in range(len(stems) - len(name) + 1 if name else 0):
+            if stems[start:start + len(name)] == name and (
+                not strict or (start > 0 and (words[start - 1] in _COUNT_WORDS or words[start - 1].isdigit()))
+            ):
+                return True
+    if strict:
+        return False
+    known = known_ingredient_words(menu_items)
+    return any(stem in known and len(stem) >= 4 for stem in stems)
+
+
+def mentions_table(message: str) -> bool:
+    return _TABLE_WORDS_RE.search(" ".join(_plain_words(message))) is not None
+
+
+def classify_call_intent(message: str, load_menu, restaurant_name: str = "", strict: bool = False) -> str | None:
+    """"reservation", "order", "unknown" (vuole prenotare ma non si capisce cosa) o None se
+    la frase non parla di nessuno dei due. `load_menu` si chiama solo se serve il menu."""
+    cleaned = strip_restaurant_name(message, restaurant_name)
+    plain = " ".join(_plain_words(cleaned))
+    if _TABLE_WORDS_RE.search(plain):
+        return "reservation"
+    if _HOLD_WORDS_RE.search(plain):
+        return "order"
+    has_seats = _SEAT_WORDS_RE.search(plain) is not None
+    if not (strict or has_seats or _BOOKING_WORDS_RE.search(plain)):
+        return None
+    if mentions_product(cleaned, load_menu(), strict=strict):
+        return "order"
+    if has_seats:
+        return "reservation"
+    return "unknown" if _BOOKING_WORDS_RE.search(plain) else None
 
 
 @traced_tool("base44_tables")
@@ -2568,6 +2683,8 @@ Rules:
 - If the user says "con patatine", put "patatine" in add_ingredients.
 - If the user says "bianca", interpret it as remove_ingredients = ["pomodoro"] unless a better pizza base is clearly specified.
 - Never invent ingredients not mentioned by the user.
+- Saluti, il nome del locale, nomi di persona e parole che non sono cibo NON sono pizze: "Corte del sole", "Buonasera", "Mario" → items=[], intent="unknown". Non metterli mai in add_ingredients.
+- "Prenotare", "prenotarmi", "mi tiene da parte" con una pizza nominata sono un ordine: "vorrei prenotare una margherita per domani" → intent="add_items", items=[Margherita].
 - If the customer names a pizza that does NOT appear in the MENU (e.g. "una würstel", "una melanzane e gorgonzola", "una pizza al salmone"), use pizza_name="Personalizzata" and put the unknown pizza name as the FIRST element of add_ingredients, followed by any other ingredients mentioned.
   * "una würstel" → pizza_name="Personalizzata", add_ingredients=["würstel"]
   * "una melanzane e gorgonzola" → pizza_name="Personalizzata", add_ingredients=["melanzane", "gorgonzola"]

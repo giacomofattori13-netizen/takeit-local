@@ -101,7 +101,6 @@ class _CorteHarness(unittest.TestCase):
             patch.object(chat_module, "load_restaurant", side_effect=load),
             patch.object(chat_module, "ensure_restaurant_config", return_value=True),
             patch.object(chat_module, "is_agent_active", return_value=True),
-            patch.object(chat_module, "detect_reservation_intent", side_effect=lambda m: "prenot" in m.lower()),
             patch.object(chat_module, "get_proposable_menu", return_value=[{"name": "Margherita"}]),
             patch.object(chat_module, "get_sold_out_item_names", return_value=set()),
             patch.object(chat_module, "load_doughs", return_value=[]),

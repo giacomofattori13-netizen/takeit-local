@@ -71,7 +71,12 @@ from app.services.conversation_service import (
     lookup_customer,
     upsert_customer,
     ReservationAvailabilityError,
-    detect_reservation_intent,
+    _OFF_MENU_COUNT,
+    classify_call_intent,
+    is_ingredient,
+    is_only_greeting,
+    mentions_table,
+    strip_restaurant_name,
     check_reservation_availability,
     validate_reservation_time,
     save_reservation_to_base44,
@@ -2828,6 +2833,42 @@ def _today_phrase(pickup_time: str | None) -> str:
     return "stasera" if match and int(match.group(1)) >= 17 else "oggi"
 
 
+INTENT_QUESTION = "Vuole ordinare da asporto o prenotare un tavolo?"
+CORRECTION_QUESTION = "Va bene, cosa devo correggere?"
+CORRECTION_FIELDS_QUESTION = "Mi dica pure cosa cambiare: il giorno, l'ora, le persone o il nome."
+CORRECTION_GOODBYE = "Va bene, nessun problema. Se vuole ci richiami quando preferisce. Arrivederci!"
+_BARE_NO_RE = re.compile(r"^(?:ma\s+)?no(?:\s+no)*(?:\s+(?:aspetta|aspetti|scusa|scusi|guarda|guardi|sbagliato))*$")
+_ORDER_ANSWER_RE = re.compile(r"\b(?:ordin\w*|asporto|ritiro|ritirare|da\s+portare\s+via)\b")
+_CORRECTION_FILLER = {
+    "no", "il", "la", "le", "l", "i", "lo", "e", "sbagliato", "sbagliata", "sbagliate", "cambiare", "cambia",
+    "correggere", "devi", "deve", "ha", "capito", "male", "solo", "numero", "di",
+}
+_CORRECTION_FIELDS = {
+    "giorno": "date", "data": "date", "ora": "time", "orario": "time", "persone": "party", "nome": "name",
+    "pizza": "items", "pizze": "items", "ordine": "items", "prodotti": "items", "prodotto": "items",
+}
+
+
+def _is_bare_no(message: str) -> bool:
+    """Un "no" senza altri dati, anche ripetuto: "No no no no."."""
+    words = re.findall(r"[a-z]+", _normalize_for_match(message))
+    return bool(words) and _BARE_NO_RE.match(" ".join(words)) is not None
+
+
+def _correction_field(message: str) -> str | None:
+    """Il dato da correggere se il cliente nomina solo quello ("il giorno", "no, l'ora")."""
+    words = [w for w in re.findall(r"[a-z]+", _normalize_for_match(message)) if w not in _CORRECTION_FILLER]
+    return _CORRECTION_FIELDS.get(words[0]) if len(words) == 1 else None
+
+
+def _closed_kitchen_intent_question(restaurant_id: str = "") -> tuple[datetime.date, str]:
+    """Cucina chiusa e intento non ancora noto: (prossimo giorno aperto, domanda)."""
+    next_date, weekday = get_next_open_day(restaurant_id=restaurant_id)
+    today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+    when = "domani" if next_date == today + datetime.timedelta(days=1) else weekday
+    return next_date, f"La cucina stasera è chiusa. Vuole ordinare per {when} o prenotare un tavolo?"
+
+
 def _next_day_question(restaurant_id: str = "") -> str:
     """Domanda quando oggi non restano orari di ritiro (locali senza preordine automatico)."""
     next_date, weekday = get_next_open_day(restaurant_id=restaurant_id)
@@ -3153,6 +3194,8 @@ def chat(request: ChatRequest, session: SessionDep):
         hours_part = f" siamo aperti {hours}" if hours else " siamo chiusi a quell'ora"
         return None, f"Mi dispiace, {_day_phrase}{hours_part}. A che ora passa?"
 
+    # Ordine o prenotazione secondo questa frase; si calcola prima di ogni flusso
+    _call_intent: str | None = None
     # Giorno cambiato in questo turno e domanda aperta per un giorno in cui si è chiusi
     _day_changed = False
     _closed_day_ask: str | None = None
@@ -3227,7 +3270,7 @@ def chat(request: ChatRequest, session: SessionDep):
         chiuso, o diverso da quello fisso dei preordini, apre la proposta (_closed_day_ask).
         Le prenotazioni hanno il loro flusso."""
         nonlocal _day_changed
-        if conversation.completed or _date_conflict_resolved or detect_reservation_intent(request.message):
+        if conversation.completed or _date_conflict_resolved or _call_intent == "reservation":
             return None
         # Alla domanda sul nome "Domenica" è un nome: il giorno deve essere esplicito
         if conversation.state == "collecting_name" and not re.search(
@@ -3473,7 +3516,29 @@ def chat(request: ChatRequest, session: SessionDep):
             session.add(conversation)
             session.commit()
             print("[Reservation] reservations_enabled=False: stato prenotazione resettato")
-        if detect_reservation_intent(request.message):
+
+    _restaurant_name = load_restaurant(restaurant_id=restaurant_id).get("name") or ""
+    _res_question_states = {
+        "collecting_reservation_date",
+        "collecting_reservation_time",
+        "collecting_reservation_party",
+        "collecting_reservation_name",
+        "awaiting_reservation_confirmation",
+    }
+    _order_question_states = {"collecting_items", "collecting_name", "collecting_pickup_time", "awaiting_confirmation"}
+    _intent_states = {*_order_question_states, *_res_question_states, *_KG_SLOT_STATES, "confirming_next_day", "confirming_usual"}
+    _in_reservation = conversation.state in _res_question_states
+    _cart_now = json.loads(conversation.items_json)
+    if conversation.state in _intent_states and not conversation.completed:
+        _call_intent = classify_call_intent(
+            request.message,
+            lambda: get_proposable_menu(restaurant_id=restaurant_id),
+            _restaurant_name,
+            strict=_in_reservation,
+        )
+
+    if not _reservations_on:
+        if _call_intent in ("reservation", "unknown"):
             print("[Reservation] reservations_enabled=False: intent prenotazione ignorato")
             _log_chat_timing(request.session_id, "reservation_disabled", request_started_at)
             return _res_response(
@@ -3483,26 +3548,185 @@ def chat(request: ChatRequest, session: SessionDep):
 
     _prefilled_party: int | None = None
 
-    # Trigger: messaggio di prenotazione nel primo turno
+    def _ask_call_intent(question: str, state: str, proposal: "datetime.date | None" = None) -> str:
+        """Si chiede ordine o prenotazione; la frase si tiene per giorno e orario già detti."""
+        data = _slot_state(conversation)
+        data["intent_question"] = {"message": request.message}
+        data["intent_asked"] = True
+        if proposal:
+            data["next_day_proposal"] = {"date": proposal.isoformat(), "question": question}
+        _store_slot_state(conversation, data)
+        conversation.state = state
+        return question
+
+    _intent_slots = _slot_state(conversation)
+    _intent_open = _intent_slots.get("intent_question")
+    _intent_earlier = (_intent_open or {}).get("message", "")
+    _said_order = bool(_intent_open) and _ORDER_ANSWER_RE.search(_normalize_for_match(request.message)) is not None
+    if _reservations_on and _intent_open and not conversation.completed:
+        if _call_intent == "unknown":
+            _call_intent = "reservation"  # "prenotare" come risposta alla domanda
+        elif _said_order and not _call_intent and conversation.state == "collecting_items":
+            # Ordine: valgono giorno e orario detti nella frase di prima
+            _intent_slots.pop("intent_question", None)
+            _store_slot_state(conversation, _intent_slots)
+            _earlier_day = _spoken_pickup_day(_intent_earlier, restaurant_id)
+            if _earlier_day:
+                _set_pickup_day(_earlier_day, said=False)
+            _earlier_time = _time_in_sentence(_intent_earlier)
+            if _earlier_time and _earlier_time != "prima_possibile":
+                conversation.pickup_time = _check_pickup_time(_earlier_time)[0]
+            return _res_response("collecting_items", "Cosa desidera ordinare?")
+
+    # "Vorrei prenotare" senza prodotti né tavolo: si chiede, senza presupporre
     if (
         _reservations_on
+        and _call_intent == "unknown"
         and conversation.state == "collecting_items"
-        and not json.loads(conversation.items_json)
-        and detect_reservation_intent(request.message)
+        and not _cart_now
     ):
+        _log_chat_timing(request.session_id, "call_intent_question", request_started_at)
+        if _ask_next_day:
+            _proposal_day, _closed_question = _closed_kitchen_intent_question(restaurant_id)
+            return _res_response(
+                "confirming_next_day", _ask_call_intent(_closed_question, "confirming_next_day", _proposal_day),
+            )
+        return _res_response("collecting_items", _ask_call_intent(INTENT_QUESTION, "collecting_items"))
+
+    # Solo saluti o il nome del locale: mai un ordine, e l'intento non è ancora noto
+    if (
+        conversation.state == "collecting_items"
+        and not _cart_now
+        and not conversation.completed
+        and is_only_greeting(request.message, _restaurant_name)
+    ):
+        _log_chat_timing(request.session_id, "greeting_only", request_started_at)
+        if _ask_next_day and _reservations_on:
+            _proposal_day, _closed_question = _closed_kitchen_intent_question(restaurant_id)
+            return _res_response(
+                "confirming_next_day", _ask_call_intent(_closed_question, "confirming_next_day", _proposal_day),
+            )
+        if _ask_next_day:
+            return _res_response("confirming_next_day", _next_day_question(restaurant_id))
+        return _res_response("collecting_items", "Cosa desidera ordinare?")
+
+    # Cambio di intento: da ordine a tavolo. Giorno, orario e nome restano, gli articoli
+    # non confermati no. Con articoli nel carrello serve la parola "tavolo".
+    _switch_to_reservation = (
+        _reservations_on
+        and _call_intent == "reservation"
+        and conversation.state not in _res_question_states
+        and (not _cart_now or mentions_table(request.message))
+    )
+    _reservation_seed: dict = {}
+    if _switch_to_reservation:
+        if conversation.pickup_date and not _next_day_only:
+            _reservation_seed["date"] = conversation.pickup_date
+        if conversation.pickup_time:
+            _reservation_seed["time"] = conversation.pickup_time
+        if _cart_now:
+            print(f"[Intent] Da ordine a prenotazione: scartati {len(_cart_now)} articoli non confermati")
+        conversation.items_json = "[]"
+        conversation.intended_quantity = None
+        conversation.pickup_time = None
+        if not _next_day_only:
+            conversation.pickup_date = None
+        _intent_slots = _slot_state(conversation)
+        for _key in ("intent_question", "next_day_proposal", "asking_pickup_day", "date_conflict", "next_day_pickup_time", "correcting"):
+            _intent_slots.pop(_key, None)
+        _store_slot_state(conversation, _intent_slots)
+
+    # Cambio di intento: da prenotazione a ordine. Giorno, orario e nome restano.
+    def _switch_reservation_to_order() -> None:
+        res_data = json.loads(conversation.reservation_json or "{}")
+        conversation.reservation_json = "{}"
+        conversation.state = "collecting_items"
+        data = _slot_state(conversation)
+        data.pop("correcting", None)
+        _store_slot_state(conversation, data)
+        if res_data.get("date"):
+            _set_pickup_day(datetime.date.fromisoformat(res_data["date"]), said=False)
+        if res_data.get("time"):
+            conversation.pickup_time = _check_pickup_time(res_data["time"])[0]
+        print("[Intent] Da prenotazione a ordine: giorno, orario e nome restano")
+
+    if (
+        _call_intent == "order"
+        and conversation.state in _res_question_states
+        and not json.loads(conversation.reservation_json or "{}").get("pending_reservation_id")
+    ):
+        _switch_reservation_to_order()
+        _in_reservation = False
+
+    # "No" a una domanda non è una risposta non capita: si chiede cosa correggere, e mai
+    # due volte la stessa frase. Al terzo "no" di fila si saluta.
+    def _ask_correction() -> "tuple[str, str]":
+        data = _slot_state(conversation)
+        asked = int(data.get("correcting") or 0)
+        data["correcting"] = asked + 1
+        _store_slot_state(conversation, data)
+        if asked == 0:
+            return conversation.state, CORRECTION_QUESTION
+        if asked == 1:
+            return conversation.state, CORRECTION_FIELDS_QUESTION
+        return "completed", CORRECTION_GOODBYE
+
+    _correction_slots = _slot_state(conversation)
+    _no_has_its_own_meaning = (
+        bool(conversation.pending_customer_name)
+        or bool(_correction_slots.get("customer_name", {}).get("proposed"))
+        or bool(_correction_slots.get("pickup_time", {}).get("proposed"))
+    )
+    if (
+        _is_bare_no(request.message)
+        and not conversation.completed
+        and not _no_has_its_own_meaning
+        and conversation.state in {*_res_question_states, *_order_question_states}
+    ):
+        _no_state, _no_reply = _ask_correction()
+        conversation.state = _no_state
+        _log_chat_timing(request.session_id, "correction_question", request_started_at)
+        return _res_response(_no_state, _no_reply)
+
+    # Risposta a "cosa devo correggere?" durante un ordine
+    if _correction_slots.get("correcting") and conversation.state in _order_question_states:
+        _field = _correction_field(request.message)
+        _correction_slots.pop("correcting", None)
+        _store_slot_state(conversation, _correction_slots)
+        if _field == "name":
+            conversation.customer_name = None
+            conversation.state = "collecting_name"
+            return _res_response("collecting_name", "A che nome?")
+        if _field == "time":
+            conversation.pickup_time = None
+            conversation.state = "collecting_pickup_time"
+            return _res_response("collecting_pickup_time", "A che ora passa?")
+        if _field == "date":
+            _correction_slots["asking_pickup_day"] = True
+            _store_slot_state(conversation, _correction_slots)
+            conversation.state = "confirming_next_day"
+            return _res_response("confirming_next_day", PICKUP_DAY_QUESTION)
+        conversation.state = "collecting_items"
+        if _field == "items":
+            return _res_response("collecting_items", "Mi dica pure cosa cambiare nell'ordine.")
+        # Il dato corretto è nella frase: la legge il percorso normale
+
+    # Trigger: prenotazione da inizio chiamata o cambio di intento
+    if _switch_to_reservation:
         conversation.state = "collecting_reservation_date"
         conversation.reservation_json = "{}"
         _capture_reservation_preferences()
         print(f"[Reservation] Intent rilevato, entro nel flusso prenotazione")
         _log_chat_timing(request.session_id, "reservation_intent", request_started_at)
         # Giorno, ora e persone già detti nella stessa frase: si chiede solo il resto
-        _details = _extract_reservation_details(request.message)
+        _details_text = f"{_intent_earlier} {request.message}".strip()
+        _details = {**_reservation_seed, **_extract_reservation_details(_details_text)}
         _res_data = json.loads(conversation.reservation_json or "{}")
         if _details.get("party_size"):
             # Le persone si tengono anche se mancano giorno o ora: non si richiedono dopo
             _res_data["party_size"] = _details["party_size"]
             conversation.reservation_json = json.dumps(_res_data, ensure_ascii=False)
-        _date_conflict = _weekday_date_conflict(request.message, bare_day=True)
+        _date_conflict = _weekday_date_conflict(_details_text, bare_day=True)
         if _date_conflict:
             return _res_response("collecting_reservation_date", _ask_reservation_date_conflict(_date_conflict))
         _day_error = _reservation_day_error(_details["date"], restaurant_id) if _details.get("date") else None
@@ -3534,6 +3758,81 @@ def chat(request: ChatRequest, session: SessionDep):
 
     if conversation.state in _reservation_states:
         _capture_reservation_preferences()
+
+    # Risposta a "cosa devo correggere?", oppure "no, per domani", durante una prenotazione
+    if conversation.state in _res_question_states and (
+        _slot_state(conversation).get("correcting") or _normalize_for_match(request.message).startswith("no ")
+        or _normalize_for_match(request.message).startswith("no,")
+    ) and not (
+        conversation.state == "awaiting_reservation_confirmation"
+        and _reservation_confirmation_intent(request.message) == "cancel"
+        and not _extract_reservation_details(request.message)
+        and not _correction_field(request.message)
+        and not _slot_state(conversation).get("correcting")
+    ):
+        _was_correcting = bool(_slot_state(conversation).get("correcting"))
+        _clear_correcting = _slot_state(conversation)
+        _clear_correcting.pop("correcting", None)
+        _store_slot_state(conversation, _clear_correcting)
+        _field = _correction_field(request.message)
+        _res_now = json.loads(conversation.reservation_json or "{}")
+        if _ORDER_ANSWER_RE.search(_normalize_for_match(request.message)) and not _res_now.get("pending_reservation_id"):
+            _switch_reservation_to_order()
+            return _res_response("collecting_items", "Cosa desidera ordinare?")
+        if _field:
+            _field_steps = {
+                "date": ("date", "collecting_reservation_date", "Per quale giorno?"),
+                "time": ("time", "collecting_reservation_time", "A che ora?"),
+                "party": ("party_size", "collecting_reservation_party", "Per quante persone?"),
+            }
+            if _field == "name":
+                conversation.customer_name = None
+                conversation.state = "collecting_reservation_name"
+                return _res_response("collecting_reservation_name", "A nome di chi?")
+            if _field in _field_steps:
+                _key, _step_state, _step_question = _field_steps[_field]
+                _res_now.pop(_key, None)
+                conversation.reservation_json = json.dumps(_res_now, ensure_ascii=False)
+                conversation.state = _step_state
+                return _res_response(_step_state, _step_question)
+        _conflict_now = _weekday_date_conflict(request.message, bare_day=True)
+        if _conflict_now:
+            return _res_response("collecting_reservation_date", _ask_reservation_date_conflict(_conflict_now))
+        _new_details = _extract_reservation_details(request.message)
+        if _new_details.get("date"):
+            _day_error = _reservation_day_error(_new_details["date"], restaurant_id)
+            if _day_error:
+                conversation.state = "collecting_reservation_date"
+                return _res_response("collecting_reservation_date", _day_error)
+            _res_now["date"] = _new_details["date"]
+        if _new_details.get("time"):
+            _new_time = resolve_pickup_time(_new_details["time"])
+            _time_ok, _time_error = validate_reservation_time(
+                _res_now.get("date", ""), _new_time, restaurant_id=restaurant_id,
+            ) if _res_now.get("date") else (True, None)
+            if not _time_ok:
+                conversation.reservation_json = json.dumps(_res_now, ensure_ascii=False)
+                conversation.state = "collecting_reservation_time"
+                return _res_response("collecting_reservation_time", _time_error or "A che ora?")
+            _res_now["time"] = _new_time
+        if _new_details.get("party_size"):
+            _res_now["party_size"] = _new_details["party_size"]
+        if _new_details:
+            conversation.reservation_json = json.dumps(_res_now, ensure_ascii=False)
+            if not _res_now.get("date"):
+                conversation.state = "collecting_reservation_date"
+                return _res_response("collecting_reservation_date", "Per quale giorno?")
+            if not _res_now.get("time"):
+                conversation.state = "collecting_reservation_time"
+                return _res_response("collecting_reservation_time", "A che ora?")
+            if not _res_now.get("party_size"):
+                conversation.state = "collecting_reservation_party"
+                return _res_response("collecting_reservation_party", "Per quante persone?")
+            # Tutto noto: disponibilità e riepilogo passano dal controllo qui sotto
+            conversation.state = "collecting_reservation_party"
+            _prefilled_party = int(_res_now["party_size"])
+        elif _was_correcting:
+            return _res_response(conversation.state, CORRECTION_FIELDS_QUESTION)
 
     if conversation.state in ("collecting_reservation_date", "collecting_reservation_time"):
         # "Sabato, siamo in 4": le persone dette prima della domanda non si richiedono
@@ -3973,6 +4272,12 @@ def chat(request: ChatRequest, session: SessionDep):
         # Dopo un "no" si è chiesto il giorno: non c'è nessuna proposta a cui dire sì
         _nd_conflict = _nd_slots.get("date_conflict")
         _nd_asking_day = bool(_nd_slots.get("asking_pickup_day") or _nd_conflict)
+        if _nd_slots.get("intent_question"):
+            # "Vuole ordinare per domani o prenotare un tavolo?": il sì da solo non sceglie
+            _yes = _ORDER_ANSWER_RE.search(_normalize_for_match(request.message))
+            if _yes:
+                _nd_slots.pop("intent_question", None)
+                _store_slot_state(conversation, _nd_slots)
         _nd_question = (
             _date_conflict_question(*map(datetime.date.fromisoformat, _nd_conflict)) if _nd_conflict
             else PICKUP_DAY_QUESTION if _nd_asking_day
@@ -4183,14 +4488,20 @@ def chat(request: ChatRequest, session: SessionDep):
             _new_day_resp = f"{_day_note} {_new_day_resp}"
         return _local_reply(_new_day_state, _new_day_resp, _new_day_merged, "change_pickup_day")
 
+    # "No, per le 9" al riepilogo: è una correzione, non l'annullamento dell'ordine
+    if conversation.state == "awaiting_confirmation" and re.match(
+        r"no\b[\s,]+(?!grazie\b|lascia\b|lasci\b|niente\b|annull|cancell)", _normalize_for_match(request.message),
+    ):
+        conversation.state = "collecting_items"
+
     # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
     # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.
     # La risposta del cliente è gestita con puro Python: sì/no/chiedi di nuovo.
     if conversation.state == "awaiting_confirmation":
         _confirm_words = {"si", "sì", "ok", "va bene", "confermo", "certo", "esatto", "perfetto", "yes"}
         _cancel_words  = {"no", "annulla", "cancella", "stop"}
-        _is_confirm = any(w in message_lower for w in _confirm_words)
-        _is_cancel  = any(w in message_lower for w in _cancel_words)
+        _is_confirm = _contains_any_word(message_lower, _confirm_words)
+        _is_cancel  = _contains_any_word(message_lower, _cancel_words)
 
         existing_items = json.loads(conversation.items_json)
         merged_order = {
@@ -4800,7 +5111,7 @@ def chat(request: ChatRequest, session: SessionDep):
     # così il system prompt rimane statico e il prefix caching OpenAI rimane attivo.
     existing_items_ctx = json.loads(conversation.items_json)
     extracted = extract_order_from_text(
-        request.message,
+        strip_restaurant_name(request.message, _restaurant_name) or request.message,
         menu_items_for_llm,
         dough_items,
         state=conversation.state,
@@ -4844,6 +5155,14 @@ def chat(request: ChatRequest, session: SessionDep):
     existing_items = json.loads(conversation.items_json)
     new_items = extracted.get("items", [])
     intent = extracted.get("intent", "unknown")
+    # Il nome del locale non è mai un prodotto, anche se somiglia a una voce del menu
+    _dropped_additions = False
+    _kept_by_name = [
+        item for item in new_items
+        if not is_only_greeting(str(item.get("pizza_name") or ""), _restaurant_name)
+    ]
+    if len(_kept_by_name) != len(new_items):
+        new_items, _dropped_additions = _kept_by_name, True
     for item in new_items:
         item.setdefault("add_ingredients", [])
         item.setdefault("remove_ingredients", [])
@@ -4867,6 +5186,31 @@ def chat(request: ChatRequest, session: SessionDep):
                 item["pizza_name"] = "Personalizzata"
         else:
             item["sale_unit"] = "piece"
+
+    # Margherita + aggiunte solo se le parole sono ingredienti del locale o alias. Saluti,
+    # nome del locale e nomi di persona non diventano mai aggiunte.
+    _kept_items = []
+    for item in new_items:
+        _said = item.get("add_ingredients") or []
+        if item.get("pizza_name") in _OFF_MENU_PIZZA_NAMES:
+            _good = [a for a in _said if is_ingredient(str(a), menu_items_for_llm, _restaurant_name)]
+        else:
+            _good = [a for a in _said if not is_only_greeting(str(a), _restaurant_name)]
+        if len(_good) != len(_said):
+            _dropped_additions = True
+            print(f"[Cart] Scartate {len(_said) - len(_good)} parole che non sono ingredienti")
+            item["add_ingredients"] = _good
+            if not _good and item.get("pizza_name") in _OFF_MENU_PIZZA_NAMES:
+                continue
+        _kept_items.append(item)
+    new_items = _kept_items
+    if _dropped_additions and not new_items and intent in ("add_items", "modify_items", "replace_items"):
+        intent = "unknown"
+    # "Una Mario" è già un ordine anche se l'LLM non ha trovato nessuna pizza
+    if not new_items and intent == "unknown" and re.match(
+        rf"\s*{_OFF_MENU_COUNT}\s+[a-z]", _normalize_for_match(request.message),
+    ):
+        _dropped_additions = True
 
     # custom_pizza_enabled = false: la pizza fuori menu non si prende, si propongono i
     # gusti più simili. La quantità detta vale per il gusto scelto ("2 salamino" → "diavola").
@@ -5148,10 +5492,25 @@ def chat(request: ChatRequest, session: SessionDep):
         restaurant_id=restaurant_id,
         day_said=_day_said_for(conversation.state),
     )
-    if _next_day_ask:
+    _intent_not_known = (
+        _reservations_on
+        and intent == "unknown"
+        and not merged_items
+        and not conversation.pickup_time
+        and not missing_messages
+        and not _slot_state(conversation).get("intent_asked")
+    )
+    if _next_day_ask and _intent_not_known and not _closed_day_ask:
+        _proposal_day, _closed_question = _closed_kitchen_intent_question(restaurant_id)
+        response_message = _ask_call_intent(_closed_question, "confirming_next_day", _proposal_day)
+    elif _next_day_ask:
         response_message = _closed_day_ask or _next_day_question(restaurant_id)
     elif _off_menu_reply and state != "completed":
         response_message = _off_menu_reply
+    elif _dropped_additions and not merged_items and not missing_messages:
+        response_message = "Cosa desidera ordinare?"
+    elif _intent_not_known and conversation.state == "collecting_items":
+        response_message = _ask_call_intent(INTENT_QUESTION, "collecting_items")
     elif (_day_note or _day_changed) and not merged_items and not missing_messages:
         response_message = "Cosa desidera ordinare?"
 

@@ -1203,7 +1203,6 @@ class ChatLogicTests(unittest.TestCase):
             patch.object(chat_module, "get_proposable_menu", return_value=[{"name": "Bufala al taglio"}]),
             patch.object(chat_module, "get_sold_out_item_names", return_value=set()),
             patch.object(chat_module, "validate_pickup_time", return_value=(True, None, None)),
-            patch.object(chat_module, "detect_reservation_intent", return_value=False),
             patch.object(chat_module, "extract_order_from_text", return_value=extracted),
             Session(engine) as session,
         ):

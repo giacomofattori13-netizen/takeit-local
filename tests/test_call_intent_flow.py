@@ -1,0 +1,309 @@
+"""Ordine o prenotazione, cucina chiusa e "no": le chiamate reali del 4 novembre a Corte del
+Sole, turno per turno, con le parole esatte delle trascrizioni. Base44 e LLM sono simulati."""
+import datetime
+import json
+import unittest
+import unittest.mock
+
+import app.routes.chat as chat_module
+import tests.test_opening_hours_flow as hours
+import tests.test_reservation_covers_flow as covers
+from app.services import conversation_service as service
+from tests.test_opening_hours_flow import MARGHERITA, NOTHING
+
+CLOSED = datetime.datetime(2026, 11, 4, 21, 46, tzinfo=hours.ROME)
+OPEN = datetime.datetime(2026, 11, 4, 16, 0, tzinfo=hours.ROME)
+CLOSED_QUESTION = "La cucina stasera è chiusa. Vuole ordinare per domani o prenotare un tavolo?"
+ADD_MARGHERITA = {**NOTHING, "intent": "add_items", "items": [dict(MARGHERITA)]}
+MENU = [
+    {"name": "Margherita", "ingredients": ["pomodoro", "mozzarella"]},
+    {"name": "Capricciosa", "ingredients": ["pomodoro", "funghi trifolati", "olive nere greche"]},
+    {"name": "Corte", "ingredients": ["Asiago", "carciofi", "salamino piccante"]},
+]
+
+
+class _Call(covers._ReservationHarness):
+    restaurant = {**covers.CDS_RESERVATIONS, "name": "Corte Del Sole"}
+
+    def setUp(self):
+        super().setUp()
+        p = unittest.mock.patch.object(chat_module, "get_proposable_menu", return_value=MENU)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def reservation(self):
+        return json.loads(self.conversation().reservation_json)
+
+
+class RealCallsClosedKitchenTests(_Call):
+    now = CLOSED
+
+    def test_fb627c3b_corte_del_sole_then_a_table(self):
+        r = self.say("Corte del sole.")
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", CLOSED_QUESTION))
+        self.assertEqual(json.loads(self.conversation().items_json), [])
+        r = self.say("Posso prenotare un tavolo per 2 sabato 20 novembre.")
+        self.assertEqual(r.state, "collecting_reservation_date")
+        self.assertEqual(r.response_message, "Venerdì è il 20, sabato è il 21: quale dei due?")
+        self.assertEqual(self.reservation()["party_size"], 2)
+        r = self.say("Venerdì.")
+        self.assertEqual((r.state, r.response_message), ("collecting_reservation_time", "A che ora?"))
+        r = self.book("20.", "Giacomo")
+        self.assertEqual(r.state, "awaiting_reservation_confirmation")
+        self.assertIn("venerdì 20 novembre alle 20:00, 2 persone", r.response_message)
+        r = self.say("Sì sì. Sì, Sì,")
+        self.assertEqual(r.state, "reservation_completed")
+        saved = self.reservations[0]
+        self.assertEqual((saved["date"], saved["time"], saved["party_size"]), ("2026-11-20", "20:00", 2))
+        self.assertEqual(self.saved, [])  # nessun ordine
+
+    def test_c2dbefef_a_margherita_is_an_order_not_a_table(self):
+        r = self.say("Vorrei prenotare una margherita per domani.", dict(ADD_MARGHERITA))
+        self.assertNotIn("persone", r.response_message)
+        self.assertFalse(r.state.startswith("collecting_reservation"))
+        conversation = self.conversation()
+        self.assertEqual(conversation.pickup_date, "2026-11-05")
+        self.assertEqual([i["pizza_name"] for i in json.loads(conversation.items_json)], ["Margherita"])
+        self.assertEqual(self.reservation(), {})
+
+    def test_377c8aa0_a_real_table_is_still_a_table(self):
+        r = self.say("Vorrei prenotare un tavolo per 3 persone domani alle 8.")
+        self.assertEqual(r.state, "collecting_reservation_name")
+        r = self.book("Giacomo", "Sì grazie.")
+        self.assertEqual(r.state, "reservation_completed")
+        saved = self.reservations[0]
+        self.assertEqual((saved["date"], saved["time"], saved["party_size"]), ("2026-11-05", "20:00", 3))
+
+    def test_answers_to_the_closed_kitchen_question(self):
+        self.say("Corte del sole.")
+        r = self.say("sì")
+        self.assertEqual(r.state, "confirming_next_day")  # il sì da solo non sceglie
+        r = self.say("voglio ordinare")
+        self.assertEqual(r.response_message, "Perfetto, il ritiro è per domani, giovedì. Cosa desidera ordinare?")
+        self.assertEqual(self.conversation().pickup_date, "2026-11-05")
+
+    def test_prenotare_answers_the_closed_kitchen_question(self):
+        self.say("Buonasera")
+        r = self.say("prenotare")
+        self.assertEqual(r.state, "collecting_reservation_date")
+
+    def test_a_product_at_closed_kitchen_keeps_the_usual_question(self):
+        r = self.say("una margherita", dict(ADD_MARGHERITA))
+        self.assertEqual(r.response_message, "Per stasera la cucina è chiusa, vuole ordinare per domani?")
+
+
+class IntentTests(_Call):
+    now = OPEN
+
+    def test_no_product_and_no_table_asks(self):
+        r = self.say("vorrei prenotare per domani alle 8")
+        self.assertEqual((r.state, r.response_message), ("collecting_items", chat_module.INTENT_QUESTION))
+
+    def test_the_answer_keeps_what_was_said_for_a_table(self):
+        self.say("vorrei prenotare per domani alle 8")
+        r = self.say("un tavolo")
+        self.assertEqual(r.state, "collecting_reservation_party")
+        self.assertEqual((self.reservation()["date"], self.reservation()["time"]), ("2026-11-05", "20:00"))
+
+    def test_the_answer_keeps_what_was_said_for_an_order(self):
+        self.say("vorrei prenotare per domani alle 8")
+        r = self.say("da asporto")
+        self.assertEqual((r.state, r.response_message), ("collecting_items", "Cosa desidera ordinare?"))
+        conversation = self.conversation()
+        self.assertEqual((conversation.pickup_date, conversation.pickup_time), ("2026-11-05", "20:00"))
+
+    def test_unknown_first_sentence_asks_once(self):
+        self.next_extraction = dict(NOTHING)
+        r = self.say("mah non so")
+        self.assertEqual(r.response_message, chat_module.INTENT_QUESTION)
+        r = self.say("boh vediamo")
+        self.assertNotEqual(r.response_message, chat_module.INTENT_QUESTION)
+
+    def test_reservations_off_turns_prenotare_away_but_not_a_product(self):
+        self.restaurant = {**self.restaurant, "reservations_enabled": False}
+        r = self.say("vorrei prenotare")
+        self.assertIn("solo ordini da asporto", r.response_message)
+        r = self.say("vorrei prenotare una margherita", dict(ADD_MARGHERITA))
+        self.assertEqual([i["pizza_name"] for i in json.loads(self.conversation().items_json)], ["Margherita"])
+
+    def test_classifier(self):
+        menu = lambda: MENU  # noqa: E731
+        classify = lambda text, **kw: service.classify_call_intent(text, menu, "Corte Del Sole", **kw)  # noqa: E731
+        for text, expected in (
+            ("vorrei prenotare una margherita", "order"),
+            ("prenotarmi due pizze", "order"),
+            ("mi tiene da parte qualcosa", "order"),
+            ("una pizza per 2 persone", "order"),
+            ("vorrei un tavolo", "reservation"),
+            ("un tavolo e una margherita", "reservation"),
+            ("due posti per stasera", "reservation"),
+            ("siamo in 4", "reservation"),
+            ("vorrei prenotare", "unknown"),
+            ("vorrei prenotare alla Corte del Sole", "unknown"),  # non è la pizza Corte
+            ("una margherita", None),  # niente da decidere: ordine normale
+            ("buonasera", None),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(classify(text), expected)
+        self.assertEqual(classify("Monti", strict=True), None)  # un cognome al nome della prenotazione
+        self.assertEqual(classify("no, una margherita", strict=True), "order")
+
+
+class IntentChangeTests(_Call):
+    now = OPEN
+
+    def test_order_to_table_keeps_day_time_name_and_drops_the_items(self):
+        r = self.say("una margherita per domani alle 8", {**ADD_MARGHERITA, "pickup_time": "20:00"})
+        self.say("Giacomo")
+        r = self.say("anzi, vorrei un tavolo per 4")
+        self.assertEqual(r.state, "awaiting_reservation_confirmation")
+        self.assertEqual(r.response_message, "Allora: Giacomo, domani, giovedì 5 novembre alle 20:00, 4 persone. Confermo?")
+        conversation = self.conversation()
+        self.assertEqual(json.loads(conversation.items_json), [])
+        self.assertIsNone(conversation.pickup_date)
+        self.assertIsNone(conversation.pickup_time)
+
+    def test_a_cart_is_not_dropped_for_persone_alone(self):
+        self.say("una margherita", dict(ADD_MARGHERITA))
+        self.say("siamo in 4", dict(NOTHING))
+        self.assertEqual(len(json.loads(self.conversation().items_json)), 1)
+
+    def test_table_to_order_keeps_day_time_and_name(self):
+        self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")
+        r = self.say("no, volevo una margherita", dict(ADD_MARGHERITA))
+        conversation = self.conversation()
+        self.assertEqual([i["pizza_name"] for i in json.loads(conversation.items_json)], ["Margherita"])
+        self.assertEqual(
+            (conversation.pickup_date, conversation.pickup_time, conversation.customer_name),
+            ("2026-11-05", "20:00", "Giacomo"),
+        )
+        self.assertEqual(self.reservation(), {})
+        self.assertEqual(r.state, "awaiting_confirmation")
+        self.assertEqual(self.reservations, [])
+
+
+class NoAnswerTests(_Call):
+    now = OPEN
+
+    def _at_party(self):
+        return self.book("vorrei un tavolo", "domani", "alle 20")
+
+    def test_no_at_the_party_question_is_not_a_failure(self):
+        self.assertEqual(self._at_party().response_message, "Per quante persone?")
+        r = self.say("No no no no.")
+        self.assertEqual((r.state, r.response_message), ("collecting_reservation_party", chat_module.CORRECTION_QUESTION))
+
+    def test_repeated_no_never_repeats_and_ends(self):
+        self._at_party()
+        replies = [self.say("no").response_message for _ in range(3)]
+        self.assertEqual(replies, [
+            chat_module.CORRECTION_QUESTION, chat_module.CORRECTION_FIELDS_QUESTION, chat_module.CORRECTION_GOODBYE,
+        ])
+        self.assertEqual(self.conversation().state, "completed")
+        self.assertEqual(self.reservations, [])
+
+    def test_correction_of_each_field_in_a_reservation(self):
+        for answer, state, question, key in (
+            ("il giorno", "collecting_reservation_date", "Per quale giorno?", "date"),
+            ("l'ora", "collecting_reservation_time", "A che ora?", "time"),
+        ):
+            with self.subTest(answer=answer):
+                self.session.rollback()
+                conv = self.conversation()
+                conv.state, conv.reservation_json, conv.slot_attempts_json = (
+                    "collecting_reservation_party", json.dumps({"date": "2026-11-05", "time": "20:00"}), "{}",
+                )
+                self.session.add(conv)
+                self.session.commit()
+                self.say("no")
+                r = self.say(answer)
+                self.assertEqual((r.state, r.response_message), (state, question))
+                self.assertNotIn(key, self.reservation())
+
+    def test_correction_with_the_value_goes_on(self):
+        self._at_party()
+        self.say("no")
+        r = self.say("per sabato")
+        self.assertEqual(r.state, "collecting_reservation_party")
+        self.assertEqual(r.response_message, "Per quante persone?")
+        self.assertEqual(self.reservation()["date"], "2026-11-07")
+
+    def test_correction_at_the_recap_rechecks_and_recaps(self):
+        self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")
+        r = self.say("no")
+        self.assertEqual(r.response_message, chat_module.CORRECTION_QUESTION)
+        r = self.say("siamo in 6")
+        self.assertEqual(r.state, "awaiting_reservation_confirmation")
+        self.assertIn("6 persone", r.response_message)
+        self.assertEqual(self.reservations, [])
+
+    def test_no_with_a_value_in_a_reservation(self):
+        self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")
+        r = self.say("no, alle 21")
+        self.assertEqual(r.state, "awaiting_reservation_confirmation")
+        self.assertIn("alle 21:00", r.response_message)
+
+    def test_explicit_cancel_at_the_recap_still_cancels(self):
+        self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")
+        r = self.say("annulla")
+        self.assertEqual(r.response_message, "Prenotazione annullata. Per quale altro giorno vuole prenotare?")
+
+    def test_correction_to_an_order_from_a_reservation(self):
+        self._at_party()
+        self.say("no")
+        r = self.say("volevo ordinare da asporto")
+        self.assertEqual((r.state, r.response_message), ("collecting_items", "Cosa desidera ordinare?"))
+        self.assertEqual(self.conversation().pickup_date, "2026-11-05")
+
+    def _recap(self):
+        self.order("una margherita per domani alle 8", pickup_time="20:00")
+        return self.say("Giacomo")
+
+    def test_no_at_the_order_recap_does_not_cancel_the_order(self):
+        self.assertEqual(self._recap().state, "awaiting_confirmation")
+        r = self.say("no")
+        self.assertEqual(r.response_message, chat_module.CORRECTION_QUESTION)
+        self.assertEqual(len(json.loads(self.conversation().items_json)), 1)
+
+    def test_order_correction_by_field(self):
+        self._recap()
+        self.say("no")
+        r = self.say("il nome")
+        self.assertEqual((r.state, r.response_message), ("collecting_name", "A che nome?"))
+        r = self.say("Marco")
+        self.assertEqual(r.state, "awaiting_confirmation")
+        self.assertIn("a nome Marco", r.response_message)
+
+    def test_order_correction_of_the_day_by_field(self):
+        self._recap()
+        self.say("no")
+        r = self.say("il giorno")
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", chat_module.PICKUP_DAY_QUESTION))
+        r = self.say("sabato")
+        self.assertEqual(self.conversation().pickup_date, "2026-11-07")
+
+    def test_nome_at_the_recap_does_not_read_no_inside_the_word(self):
+        self._recap()
+        r = self.say("nome")
+        self.assertEqual(len(json.loads(self.conversation().items_json)), 1)
+        self.assertNotIn("annullato", r.response_message)
+
+    def test_no_with_a_value_at_the_order_recap_is_a_correction(self):
+        self._recap()
+        r = self.say("no, per le 9", {**NOTHING, "intent": "set_pickup_time", "pickup_time": "21:00"})
+        conversation = self.conversation()
+        self.assertEqual(conversation.pickup_time, "21:00")
+        self.assertEqual(len(json.loads(conversation.items_json)), 1)
+        self.assertEqual(r.state, "awaiting_confirmation")
+
+    def test_no_keeps_its_meaning_on_a_proposal(self):
+        conv = self.conversation()
+        conv.pending_customer_name = "Giacomo"
+        self.session.add(conv)
+        self.session.commit()
+        r = self.say("no", dict(NOTHING))
+        self.assertNotEqual(r.response_message, chat_module.CORRECTION_QUESTION)
+
+
+if __name__ == "__main__":
+    unittest.main()
