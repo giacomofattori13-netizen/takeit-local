@@ -429,6 +429,8 @@ Tre chiamate di prova a Corte del Sole, a cucina chiusa. Le trascrizioni su Base
 - A cucina chiusa, con intento non noto, la domanda offre sia l'ordine per domani sia il tavolo.
 - La Margherita con aggiunte vale solo per ingredienti del menu del locale o alias (`is_ingredient`).
 - Un "no" a una domanda porta a "Va bene, cosa devo correggere?". Al riepilogo dell'ordine un "no" non annulla più tutto.
+- Al terzo "no" di fila, o a un "no" a "Per quale giorno le serve?", la chiamata non si chiude senza traccia: si salva una richiesta di richiamata (`Reservation` `da_confermare`, `needs_review`, motivo "Cliente non capito dopo 3 correzioni"), si prova il trasferimento a `handoff_phone` e, se il locale non risponde, "La faccio richiamare dal locale appena possibile. A presto!". "No grazie" e "lasci stare" restano una rinuncia del cliente.
+- `Reservation` richiede giorno, ora e persone: se il cliente non li ha detti la richiesta porta oggi, 00:00 e 0, e le note dicono "non detto". La dashboard deve mostrare queste note.
 
 **Conseguenze da conoscere:**
 
@@ -466,4 +468,6 @@ Tre chiamate di prova a Corte del Sole, a cucina chiusa. Le trascrizioni su Base
 - [x] Ordine o prenotazione dal contenuto, cucina chiusa, aggiunte solo da ingredienti, "no" a una domanda (punto 11)
 - [ ] Chiamata di prova a cucina chiusa: "Corte del sole." e poi "Posso prenotare un tavolo per 2 sabato 20 novembre" devono portare a una prenotazione (punto 11)
 - [ ] Chiamata di prova: "Vorrei prenotare una margherita per domani" deve portare a un ordine (punto 11)
-- [ ] Controllare che i prodotti di PaP passino `is_ingredient`: il menu ha gli ingredienti? (punto 11)
+- [x] Menu di PaP e CdS con gli ingredienti, il filtro `is_ingredient` funziona su entrambi (punto 11)
+- [ ] Chiamata di prova: tre "no" di fila devono portare al trasferimento e, se il locale non risponde, alla richiesta salvata (punto 11)
+- [ ] Dashboard Base44: una richiesta di richiamata con 00:00 e 0 persone si legge come tale? (punto 11)

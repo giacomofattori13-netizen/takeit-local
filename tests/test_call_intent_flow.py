@@ -193,14 +193,13 @@ class NoAnswerTests(_Call):
         r = self.say("No no no no.")
         self.assertEqual((r.state, r.response_message), ("collecting_reservation_party", chat_module.CORRECTION_QUESTION))
 
-    def test_repeated_no_never_repeats_and_ends(self):
+    def test_repeated_no_never_repeats_and_goes_to_the_restaurant(self):
         self._at_party()
         replies = [self.say("no").response_message for _ in range(3)]
         self.assertEqual(replies, [
-            chat_module.CORRECTION_QUESTION, chat_module.CORRECTION_FIELDS_QUESTION, chat_module.CORRECTION_GOODBYE,
+            chat_module.CORRECTION_QUESTION, chat_module.CORRECTION_FIELDS_QUESTION, chat_module.CALLBACK_HANDOFF_MESSAGE,
         ])
-        self.assertEqual(self.conversation().state, "completed")
-        self.assertEqual(self.reservations, [])
+        self.assertEqual(self.conversation().state, "reservation_handoff")
 
     def test_correction_of_each_field_in_a_reservation(self):
         for answer, state, question, key in (

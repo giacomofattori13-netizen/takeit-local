@@ -33,6 +33,8 @@ from app.services.conversation_service import (
     resolve_restaurant_from_phone,
 )
 from app.routes.chat import (
+    CALLBACK_GOODBYE,
+    CALLBACK_NOT_POSSIBLE,
     NAME_MISS_MESSAGE,
     PICKUP_TIME_MISS_MESSAGE,
     _KG_SLOT_STATES,
@@ -44,6 +46,7 @@ from app.routes.chat import (
     _extract_party_size,
     _format_reservation_date_it,
     _reservation_confirmation_intent,
+    finish_callback_request,
     large_group_callback_prompt,
 )
 
@@ -206,7 +209,11 @@ def _session_saved_outcome_sync(session_id: str) -> tuple[str, str] | None:
     if conversation.state == "reservation_completed":
         return "prenotazione", _reservation_call_summary(json.loads(conversation.reservation_json or "{}"))
     pending = _pending_group_request_sync(session_id)
-    return ("prenotazione", pending) if pending else None
+    if not pending:
+        return None
+    # Una richiesta di richiamata per un ordine non è una prenotazione
+    callback = json.loads(conversation.reservation_json or "{}").get("callback_request")
+    return ("nessun_ordine" if callback and callback["intent"] != "prenotazione" else "prenotazione"), pending
 
 
 def _reservation_call_summary(res: dict) -> str:
@@ -319,6 +326,8 @@ def _pending_group_request_sync(session_id: str) -> str | None:
     res = json.loads((conversation.reservation_json if conversation else None) or "{}")
     if not res.get("pending_reservation_id"):
         return None
+    if res.get("callback_request"):
+        return f"Richiesta di richiamata. {res['callback_request']['summary']} (rif. {res['pending_reservation_id']})"
     status = "passata al locale" if res.get("handoff_accepted") else "richiamare il cliente"
     return (
         f"Richiesta prenotazione per {res.get('party_size')} persone, "
@@ -1477,8 +1486,25 @@ def _dial_result_update(session_id: str, dial_status: str) -> tuple[bool, str | 
         ).first()
         if conversation is None:
             return dial_status == "completed", None
-        if json.loads(conversation.reservation_json or "{}").get("handoff_accepted"):
+        res = json.loads(conversation.reservation_json or "{}")
+        if res.get("handoff_accepted"):
             return True, None
+        if res.get("callback_request"):
+            # Cliente non capito e locale che non risponde: niente altre domande
+            message = finish_callback_request(conversation, session_id, conversation.restaurant_id or "")
+            db.add(conversation)
+            db.add(ConversationLog(
+                session_id=session_id,
+                user_message=f"[dial:{dial_status or 'sconosciuto'}]",
+                extracted_order_json=json.dumps({"intent": "callback_request", "items": []}, ensure_ascii=False),
+                merged_order_json=conversation.reservation_json or "{}",
+                response_message=message,
+                valid=False,
+                missing_items_json="[]",
+                state=conversation.state,
+            ))
+            db.commit()
+            return False, message
         _, message = large_group_callback_prompt(conversation, "Mi dispiace, al momento il locale non risponde.")
         db.add(conversation)
         db.add(ConversationLog(
@@ -1504,7 +1530,7 @@ async def voice_dial_result(
     """Twilio, a fine <Dial> verso il locale: se nessuno ha risposto si torna all'agente."""
     await _verify_twilio_request(request)
     print(f"[Voice] Esito trasferimento session={session_id!r} status={DialCallStatus!r}")
-    transferred, message = _dial_result_update(session_id, DialCallStatus)
+    transferred, message = await asyncio.to_thread(_dial_result_update, session_id, DialCallStatus)
     if transferred:
         twiml = '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Hangup/>\n</Response>'
     elif message is None:
@@ -1514,6 +1540,13 @@ async def voice_dial_result(
             'Provi a richiamarci più tardi. Arrivederci.</Say>\n'
             "  <Hangup/>\n</Response>"
         )
+    elif message in (CALLBACK_GOODBYE, CALLBACK_NOT_POSSIBLE):
+        audio = await _audio_element_async(message)
+        twiml = f'<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  {audio}\n  <Hangup/>\n</Response>'
+        asyncio.create_task(_call_log_update(
+            session_id, await _twilio_call_sid(request), "nessun_ordine",
+            summary="Cliente non capito: richiesta di richiamata non registrata",
+        ))
     else:
         twiml = await _build_retry_gather_twiml(session_id, message)
     return Response(content=twiml, media_type="application/xml")
@@ -1528,6 +1561,8 @@ def _screen_message_sync(session_id: str) -> str | None:
     if conversation is None:
         return None
     res = json.loads(conversation.reservation_json or "{}")
+    if res.get("callback_request"):
+        return f"Cliente non capito dall'agente. {res['callback_request']['summary']} Premi 1 per accettare."
     party = int(res.get("party_size") or 0)
     when = f", {_format_reservation_date_it(res['date'])} alle {res.get('time', '')}" if res.get("date") else ""
     return f"Prenotazione per {party} persone{when}. Premi 1 per accettare."

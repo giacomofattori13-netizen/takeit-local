@@ -503,7 +503,7 @@ def test_yes_to_the_day_question_is_not_an_answer():
         assert call.conversation().pickup_date is None
 
 
-def test_no_to_the_day_question_closes_the_call_without_saving():
+def test_explicit_decline_of_the_day_question_closes_the_call_without_saving():
     call = _script(SUNDAY_16, MONDAY_CLOSED)
     call.extractions.append(recorded(items=[_MARGHERITA]))
     with call.open():

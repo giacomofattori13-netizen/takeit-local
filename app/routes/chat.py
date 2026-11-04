@@ -1147,6 +1147,67 @@ def large_group_callback_prompt(conversation: ConversationSession, intro: str) -
     return state, f"{intro} Prendo i dati e la richiamiamo noi per confermare. {question}"
 
 
+def _callback_request_details(conversation: ConversationSession) -> dict:
+    """Quello che il cliente ha detto finora: intento, prodotti, giorno, ora, persone."""
+    res = json.loads(conversation.reservation_json or "{}")
+    items = json.loads(conversation.items_json or "[]")
+    in_reservation = conversation.state.startswith(("collecting_reservation", "awaiting_reservation")) or bool(
+        res.get("date") or res.get("time") or res.get("party_size")
+    )
+    intent = "prenotazione" if in_reservation else "ordine" if (
+        items or conversation.pickup_date or conversation.pickup_time
+    ) else "non chiaro"
+    date = res.get("date") or conversation.pickup_date
+    time = res.get("time") or conversation.pickup_time
+    party = res.get("party_size")
+    products = ", ".join(format_single_item_for_customer(item) for item in items)
+    summary = (
+        f"Intento: {intent}. Prodotti: {products or 'nessuno'}. "
+        f"Giorno: {_format_reservation_date_it(date) if date else 'non detto'}. "
+        f"Ora: {time or 'non detta'}. Persone: {party or 'non dette'}."
+    )
+    return {"intent": intent, "date": date, "time": time, "party_size": party, "summary": summary}
+
+
+def save_callback_request(conversation: ConversationSession, session_id: str, restaurant_id: str) -> str | None:
+    """Richiesta di richiamata su Base44, una sola per chiamata. Id o None se non riesce.
+
+    Reservation vuole sempre giorno, ora e persone: se il cliente non li ha detti si
+    usano oggi, 00:00 e 0, e le note dicono che non sono stati detti."""
+    res = json.loads(conversation.reservation_json or "{}")
+    if res.get("pending_reservation_id"):
+        return res["pending_reservation_id"]
+    details = _callback_request_details(conversation)
+    today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date().isoformat()
+    phone_note = f"Richiamare al {conversation.customer_phone}" if conversation.customer_phone else "Numero non disponibile"
+    reservation_id = save_reservation_to_base44(
+        customer_name=conversation.customer_name or "Ospite",
+        customer_phone=conversation.customer_phone,
+        date=details["date"] or today,
+        time=details["time"] or "00:00",
+        party_size=int(details["party_size"] or 0),
+        session_id=session_id,
+        notes=f"Richiesta di richiamata. {details['summary']} {phone_note}.",
+        restaurant_id=restaurant_id,
+        status="da_confermare",
+        review_reason=CALLBACK_REVIEW_REASON,
+    )
+    res["callback_request"] = {"intent": details["intent"], "summary": details["summary"]}
+    if reservation_id:
+        res["pending_reservation_id"] = reservation_id
+        res["pending_review_reason"] = CALLBACK_REVIEW_REASON
+    conversation.reservation_json = json.dumps(res, ensure_ascii=False)
+    return reservation_id
+
+
+def finish_callback_request(conversation: ConversationSession, session_id: str, restaurant_id: str) -> str:
+    """Il locale non ha risposto: si registra la richiesta e si saluta. La richiamata si
+    promette solo se è registrata e c'è un numero a cui richiamare."""
+    saved = save_callback_request(conversation, session_id, restaurant_id)
+    conversation.state = "completed"
+    return CALLBACK_GOODBYE if saved and conversation.customer_phone else CALLBACK_NOT_POSSIBLE
+
+
 def _build_pickup_time_error(
     pickup_time: str,
     suggestion: str | None,
@@ -2836,7 +2897,10 @@ def _today_phrase(pickup_time: str | None) -> str:
 INTENT_QUESTION = "Vuole ordinare da asporto o prenotare un tavolo?"
 CORRECTION_QUESTION = "Va bene, cosa devo correggere?"
 CORRECTION_FIELDS_QUESTION = "Mi dica pure cosa cambiare: il giorno, l'ora, le persone o il nome."
-CORRECTION_GOODBYE = "Va bene, nessun problema. Se vuole ci richiami quando preferisce. Arrivederci!"
+CALLBACK_REVIEW_REASON = "Cliente non capito dopo 3 correzioni"
+CALLBACK_GOODBYE = "La faccio richiamare dal locale appena possibile. A presto!"
+CALLBACK_HANDOFF_MESSAGE = "La passo subito al locale, resti in linea."
+CALLBACK_NOT_POSSIBLE = "Mi dispiace, al momento non riesco a prendere la richiesta. La preghiamo di richiamare tra qualche minuto."
 _BARE_NO_RE = re.compile(r"^(?:ma\s+)?no(?:\s+no)*(?:\s+(?:aspetta|aspetti|scusa|scusi|guarda|guardi|sbagliato))*$")
 _ORDER_ANSWER_RE = re.compile(r"\b(?:ordin\w*|asporto|ritiro|ritirare|da\s+portare\s+via)\b")
 _CORRECTION_FILLER = {
@@ -3660,6 +3724,20 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # "No" a una domanda non è una risposta non capita: si chiede cosa correggere, e mai
     # due volte la stessa frase. Al terzo "no" di fila si saluta.
+    def _callback_fallback() -> "tuple[str, str]":
+        """Cliente non capito: come per i gruppi, si salva la richiesta e si prova il
+        trasferimento al locale; senza numero di trasferimento si saluta subito."""
+        _, handoff_phone = get_large_party_settings(restaurant_id)
+        if not handoff_phone:
+            return "completed", finish_callback_request(conversation, request.session_id, restaurant_id)
+        save_callback_request(conversation, request.session_id, restaurant_id)
+        res_data = json.loads(conversation.reservation_json or "{}")
+        res_data["handoff_phone"] = handoff_phone
+        conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+        conversation.state = "reservation_handoff"
+        print("[Callback] Cliente non capito: trasferimento al locale")
+        return "reservation_handoff", CALLBACK_HANDOFF_MESSAGE
+
     def _ask_correction() -> "tuple[str, str]":
         data = _slot_state(conversation)
         asked = int(data.get("correcting") or 0)
@@ -3669,7 +3747,7 @@ def chat(request: ChatRequest, session: SessionDep):
             return conversation.state, CORRECTION_QUESTION
         if asked == 1:
             return conversation.state, CORRECTION_FIELDS_QUESTION
-        return "completed", CORRECTION_GOODBYE
+        return _callback_fallback()
 
     _correction_slots = _slot_state(conversation)
     _no_has_its_own_meaning = (
@@ -4030,6 +4108,11 @@ def chat(request: ChatRequest, session: SessionDep):
             msg = f"Allora: {summary}. Confermo?"
             return _res_response("awaiting_reservation_confirmation", msg)
 
+    if conversation.state == "reservation_handoff" and json.loads(conversation.reservation_json or "{}").get("callback_request"):
+        # Richiesta già salvata e nessun trasferimento in corso: non c'è altro da chiedere
+        _callback_reply = finish_callback_request(conversation, request.session_id, restaurant_id)
+        return _res_response("completed", _callback_reply)
+
     if conversation.state == "reservation_handoff":
         # Nessun trasferimento in corso (chat di test, o chiamata tornata all'agente)
         _cb_state, _cb_msg = large_group_callback_prompt(conversation, "Al momento il locale non risponde.")
@@ -4383,6 +4466,10 @@ def chat(request: ChatRequest, session: SessionDep):
             _nd_state = "confirming_next_day"
             _nd_resp = PICKUP_DAY_QUESTION
             print("[Pickup] giorno proposto rifiutato: chiedo per quale giorno")
+        elif _is_bare_no(request.message):
+            # Un "no" a "Per quale giorno le serve?" non chiude senza lasciare traccia
+            _fallback_state, _fallback_reply = _callback_fallback()
+            return _res_response(_fallback_state, _fallback_reply)
         elif _no:
             _nd_state = "completed"
             _nd_resp = "Va bene, nessun problema. La aspettiamo un'altra volta, buona serata!"
