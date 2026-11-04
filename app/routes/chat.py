@@ -866,6 +866,12 @@ def _extract_reservation_date(message: str) -> str | None:
     if re.search(r"\b(dopodomani)\b", normalized):
         return (today + _dt.timedelta(days=2)).isoformat()
 
+    # Una data detta conta più del giorno della settimana: se non coincidono lo chiede
+    # prima chi chiama (_weekday_date_conflict)
+    dated = _date_in_message(normalized, today, bare_day=True)
+    if dated:
+        return dated.isoformat()
+
     # Giorno della settimana: "sabato", "domenica prossima" ecc.
     for it_name, weekday in _ITALIAN_WEEKDAYS.items():
         if re.search(rf"\b{re.escape(it_name)}\b", normalized):
@@ -1047,7 +1053,7 @@ def _reservation_date_retry_message(restaurant_id: str = "") -> str:
         day = next((d for d in open_days if d.weekday() == 5), open_days[0])
         examples.append(_format_reservation_date_it(day.isoformat()))
     question = "Non ho capito la data. Può dirmi il giorno?"
-    return f"{question} (Es: {', o '.join(examples)})" if examples else question
+    return f"{question} Per esempio {', o '.join(examples)}." if examples else question
 
 
 def _apply_reservation_table_info(res_data: dict, table_info: dict | None) -> None:
@@ -2622,6 +2628,97 @@ def _dated_day(today: datetime.date, day: int, month: int, year: int | None = No
 
 # "Sono Domenica", "a nome Sabato": non sono giorni
 _NOT_A_DAY_LOOKBEHIND = r"(?<!sono )(?<!nome )(?<!chiamo )(?<!signora )(?<!signor )"
+_WEEKDAY_NAMES_RE = "|".join(_ITALIAN_WEEKDAYS)
+# "sabato 14", "sabato il 14": il numero è un giorno solo se la frase finisce lì o prosegue
+# con l'ora ("sabato 4 persone" e "sabato 2 margherite" non sono date)
+_WEEKDAY_AND_DAY_RE = re.compile(
+    rf"\b(?:{_WEEKDAY_NAMES_RE})\s+(?:il\s+|l')?(\d{{1,2}}|primo)(?=\s*(?:$|[,.;!?]|(?:alle|per)\b|a\s+(?:pranzo|cena)\b))"
+)
+# "il 21", "l'8": solo quando si parla di una data (prenotazioni)
+_BARE_DAY_RE = re.compile(r"(?:\bil\s+|\bl')(\d{1,2}|primo)\b(?!\s*(?:person|post[oi]\b|copert|[:.]\d|e\s+mezz))")
+
+
+def _next_day_of_month(today: datetime.date, day: int) -> datetime.date | None:
+    """Prossimo giorno `day` del mese, da oggi in poi (il 31 salta i mesi che non lo hanno)."""
+    year, month = today.year, today.month
+    for _ in range(13):
+        try:
+            candidate = datetime.date(year, month, day)
+            if candidate >= today:
+                return candidate
+        except ValueError:
+            pass
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return None
+
+
+def _date_in_message(normalized: str, today: datetime.date, bare_day: bool = False) -> datetime.date | None:
+    """Data detta nella frase: "21 novembre", "21/11", "sabato 21" e, con `bare_day`, "il 21"."""
+    match = _SPOKEN_DATE_RE.search(normalized)
+    if match:
+        day = 1 if match.group(1) == "primo" else int(match.group(1))
+        return _dated_day(today, day, _ITALIAN_MONTHS[match.group(2)])
+    match = _SLASH_DATE_RE.search(normalized)
+    if match:
+        year = int(match.group(3)) if match.group(3) else None
+        return _dated_day(today, int(match.group(1)), int(match.group(2)), year + 2000 if year and year < 100 else year)
+    match = _WEEKDAY_AND_DAY_RE.search(normalized) or (_BARE_DAY_RE.search(normalized) if bare_day else None)
+    if match:
+        return _next_day_of_month(today, 1 if match.group(1) == "primo" else int(match.group(1)))
+    return None
+
+
+def _weekday_date_conflict(message: str, bare_day: bool = False) -> tuple[datetime.date, datetime.date] | None:
+    """I due giorni possibili, in ordine, se giorno della settimana e data non coincidono
+    ("venerdì 21 novembre" quando il 21 è sabato: venerdì 20 e sabato 21). None se coincidono
+    o se manca uno dei due. Se il cliente nomina anche il giorno giusto non c'è conflitto."""
+    normalized = _normalize_for_match(message)
+    today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+    dated = _date_in_message(normalized, today, bare_day=bare_day)
+    if dated is None:
+        return None
+    named = [
+        _ITALIAN_WEEKDAYS[m.group(1)]
+        for m in re.finditer(rf"{_NOT_A_DAY_LOOKBEHIND}\b({_WEEKDAY_NAMES_RE})\b", normalized)
+    ]
+    if not named or dated.weekday() in named:
+        return None
+    # Il giorno nominato più vicino alla data, mai nel passato
+    closest = dated + datetime.timedelta(days=(named[0] - dated.weekday() + 3) % 7 - 3)
+    if closest < today:
+        closest += datetime.timedelta(days=7)
+    return tuple(sorted((dated, closest)))
+
+
+def _spoken_day_of_month(day: datetime.date, with_month: bool) -> str:
+    number = "il primo" if day.day == 1 else f"l'{day.day}" if day.day in (8, 11) else f"il {day.day}"
+    return f"{number} {list(_ITALIAN_MONTHS)[day.month - 1]}" if with_month else number
+
+
+def _date_conflict_question(first: datetime.date, second: datetime.date) -> str:
+    """"Venerdì è il 20, sabato è il 21: quale dei due?\""""
+    with_month = first.month != second.month
+    return (
+        f"{_WEEKDAY_IT[first.weekday()].capitalize()} è {_spoken_day_of_month(first, with_month)}, "
+        f"{_WEEKDAY_IT[second.weekday()]} è {_spoken_day_of_month(second, with_month)}: quale dei due?"
+    )
+
+
+def _resolve_date_conflict(message: str, candidates: list[str]) -> datetime.date | None:
+    """Quale dei due giorni ha scelto il cliente: per giorno della settimana, numero o
+    "il primo"/"il secondo". None se la risposta non ne indica esattamente uno."""
+    days = [datetime.date.fromisoformat(c) for c in candidates]
+    normalized = _TIME_IN_SENTENCE_RE.sub(" ", _normalize_for_match(message))
+    chosen = set()
+    for day in days:
+        names = [name for name, weekday in _ITALIAN_WEEKDAYS.items() if weekday == day.weekday()]
+        if re.search(rf"\b(?:{'|'.join(names)}|{day.day})\b", normalized):
+            chosen.add(day)
+    if not chosen and re.search(r"\bprimo\b", normalized):
+        chosen.add(next((d for d in days if d.day == 1), days[0]))
+    if not chosen and re.search(r"\bsecondo\b", normalized):
+        chosen.add(days[1])
+    return chosen.pop() if len(chosen) == 1 else None
 _SPOKEN_DATE_RE = re.compile(r"\b(\d{1,2}|primo)\s+(?:di\s+)?(" + "|".join(_ITALIAN_MONTHS) + r")\b")
 _SLASH_DATE_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
 _SPOKEN_TODAY_RE = re.compile(r"\b(?:oggi|stasera|sta\s+sera|questa\s+sera|stanotte)\b")
@@ -2638,14 +2735,9 @@ def _spoken_pickup_day(message: str, restaurant_id: str = "") -> datetime.date |
         return today + datetime.timedelta(days=2)
     if re.search(r"\bdomani\b", normalized):
         return today + datetime.timedelta(days=1)
-    match = _SPOKEN_DATE_RE.search(normalized)
-    if match:
-        day = 1 if match.group(1) == "primo" else int(match.group(1))
-        return _dated_day(today, day, _ITALIAN_MONTHS[match.group(2)])
-    match = _SLASH_DATE_RE.search(normalized)
-    if match:
-        year = int(match.group(3)) if match.group(3) else None
-        return _dated_day(today, int(match.group(1)), int(match.group(2)), year + 2000 if year and year < 100 else year)
+    dated = _date_in_message(normalized, today)
+    if dated:
+        return dated
     for name, weekday in _ITALIAN_WEEKDAYS.items():
         if re.search(rf"{_NOT_A_DAY_LOOKBEHIND}\b{name}\b", normalized):
             days_ahead = (weekday - today.weekday()) % 7
@@ -2964,6 +3056,15 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
         return reservation_id
 
+    def _ask_reservation_date_conflict(days: tuple) -> str:
+        """Giorno e data non coincidono: si chiede quale dei due, senza scegliere."""
+        res_data = json.loads(conversation.reservation_json or "{}")
+        res_data["date_conflict"] = [day.isoformat() for day in days]
+        conversation.reservation_json = json.dumps(res_data, ensure_ascii=False)
+        conversation.state = "collecting_reservation_date"
+        print(f"[Reservation] giorno e data non coincidono: chiedo tra {days[0]} e {days[1]}")
+        return _date_conflict_question(*days)
+
     def _res_response(state: str, resp: str, valid: bool = False) -> ChatResponse:
         if _res_pref_ack["pending"]:
             resp = f"{RESERVATION_PREFERENCE_ACK} {resp}"
@@ -3055,6 +3156,8 @@ def chat(request: ChatRequest, session: SessionDep):
     # Giorno cambiato in questo turno e domanda aperta per un giorno in cui si è chiusi
     _day_changed = False
     _closed_day_ask: str | None = None
+    # Il cliente ha appena scelto tra i due giorni: "sabato" non va riletto come il prossimo
+    _date_conflict_resolved = False
 
     def _set_pickup_day(day: "datetime.date", said: bool = True) -> None:
         """Il cliente ha scelto il giorno di ritiro: vale per il resto della chiamata e
@@ -3074,6 +3177,7 @@ def chat(request: ChatRequest, session: SessionDep):
         kept_time = data.pop("next_day_pickup_time", None)
         data.pop("next_day_proposal", None)
         data.pop("asking_pickup_day", None)
+        data.pop("date_conflict", None)
         _store_slot_state(conversation, data)
         if conversation.pickup_time and _check_pickup_time(conversation.pickup_time)[1]:
             conversation.pickup_time = None
@@ -3087,12 +3191,28 @@ def chat(request: ChatRequest, session: SessionDep):
         data = _slot_state(conversation)
         data["next_day_proposal"] = {"date": proposal.isoformat(), "question": question}
         data.pop("asking_pickup_day", None)
+        data.pop("date_conflict", None)
         spoken_time = _time_in_sentence(request.message)
         if spoken_time and spoken_time != "prima_possibile":
             data["next_day_pickup_time"] = spoken_time
         _store_slot_state(conversation, data)
         print(f"[Pickup] giorno chiesto non disponibile: propongo {proposal}")
         return question
+
+    def _ask_pickup_date_conflict(days: tuple) -> str:
+        """Giorno e data non coincidono: si chiede quale dei due, senza scegliere."""
+        nonlocal _closed_day_ask
+        _closed_day_ask = _date_conflict_question(*days)
+        data = _slot_state(conversation)
+        data["date_conflict"] = [day.isoformat() for day in days]
+        data.pop("next_day_proposal", None)
+        data.pop("asking_pickup_day", None)
+        spoken_time = _time_in_sentence(request.message)
+        if spoken_time and spoken_time != "prima_possibile":
+            data["next_day_pickup_time"] = spoken_time
+        _store_slot_state(conversation, data)
+        print(f"[Pickup] giorno e data non coincidono: chiedo tra {days[0]} e {days[1]}")
+        return _closed_day_ask
 
     def _propose_day_after_closed(closed_day: "datetime.date", proposal: "datetime.date") -> str:
         return _propose_day(proposal, _closed_day_question(closed_day, proposal))
@@ -3107,12 +3227,16 @@ def chat(request: ChatRequest, session: SessionDep):
         chiuso, o diverso da quello fisso dei preordini, apre la proposta (_closed_day_ask).
         Le prenotazioni hanno il loro flusso."""
         nonlocal _day_changed
-        if conversation.completed or detect_reservation_intent(request.message):
+        if conversation.completed or _date_conflict_resolved or detect_reservation_intent(request.message):
             return None
         # Alla domanda sul nome "Domenica" è un nome: il giorno deve essere esplicito
         if conversation.state == "collecting_name" and not re.search(
             r"\b(?:per|domani|dopodomani)\b", _normalize_for_match(request.message),
         ):
+            return None
+        conflict = _weekday_date_conflict(request.message)
+        if conflict:
+            _ask_pickup_date_conflict(conflict)
             return None
         day = _spoken_pickup_day(request.message, restaurant_id)
         if day is None:
@@ -3378,6 +3502,9 @@ def chat(request: ChatRequest, session: SessionDep):
             # Le persone si tengono anche se mancano giorno o ora: non si richiedono dopo
             _res_data["party_size"] = _details["party_size"]
             conversation.reservation_json = json.dumps(_res_data, ensure_ascii=False)
+        _date_conflict = _weekday_date_conflict(request.message, bare_day=True)
+        if _date_conflict:
+            return _res_response("collecting_reservation_date", _ask_reservation_date_conflict(_date_conflict))
         _day_error = _reservation_day_error(_details["date"], restaurant_id) if _details.get("date") else None
         if not _details.get("date") or _day_error:
             return _res_response(
@@ -3417,7 +3544,25 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.reservation_json = json.dumps(_res_data, ensure_ascii=False)
 
     if conversation.state == "collecting_reservation_date":
-        res_date = _extract_reservation_date(request.message)
+        _date_conflict = _weekday_date_conflict(request.message, bare_day=True)
+        if _date_conflict:
+            _log_chat_timing(request.session_id, "reservation_date_conflict", request_started_at)
+            return _res_response("collecting_reservation_date", _ask_reservation_date_conflict(_date_conflict))
+        _res_data = json.loads(conversation.reservation_json or "{}")
+        _open_conflict = _res_data.get("date_conflict")
+        if _open_conflict:
+            _chosen_day = _resolve_date_conflict(request.message, _open_conflict)
+            res_date = _chosen_day.isoformat() if _chosen_day else _extract_reservation_date(request.message)
+            if not res_date:
+                _log_chat_timing(request.session_id, "reservation_date_conflict", request_started_at)
+                return _res_response(
+                    "collecting_reservation_date",
+                    _date_conflict_question(*map(datetime.date.fromisoformat, _open_conflict)),
+                )
+            del _res_data["date_conflict"]
+            conversation.reservation_json = json.dumps(_res_data, ensure_ascii=False)
+        else:
+            res_date = _extract_reservation_date(request.message)
         _res_day_error = _reservation_day_error(res_date, restaurant_id) if res_date else None
         if _res_day_error:
             _log_chat_timing(request.session_id, "reservation_date_unavailable", request_started_at)
@@ -3469,7 +3614,7 @@ def chat(request: ChatRequest, session: SessionDep):
             _log_chat_timing(request.session_id, "reservation_time_retry", request_started_at)
             return _res_response(
                 "collecting_reservation_time",
-                "Non ho capito l'orario. Può indicarmi a che ora? (Es: 20:00, alle 8 di sera)",
+                "Non ho capito l'orario. Può indicarmi a che ora? Per esempio alle 20, o alle 8 di sera.",
             )
 
     if conversation.state == "collecting_reservation_party":
@@ -3643,7 +3788,7 @@ def chat(request: ChatRequest, session: SessionDep):
             "reservation_completed",
             f"Grazie{', ' + conversation.customer_name if conversation.customer_name else ''}. "
             f"Ho registrato la richiesta per {_party} persone, {date_it} alle {res_data.get('time', '')}: "
-            "la richiameremo il prima possibile per confermare.",
+            "la richiameremo il prima possibile per confermare. A presto!",
             valid=True,
         )
 
@@ -3785,7 +3930,7 @@ def chat(request: ChatRequest, session: SessionDep):
             date_it = _format_reservation_date_it(res_data.get("date", ""))
             name_part = f" {conversation.customer_name}" if conversation.customer_name else ""
             if _is_mobile_phone(conversation.customer_phone):
-                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. Le mando un SMS di conferma."
+                resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. Le mando un SMS di conferma. A presto!"
             else:
                 resp_msg = f"Perfetto{name_part}! Prenotazione confermata per {date_it} alle {res_data.get('time')}. A presto!"
             _log_chat_timing(request.session_id, "reservation_confirmed", request_started_at)
@@ -3826,9 +3971,11 @@ def chat(request: ChatRequest, session: SessionDep):
         _nd_slots = _slot_state(conversation)
         _nd_proposal = _nd_slots.get("next_day_proposal") or {}
         # Dopo un "no" si è chiesto il giorno: non c'è nessuna proposta a cui dire sì
-        _nd_asking_day = bool(_nd_slots.get("asking_pickup_day"))
+        _nd_conflict = _nd_slots.get("date_conflict")
+        _nd_asking_day = bool(_nd_slots.get("asking_pickup_day") or _nd_conflict)
         _nd_question = (
-            PICKUP_DAY_QUESTION if _nd_asking_day
+            _date_conflict_question(*map(datetime.date.fromisoformat, _nd_conflict)) if _nd_conflict
+            else PICKUP_DAY_QUESTION if _nd_asking_day
             else _nd_proposal.get("question") or _next_day_question(restaurant_id)
         )
         _nd_asked_day = (
@@ -3836,7 +3983,17 @@ def chat(request: ChatRequest, session: SessionDep):
             else datetime.date.fromisoformat(_nd_proposal["date"]) if _nd_proposal
             else get_next_open_day(restaurant_id=restaurant_id)[0]
         )
-        _nd_spoken_day = _spoken_pickup_day(request.message, restaurant_id)
+        _nd_new_conflict = _weekday_date_conflict(request.message)
+        if _nd_new_conflict:
+            return _local_reply(
+                "confirming_next_day",
+                _ask_pickup_date_conflict(_nd_new_conflict),
+                _current_merged_order(),
+                "date_conflict",
+            )
+        _nd_spoken_day = _resolve_date_conflict(request.message, _nd_conflict) if _nd_conflict else None
+        _date_conflict_resolved = _nd_spoken_day is not None
+        _nd_spoken_day = _nd_spoken_day or _spoken_pickup_day(request.message, restaurant_id)
         if _next_day_only and _nd_spoken_day and _nd_spoken_day != _preorder_date:
             # Preordine fisso: qualsiasi altro giorno riporta all'unico possibile
             return _local_reply(
@@ -3911,10 +4068,11 @@ def chat(request: ChatRequest, session: SessionDep):
                 )
             _nd_resp = f"Perfetto, il ritiro è per {_day_phrase or _today_phrase(conversation.pickup_time)}. {_nd_next}"
             print(f"[Pickup] cliente accetta il ritiro per {_preorder_date}")
-        elif _no and not _nd_asking_day:
+        elif _no and (not _nd_asking_day or _nd_conflict):
             # "No" al giorno proposto: si chiede quale serve e si riapplicano le regole del locale
             _nd_slots = _slot_state(conversation)
             _nd_slots.pop("next_day_proposal", None)
+            _nd_slots.pop("date_conflict", None)
             _nd_slots["asking_pickup_day"] = True
             _store_slot_state(conversation, _nd_slots)
             _nd_state = "confirming_next_day"

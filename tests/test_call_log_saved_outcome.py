@@ -173,20 +173,20 @@ class DateRetryExampleTests(_DateRetryBase):
     def test_example_is_close_to_today(self):
         self.assertEqual(
             self.message_on((2026, 11, 4)),
-            "Non ho capito la data. Può dirmi il giorno? (Es: domani, o sabato 7 novembre)",
+            "Non ho capito la data. Può dirmi il giorno? Per esempio domani, o sabato 7 novembre.",
         )
 
     def test_friday_does_not_propose_tomorrow_twice(self):
-        self.assertIn("(Es: domani, o domenica 8 novembre)", self.message_on((2026, 11, 6)))
+        self.assertIn("Per esempio domani, o domenica 8 novembre.", self.message_on((2026, 11, 6)))
 
     def test_saturday_proposes_next_saturday(self):
-        self.assertIn("(Es: domani, o sabato 14 novembre)", self.message_on((2026, 11, 7)))
+        self.assertIn("Per esempio domani, o sabato 14 novembre.", self.message_on((2026, 11, 7)))
 
     def test_closed_days_are_not_proposed(self):
         # Chiuso giovedì e sabato: niente "domani" di mercoledì, niente sabato
         hours_week = {d: "19:00-22:00" for d in ("monday", "tuesday", "wednesday", "friday", "sunday")}
         message = self.message_on((2026, 11, 4), {**hours.CDS, "opening_hours": hours_week})
-        self.assertIn("(Es: venerdì 6 novembre)", message)
+        self.assertIn("Per esempio venerdì 6 novembre.", message)
 
     def test_every_example_is_read_back_as_that_same_day(self):
         start = datetime.date(2026, 11, 1)
@@ -195,7 +195,7 @@ class DateRetryExampleTests(_DateRetryBase):
             now = datetime.datetime(today.year, today.month, today.day, 12, 0, tzinfo=hours.ROME)
             with self.subTest(today=today), patch.object(chat_module, "datetime", hours._frozen_datetime_module(now)):
                 message = chat_module._reservation_date_retry_message(hours.CDS_ID)
-                example = message.split(", o ")[1].rstrip(")")
+                example = message.split(", o ")[1].rstrip(".")
                 day = datetime.date.fromisoformat(chat_module._extract_reservation_date(example))
                 self.assertEqual(chat_module._format_reservation_date_it(day.isoformat()), example)
                 self.assertGreater(day, today)
@@ -207,7 +207,7 @@ class DateRetryFlowTests(covers._ReservationHarness):
         r = self.say("boh non saprei")
         self.assertEqual(r.state, "collecting_reservation_date")
         # Giovedì 1 ottobre 2026 nel test: il prossimo sabato è il 3
-        self.assertEqual(r.response_message, "Non ho capito la data. Può dirmi il giorno? (Es: domani, o sabato 3 ottobre)")
+        self.assertEqual(r.response_message, "Non ho capito la data. Può dirmi il giorno? Per esempio domani, o sabato 3 ottobre.")
         self.assertNotIn("maggio", r.response_message)
 
 

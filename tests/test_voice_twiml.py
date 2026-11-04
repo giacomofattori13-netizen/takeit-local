@@ -11,7 +11,7 @@ from unittest.mock import patch
 import app.routes.voice as voice_module
 import tests.test_next_day_preorder_flow as flow
 
-_TERMINAL_STATES = {"completed", "unavailable"}
+_TERMINAL_STATES = {"completed", "unavailable", "reservation_completed"}
 
 
 def _build(result) -> str:

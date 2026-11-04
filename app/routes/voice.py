@@ -387,6 +387,8 @@ def _gather_attrs(state: str | None = None) -> str:
 
 _POLLY_FALLBACK = "Polly.Giorgio"
 _NO_INPUT_MSG = "Non ho sentito nulla. Riprovi a chiamare, grazie."
+# Stati in cui il TwiML saluta e chiude la chiamata
+_CALL_ENDING_STATES = ("completed", "unavailable", "reservation_completed")
 
 # Cache in memoria: testo → filename MP3. Evita chiamate ripetute a ElevenLabs.
 _AUDIO_CACHE: dict[str, str] = {}
@@ -1213,7 +1215,7 @@ async def _build_response_twiml(result, session_id: str) -> str:
             "</Dial>\n"
             "</Response>"
         )
-    if result.state in ("completed", "unavailable"):
+    if result.state in _CALL_ENDING_STATES:
         audio = await _audio_element_async(reply, turn_audio=True)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1315,7 +1317,7 @@ async def voice_process(request: Request, session_id: str = Query(...)):
             _call_outcome[0],
             summary=_call_outcome[1],
         ))
-    if result.state != "completed":
+    if result.state not in _CALL_ENDING_STATES:
         asyncio.create_task(_prefetch_openai_connection())
     return Response(content=twiml, media_type="application/xml")
 
@@ -1508,7 +1510,8 @@ async def voice_dial_result(
     elif message is None:
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n'
-            '  <Say voice="Polly.Giorgio">Mi dispiace, la richiameremo appena possibile. Arrivederci.</Say>\n'
+            '  <Say voice="Polly.Giorgio">Mi dispiace, al momento il locale non risponde. '
+            'Provi a richiamarci più tardi. Arrivederci.</Say>\n'
             "  <Hangup/>\n</Response>"
         )
     else:
@@ -1664,7 +1667,13 @@ async def voice_gather(
 
         if count >= 2:
             # Seconda volta consecutiva senza input: saluta e chiudi
-            _FAREWELL = "Mi dispiace, non riesco a sentirla. La richiamo appena possibile. Arrivederci!"
+            # Si promette la richiamata solo se c'è davvero una richiesta registrata
+            _callback_saved = await asyncio.to_thread(_pending_group_request_sync, session_id)
+            _FAREWELL = (
+                "Mi dispiace, non riesco a sentirla. La richiameremo appena possibile. Arrivederci!"
+                if _callback_saved
+                else "Mi dispiace, non riesco a sentirla. Provi a richiamarci più tardi. Arrivederci!"
+            )
             farewell_audio = await _audio_element_async(_FAREWELL)
             twiml = (
                 '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -1842,7 +1851,7 @@ async def voice_gather(
             _call_outcome[0],
             summary=_call_outcome[1],
         ))
-    if result.state != "completed":
+    if result.state not in _CALL_ENDING_STATES:
         asyncio.create_task(_prefetch_openai_connection())
     record_latency(
         "voice",
