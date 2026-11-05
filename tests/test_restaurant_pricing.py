@@ -306,14 +306,14 @@ class FullOrderNonRegressionTests(_DbTestCase):
         self.assertEqual(sent["Bufala al taglio"]["base_price"], 19.9)
         self.assertEqual(sent["Bufala al taglio"]["total_price"], 5.97)
 
-    def test_full_cds_order_by_piece_without_pickup_date_and_nonzero_price(self):
+    def test_full_cds_order_by_piece_with_todays_pickup_date_and_nonzero_price(self):
         order, order_items, payload = self._run_order("cds-full", CDS_ID, [
             self._item("Margherita", 2),
             self._item("Diavola", 1),
         ])
 
-        self.assertIsNone(order.pickup_date)
-        self.assertIsNone(payload.get("pickup_date"))
+        self.assertEqual(order.pickup_date, chat_module.rome_today())
+        self.assertEqual(payload.get("pickup_date"), chat_module.rome_today())
         self.assertEqual(payload["restaurant_id"], CDS_ID)
         self.assertEqual([oi.sale_unit for oi in order_items], ["piece", "piece"])
         sent = {i["pizza_name"]: i for i in payload["items"]}

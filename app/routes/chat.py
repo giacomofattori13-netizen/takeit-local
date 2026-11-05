@@ -75,6 +75,7 @@ from app.services.conversation_service import (
     classify_call_intent,
     is_ingredient,
     is_only_greeting,
+    mentions_product,
     mentions_table,
     strip_restaurant_name,
     check_reservation_availability,
@@ -2240,6 +2241,12 @@ def _persist_order_once(
         _mark_conversation_completed(session, conversation)
         return existing_order, False
 
+    # Il giorno di ritiro è sempre scritto, anche per "stasera": vuoto non vuol dire oggi
+    merged_order["pickup_date"] = (
+        merged_order.get("pickup_date")
+        or conversation.pickup_date
+        or datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date().isoformat()
+    )
     order = Order(
         conversation_session_id=conversation.session_id,
         customer_name=merged_order["customer_name"],
@@ -2839,6 +2846,23 @@ def _time_in_sentence(message: str) -> str | None:
     return _extract_local_pickup_time(match.group(0)) if match else None
 
 
+def _is_new_time_at_recap(message: str, current_time: str | None) -> bool:
+    """La frase detta al riepilogo dà un orario diverso da quello riepilogato. Un numero
+    senza "alle"/"per le" vale solo con i minuti o da solo ("8.45"): "due persone" no."""
+    spoken = _time_in_sentence(message)
+    if not spoken and re.search(r"\d", message):
+        spoken = _extract_local_pickup_time(message)
+    if not spoken or spoken == "prima_possibile":
+        return False
+
+    def minutes(value: str | None) -> int | None:
+        match = re.fullmatch(r"(\d{1,2}):(\d{2})", value or "")
+        return int(match.group(1)) % 12 * 60 + int(match.group(2)) if match else None
+
+    # "alle 8" al riepilogo delle 20:00 è lo stesso orario
+    return minutes(spoken) != minutes(current_time)
+
+
 _OFF_MENU_PIZZA_NAMES = ("Personalizzata", "Pizza personalizzata")
 _SPOKEN_COUNT_RE = re.compile(r"\b(?:una|un|uno|due|tre|quattro|cinque|sei|sette|otto|nove|dieci|\d+)\b")
 PICKUP_DAY_QUESTION = "Per quale giorno le serve?"
@@ -2902,7 +2926,10 @@ CALLBACK_GOODBYE = "La faccio richiamare dal locale appena possibile. A presto!"
 CALLBACK_HANDOFF_MESSAGE = "La passo subito al locale, resti in linea."
 CALLBACK_NOT_POSSIBLE = "Mi dispiace, al momento non riesco a prendere la richiesta. La preghiamo di richiamare tra qualche minuto."
 _BARE_NO_RE = re.compile(r"^(?:ma\s+)?no(?:\s+no)*(?:\s+(?:aspetta|aspetti|scusa|scusi|guarda|guardi|sbagliato))*$")
-_ORDER_ANSWER_RE = re.compile(r"\b(?:ordin\w*|asporto|ritiro|ritirare|da\s+portare\s+via)\b")
+# "lo sport" e "la sporto": "l'asporto" come lo scrive l'STT
+_ORDER_ANSWER_RE = re.compile(
+    r"\b(?:ordin\w*|asporto|ritiro|ritirare|da\s+portare\s+via|(?:lo|la|l|da|d)\s+sport[oa]?)\b"
+)
 _CORRECTION_FILLER = {
     "no", "il", "la", "le", "l", "i", "lo", "e", "sbagliato", "sbagliata", "sbagliate", "cambiare", "cambia",
     "correggere", "devi", "deve", "ha", "capito", "male", "solo", "numero", "di",
@@ -3615,7 +3642,8 @@ def chat(request: ChatRequest, session: SessionDep):
     def _ask_call_intent(question: str, state: str, proposal: "datetime.date | None" = None) -> str:
         """Si chiede ordine o prenotazione; la frase si tiene per giorno e orario già detti."""
         data = _slot_state(conversation)
-        data["intent_question"] = {"message": request.message}
+        # Già aperta: "salve" non cancella il "domani alle 8" detto prima
+        data.setdefault("intent_question", {"message": request.message})
         data["intent_asked"] = True
         if proposal:
             data["next_day_proposal"] = {"date": proposal.isoformat(), "question": question}
@@ -3627,20 +3655,51 @@ def chat(request: ChatRequest, session: SessionDep):
     _intent_open = _intent_slots.get("intent_question")
     _intent_earlier = (_intent_open or {}).get("message", "")
     _said_order = bool(_intent_open) and _ORDER_ANSWER_RE.search(_normalize_for_match(request.message)) is not None
+
+    def _keep_earlier_day_and_time() -> None:
+        """Ordine: valgono giorno e orario detti nella frase prima della domanda. Quelli
+        detti da ora in poi li sostituiscono, come in ogni altro turno."""
+        data = _slot_state(conversation)
+        earlier = (data.pop("intent_question", None) or {}).get("message", "")
+        _store_slot_state(conversation, data)
+        conflict = _weekday_date_conflict(earlier)
+        earlier_day = None if conflict else _spoken_pickup_day(earlier, restaurant_id)
+        if conflict:
+            _ask_pickup_date_conflict(conflict)
+        elif earlier_day and not _next_day_only and not _is_open_day(earlier_day, restaurant_id):
+            proposal = _first_open_day_after(earlier_day, restaurant_id)
+            if proposal:
+                _propose_day_after_closed(earlier_day, proposal)
+        elif earlier_day:
+            _set_pickup_day(earlier_day, said=False)
+        earlier_time = _time_in_sentence(earlier)
+        if not earlier_time or earlier_time == "prima_possibile":
+            return
+        if _closed_day_ask:
+            data = _slot_state(conversation)
+            data["next_day_pickup_time"] = earlier_time
+            _store_slot_state(conversation, data)
+        else:
+            conversation.pickup_time = _check_pickup_time(earlier_time)[0]
+
+    def _names_a_product(message: str) -> bool:
+        return mentions_product(
+            strip_restaurant_name(message, _restaurant_name), get_proposable_menu(restaurant_id=restaurant_id),
+        )
+
     if _reservations_on and _intent_open and not conversation.completed:
         if _call_intent == "unknown":
             _call_intent = "reservation"  # "prenotare" come risposta alla domanda
-        elif _said_order and not _call_intent and conversation.state == "collecting_items":
-            # Ordine: valgono giorno e orario detti nella frase di prima
-            _intent_slots.pop("intent_question", None)
-            _store_slot_state(conversation, _intent_slots)
-            _earlier_day = _spoken_pickup_day(_intent_earlier, restaurant_id)
-            if _earlier_day:
-                _set_pickup_day(_earlier_day, said=False)
-            _earlier_time = _time_in_sentence(_intent_earlier)
-            if _earlier_time and _earlier_time != "prima_possibile":
-                conversation.pickup_time = _check_pickup_time(_earlier_time)[0]
-            return _res_response("collecting_items", "Cosa desidera ordinare?")
+        elif _call_intent != "reservation" and conversation.state == "collecting_items":
+            if not _next_day_only and (_call_intent == "order" or _names_a_product(request.message)):
+                # "Una capricciosa lo sport": il prodotto lo estrae il percorso normale
+                _keep_earlier_day_and_time()
+            elif _said_order and not _call_intent:
+                _keep_earlier_day_and_time()
+                if _closed_day_ask:
+                    conversation.state = "confirming_next_day"
+                    return _res_response("confirming_next_day", _closed_day_ask)
+                return _res_response("collecting_items", "Cosa desidera ordinare?")
 
     # "Vorrei prenotare" senza prodotti né tavolo: si chiede, senza presupporre
     if (
@@ -3672,6 +3731,9 @@ def chat(request: ChatRequest, session: SessionDep):
             )
         if _ask_next_day:
             return _res_response("confirming_next_day", _next_day_question(restaurant_id))
+        _order_already_chosen = _intent_slots.get("intent_asked") and not _intent_slots.get("intent_question")
+        if _reservations_on and not _next_day_only and not _order_already_chosen:
+            return _res_response("collecting_items", _ask_call_intent(INTENT_QUESTION, "collecting_items"))
         return _res_response("collecting_items", "Cosa desidera ordinare?")
 
     # Cambio di intento: da ordine a tavolo. Giorno, orario e nome restano, gli articoli
@@ -4356,10 +4418,26 @@ def chat(request: ChatRequest, session: SessionDep):
         _nd_conflict = _nd_slots.get("date_conflict")
         _nd_asking_day = bool(_nd_slots.get("asking_pickup_day") or _nd_conflict)
         if _nd_slots.get("intent_question"):
-            # "Vuole ordinare per domani o prenotare un tavolo?": il sì da solo non sceglie
-            _yes = _ORDER_ANSWER_RE.search(_normalize_for_match(request.message))
+            # "Vuole ordinare per domani o prenotare un tavolo?": il sì da solo non sceglie,
+            # un prodotto sì. Il giorno detto prima vale più di quello proposto.
+            _yes = _ORDER_ANSWER_RE.search(_normalize_for_match(request.message)) or (
+                not _next_day_only and _names_a_product(request.message)
+            )
             if _yes:
-                _nd_slots.pop("intent_question", None)
+                _nd_earlier = _nd_slots.pop("intent_question", {}).get("message", "")
+                if not _next_day_only:
+                    _nd_earlier_time = _time_in_sentence(_nd_earlier)
+                    if _nd_earlier_time and _nd_earlier_time != "prima_possibile":
+                        _nd_slots["next_day_pickup_time"] = _nd_earlier_time
+                    _nd_earlier_day = _spoken_pickup_day(_nd_earlier, restaurant_id)
+                    if (
+                        _nd_earlier_day
+                        and _nd_earlier_day > datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
+                        and _is_open_day(_nd_earlier_day, restaurant_id)
+                        and not _weekday_date_conflict(_nd_earlier)
+                    ):
+                        _nd_proposal = {**_nd_proposal, "date": _nd_earlier_day.isoformat()}
+                        _nd_slots["next_day_proposal"] = _nd_proposal
                 _store_slot_state(conversation, _nd_slots)
         _nd_question = (
             _date_conflict_question(*map(datetime.date.fromisoformat, _nd_conflict)) if _nd_conflict
@@ -4580,6 +4658,15 @@ def chat(request: ChatRequest, session: SessionDep):
         r"no\b[\s,]+(?!grazie\b|lascia\b|lasci\b|niente\b|annull|cancell)", _normalize_for_match(request.message),
     ):
         conversation.state = "collecting_items"
+
+    # Un orario diverso al riepilogo ("Per 8.45."): lo legge la domanda sull'orario, che lo
+    # valida e riepiloga. Qui l'LLM non passa, e senza questo l'orario andrebbe perso.
+    if (
+        conversation.state == "awaiting_confirmation"
+        and not _next_day_only
+        and _is_new_time_at_recap(request.message, conversation.pickup_time)
+    ):
+        conversation.state = "collecting_pickup_time"
 
     # ── FAST PATH: awaiting_confirmation ──────────────────────────────────────
     # Quando lo stato è awaiting_confirmation NON chiamiamo l'LLM.
@@ -5334,6 +5421,15 @@ def chat(request: ChatRequest, session: SessionDep):
             _normalize_kg_order_unit(item, request.message)
             if item.get("temperature") not in ("calda", "fredda"):
                 item["temperature"] = ""
+
+    # Prodotto riconosciuto solo dall'LLM ("una capriciosa"): l'ordine è deciso anche così
+    if (
+        new_items
+        and not _next_day_only
+        and intent in ("add_items", "modify_items", "replace_items")
+        and _slot_state(conversation).get("intent_question")
+    ):
+        _keep_earlier_day_and_time()
 
     # Giorno già detto dal cliente: va fissato prima di validare l'orario
     if intent not in ("cancel_order", "clear_cart"):

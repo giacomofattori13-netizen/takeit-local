@@ -134,7 +134,7 @@ class CallBeforeOpeningTests(_CorteHarness):
         self.assertEqual(r.state, "awaiting_confirmation")
         self.assertEqual(r.response_message, "Allora: una margherita, per stasera alle 20, a nome Giacomo. Confermo?")
         self.say("sì")
-        self.assertIsNone(self.saved[0].get("pickup_date"))  # ritiro in giornata
+        self.assertEqual(self.saved[0].get("pickup_date"), THURSDAY.isoformat())  # in giornata: data esplicita
 
     def test_as_soon_as_possible_means_opening_time(self):
         self.order(customer_name="Giacomo")

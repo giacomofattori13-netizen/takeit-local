@@ -974,8 +974,8 @@ class ChatLogicTests(unittest.TestCase):
         self.assertEqual(result_date, datetime.date(2026, 7, 22))
         self.assertEqual(result_day, "mercoledì")
 
-    def test_corte_del_sole_order_has_no_pickup_date(self):
-        """Corte del Sole orders (reservations_enabled) don't set pickup_date."""
+    def test_corte_del_sole_same_day_order_has_todays_pickup_date(self):
+        """Il giorno di ritiro è sempre esplicito, anche per un ordine in giornata."""
         engine = create_engine("sqlite://")
         SQLModel.metadata.create_all(engine)
 
@@ -1003,7 +1003,7 @@ class ChatLogicTests(unittest.TestCase):
             saved_created = created
 
         self.assertTrue(saved_created)
-        self.assertIsNone(saved_pickup_date)
+        self.assertEqual(saved_pickup_date, chat_module.rome_today())
 
     # ── Base44 payload: al taglio kg fields ─────────────────────────────────
 

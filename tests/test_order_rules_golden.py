@@ -47,7 +47,7 @@ NEXT_DAY_ONLY = {**CDS, "phone_orders_next_day_only": True}
 THURSDAY_16 = datetime.datetime(2026, 10, 1, 16, 0, tzinfo=ROME)  # domani venerdì 2
 SUNDAY_16 = datetime.datetime(2026, 10, 4, 16, 0, tzinfo=ROME)  # domani lunedì 5
 THURSDAY_23 = datetime.datetime(2026, 10, 1, 23, 0, tzinfo=ROME)  # cucina chiusa
-TONIGHT = None  # pickup_date vuoto: ritiro oggi
+TONIGHT = None  # sessione senza giorno: ritiro oggi. L'ordine salvato ha sempre la data
 TOMORROW = "2026-10-02"
 PERSONAL = "Personalizzata"  # Margherita base + nome detto come aggiunta
 
@@ -133,7 +133,7 @@ CASES = [
          llm=recorded(items=[item("Margherita", add=["Corte del sole"])])),
     # ── Dalle chiamate reali del 4 novembre, con le parole esatte ────────────
     Case("reale_corte_del_sole", "Corte del sole.", final_state="collecting_items",
-         reply_contains="Cosa desidera ordinare?"),
+         reply_contains="Vuole ordinare da asporto o prenotare un tavolo?"),
     Case("reale_corte_del_sole_cucina_chiusa", "Corte del sole.", now=THURSDAY_23, final_state="confirming_next_day",
          reply_contains="La cucina stasera è chiusa. Vuole ordinare per domani o prenotare un tavolo?"),
     Case("reale_tavolo_dentro_un_ordine", "Posso prenotare un tavolo per 2 sabato 20 novembre", now=THURSDAY_23,
@@ -141,6 +141,17 @@ CASES = [
          reply_contains="Venerdì è il 20, sabato è il 21: quale dei due?"),
     Case("reale_prenotare_una_margherita", "Vorrei prenotare una margherita per domani", [_MARGHERITA], day=TOMORROW,
          llm=recorded(items=[_MARGHERITA]), final_state="collecting_name"),
+    # ── Dalle chiamate reali del 5 novembre, con le parole esatte ────────────
+    Case("reale_salve", "Salve.", final_state="collecting_items",
+         reply_contains="Vuole ordinare da asporto o prenotare un tavolo?"),
+    Case("reale_forte_del_sole", "Forte del sole.", final_state="collecting_items",
+         llm=recorded(intent="unknown"), reply_contains="Vuole ordinare da asporto o prenotare un tavolo?"),
+    Case("reale_volevo_prenotare_per_domani_alle_8", "Ciao volevo prenotare per domani alle 8.",
+         final_state="collecting_items", reply_contains="Vuole ordinare da asporto o prenotare un tavolo?"),
+    Case("reale_una_capricciosa_lo_sport", "Una capricciosa lo sport.", [item("Capricciosa")],
+         llm=recorded(items=[item("Capricciosa")]), final_state="collecting_name"),
+    Case("reale_per_8_45", "Per 8.45.", time="20:45", state="collecting_pickup_time",
+         cart=[item("Capricciosa")], items=[item("Capricciosa")], replaces_cart=True, final_state="collecting_name"),
     Case("reale_no_alla_domanda_sulle_persone", "No no no no.", state="collecting_reservation_party",
          final_state="collecting_reservation_party", reply_contains="Va bene, cosa devo correggere?"),
     # ── Ordine o prenotazione: decide il contenuto ───────────────────────────
@@ -417,7 +428,7 @@ def test_tonight_recap_says_tonight_and_nothing_else():
         response = call.say("una margherita per stasera alle 8, sono Giacomo")
         assert "per stasera alle 20" in response.response_message
         call.say("sì")
-    assert call.saved[0].get("pickup_date") is None
+    assert call.saved[0].get("pickup_date") == "2026-10-01"
 
 
 def test_closed_tomorrow_on_sunday_proposes_tuesday_and_waits():
