@@ -152,6 +152,18 @@ CASES = [
          llm=recorded(items=[item("Capricciosa")]), final_state="collecting_name"),
     Case("reale_per_8_45", "Per 8.45.", time="20:45", state="collecting_pickup_time",
          cart=[item("Capricciosa")], items=[item("Capricciosa")], replaces_cart=True, final_state="collecting_name"),
+    # ── 5 novembre, dopo le 22: cucina chiusa ────────────────────────────────
+    Case("reale_stasera_a_cucina_chiusa", "Vorrei prenotare una pizza per stasera alle 8.", now=THURSDAY_23,
+         state="confirming_next_day", llm=recorded(intent="unknown"), final_state="confirming_next_day",
+         reply_contains="Stasera purtroppo la cucina è chiusa. Va bene per domani, venerdì?"),
+    Case("reale_vorrei_una_capricciosa_da_sport", "Vorrei una capricciosa da sport.", [item("Capricciosa")],
+         state="collecting_reservation_party", llm=recorded(items=[item("Capricciosa")]), final_state="collecting_name"),
+    Case("reale_sono_per_le_8_45", "Sono per le 8.45.", time="20:45", state="awaiting_confirmation",
+         cart=[item("Capricciosa")], items=[item("Capricciosa")], replaces_cart=True,
+         llm=recorded(intent="set_pickup_time", time="20:45"), final_state="collecting_name"),
+    Case("pap_due_tranci_per_stasera", "Due tranci per stasera", day=TOMORROW, restaurant=NEXT_DAY_ONLY,
+         reply_contains="prendiamo solo ordini per il giorno dopo: per stasera può passare direttamente in negozio. "
+                        "Il ritiro è per domani, venerdì. Vuole ordinare per domani, venerdì?"),
     Case("reale_no_alla_domanda_sulle_persone", "No no no no.", state="collecting_reservation_party",
          final_state="collecting_reservation_party", reply_contains="Va bene, cosa devo correggere?"),
     # ── Ordine o prenotazione: decide il contenuto ───────────────────────────

@@ -3292,6 +3292,8 @@ def chat(request: ChatRequest, session: SessionDep):
     _closed_day_ask: str | None = None
     # Il cliente ha appena scelto tra i due giorni: "sabato" non va riletto come il prossimo
     _date_conflict_resolved = False
+    # Orario già detto che non vale nel giorno appena scelto: si dice e se ne propone uno
+    _refused_time: list[str] = []
 
     def _set_pickup_day(day: "datetime.date", said: bool = True) -> None:
         """Il cliente ha scelto il giorno di ritiro: vale per il resto della chiamata e
@@ -3313,10 +3315,33 @@ def chat(request: ChatRequest, session: SessionDep):
         data.pop("asking_pickup_day", None)
         data.pop("date_conflict", None)
         _store_slot_state(conversation, data)
+        refused = None
         if conversation.pickup_time and _check_pickup_time(conversation.pickup_time)[1]:
+            refused = conversation.pickup_time
             conversation.pickup_time = None
         if kept_time and not conversation.pickup_time:
             conversation.pickup_time = _check_pickup_time(kept_time)[0]
+            refused = None if conversation.pickup_time else kept_time
+        _refused_time[:] = [refused] if refused else []
+
+    def _refused_time_question() -> str | None:
+        """L'orario detto non vale nel giorno scelto: lo si dice e si propone il primo
+        orario libero di quel giorno, con sì o no (come la proposta dopo due mancati)."""
+        if not _refused_time or conversation.pickup_time:
+            return None
+        refused = _refused_time.pop()
+        slot = first_pickup_slot(restaurant_id, pickup_date=_preorder_date)
+        data = _slot_state(conversation)
+        data.setdefault("pickup_time", {})["proposed"] = slot
+        _store_slot_state(conversation, data)
+        hours = get_opening_range_text(restaurant_id, _preorder_date) if _preorder_date else None
+        when = (_day_phrase or "stasera").replace(", ", " ")
+        hours_part = f", siamo aperti {hours}" if hours else ""
+        print(f"[Pickup] orario {refused} non valido per {when}: propongo {slot}")
+        return (
+            f"Alle {_spoken_pickup_time(refused)} {when} non è possibile{hours_part}. "
+            f"Va bene alle {_spoken_pickup_time(slot)}? Mi dica sì o no."
+        )
 
     def _propose_day(proposal: "datetime.date", question: str) -> str:
         """Il giorno chiesto non si può: si propone `proposal` e si attende sì/no."""
@@ -4465,15 +4490,27 @@ def chat(request: ChatRequest, session: SessionDep):
             return _local_reply(
                 "confirming_next_day", _propose_only_order_day(), _current_merged_order(), "only_order_day",
             )
-        if (
+        _nd_today_refused = (
             _nd_spoken_day == datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
             and earliest_pickup_minutes_today(restaurant_id) is None
-        ):
+        )
+        if _nd_today_refused:
             _nd_spoken_day = None  # "stasera" a cucina chiusa non è una scelta possibile
         # "No, venerdì" sceglie un altro giorno; "no, domani no" rifiuta quello proposto
         _nd_accepted = bool((_yes and not _nd_asking_day) or _nd_spoken_day) and (
             not _no or bool(_nd_spoken_day and _nd_spoken_day != _nd_asked_day)
         )
+        if _nd_today_refused and not _next_day_only and not _nd_slots.get("intent_question"):
+            # Ha chiesto stasera: lo si dice e si chiede conferma del giorno proposto, senza
+            # spostarlo. L'orario della frase resta per quel giorno; il resto lo estrae l'LLM.
+            _nd_proposal_day = _nd_asked_day or get_next_open_day(restaurant_id=restaurant_id)[0]
+            _nd_tonight = "Stasera" if datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).hour >= 17 else "Oggi"
+            _propose_day(
+                _nd_proposal_day,
+                f"{_nd_tonight} purtroppo la cucina è chiusa. Va bene per {pickup_day_phrase(_nd_proposal_day)}?",
+            )
+            _nd_accepted = False
+            conversation.state = "collecting_items"
         if _nd_accepted and _nd_spoken_day and not _is_open_day(_nd_spoken_day, restaurant_id):
             _nd_next_open = _first_open_day_after(_nd_spoken_day, restaurant_id)
             if _nd_next_open:
@@ -4532,6 +4569,9 @@ def chat(request: ChatRequest, session: SessionDep):
                     restaurant_id=restaurant_id,
                     day_said=True,
                 )
+            _nd_time_question = None if _nd_pending else _refused_time_question()
+            if _nd_time_question:
+                _nd_state, _nd_next = "collecting_pickup_time", _nd_time_question
             _nd_resp = f"Perfetto, il ritiro è per {_day_phrase or _today_phrase(conversation.pickup_time)}. {_nd_next}"
             print(f"[Pickup] cliente accetta il ritiro per {_preorder_date}")
         elif _no and (not _nd_asking_day or _nd_conflict):
@@ -4649,6 +4689,9 @@ def chat(request: ChatRequest, session: SessionDep):
             restaurant_id=restaurant_id,
             day_said=_day_said_for(_new_day_state),
         )
+        _new_day_time_question = _refused_time_question()
+        if _new_day_time_question:
+            _new_day_state, _new_day_resp = "collecting_pickup_time", _new_day_time_question
         if _day_note:
             _new_day_resp = f"{_day_note} {_new_day_resp}"
         return _local_reply(_new_day_state, _new_day_resp, _new_day_merged, "change_pickup_day")
@@ -5718,6 +5761,10 @@ def chat(request: ChatRequest, session: SessionDep):
         )
     if conversation.pickup_time:
         _clear_slot_attempts(conversation, "pickup_time")
+    if not _next_day_ask and conversation.state != "completed":
+        _llm_time_question = _refused_time_question()
+        if _llm_time_question:
+            conversation.state, response_message = "collecting_pickup_time", _llm_time_question
     if _day_note:
         response_message = f"{_day_note} {response_message}"
 

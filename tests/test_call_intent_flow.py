@@ -310,6 +310,100 @@ class RealCallsNovember5Tests(_Call):
         self.assertEqual(r.response_message, "Cosa desidera ordinare?")
 
 
+class RealCallsNovember5EveningTests(_Call):
+    """Chiamate del 5 novembre dopo le 22, cucina chiusa."""
+
+    now = NOV_5_CLOSED
+    TONIGHT_CLOSED = "Stasera purtroppo la cucina è chiusa. Va bene per domani, venerdì?"
+
+    def setUp(self):
+        super().setUp()
+        conversation = self.conversation()
+        conversation.customer_name = "Giacomo"
+        self.session.add(conversation)
+        self.session.commit()
+
+    def test_00a50cc0_tonight_is_refused_confirmed_and_the_time_is_kept(self):
+        r = self.say("Salve Giacomo.", dict(NOTHING))
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", CLOSED_QUESTION))
+        # L'LLM di quel turno non ha estratto l'orario: deve bastare la frase
+        r = self.say("Vorrei prenotare una pizza per stasera alle 8.", dict(NOTHING))
+        self.assertEqual((r.state, r.response_message), ("confirming_next_day", self.TONIGHT_CLOSED))
+        self.assertNotIn("Perfetto", r.response_message)
+        self.assertIsNone(self.conversation().pickup_date)  # nessuno spostamento prima del sì
+        r = self.say("Sì.")
+        self.assertEqual(r.response_message, "Perfetto, il ritiro è per domani, venerdì. Cosa desidera ordinare?")
+        self.assertEqual((self.conversation().pickup_date, self.conversation().pickup_time), ("2026-11-06", "20:00"))
+        r = self.say("Una margherita.", dict(ADD_MARGHERITA))
+        self.assertEqual(r.response_message, "Allora: una margherita, per domani venerdì alle 20, a nome Giacomo. Confermo?")
+        self.say("Sì.")
+        self.assertEqual((self.saved[0]["pickup_date"], self.saved[0]["pickup_time"]), ("2026-11-06", "20:00"))
+
+    def test_tonight_with_a_product_keeps_the_product_and_waits_for_yes(self):
+        self.say("Salve Giacomo.", dict(NOTHING))
+        r = self.say("una margherita per stasera alle 8", dict(ADD_MARGHERITA))
+        self.assertEqual(r.response_message, self.TONIGHT_CLOSED)
+        self.assertEqual([i["pizza_name"] for i in json.loads(self.conversation().items_json)], ["Margherita"])
+        r = self.say("sì")
+        self.assertIn("per domani venerdì alle 20, a nome Giacomo. Confermo?", r.response_message)
+
+    def test_ordinare_per_stasera_is_refused_too(self):
+        self.say("Salve Giacomo.", dict(NOTHING))
+        r = self.say("vorrei ordinare per stasera", dict(NOTHING))
+        self.assertEqual(r.response_message, self.TONIGHT_CLOSED)
+        self.assertIsNone(self.conversation().pickup_date)
+
+    def test_no_to_the_proposal_asks_the_day_and_moves_nothing(self):
+        self.say("Salve Giacomo.", dict(NOTHING))
+        self.say("Vorrei prenotare una pizza per stasera alle 8.", dict(NOTHING))
+        r = self.say("no")
+        self.assertEqual(r.response_message, chat_module.PICKUP_DAY_QUESTION)
+        self.assertIsNone(self.conversation().pickup_date)
+
+    def test_a_time_not_valid_on_the_new_day_is_said_and_a_valid_one_proposed(self):
+        self.restaurant = {**self.restaurant, "opening_hours": {**self.restaurant["opening_hours"], "friday": "19:00-21:00"}}
+        self.say("Salve Giacomo.", dict(NOTHING))
+        self.say("vorrei ordinare per stasera alle 9 e mezza", dict(NOTHING))
+        r = self.say("sì")
+        self.assertEqual(r.state, "collecting_pickup_time")
+        self.assertEqual(
+            r.response_message,
+            "Perfetto, il ritiro è per domani, venerdì. Alle 21:30 domani venerdì non è possibile, "
+            "siamo aperti dalle 19:00 alle 21:00. Va bene alle 19? Mi dica sì o no.",
+        )
+        self.say("sì")
+        self.assertEqual(self.conversation().pickup_time, "19:00")
+
+    def test_2736d6cb_table_then_order_is_preserved(self):
+        r = self.say("Ciao, vorrei prenotare per domani alle 8.")
+        self.assertEqual(r.response_message, CLOSED_QUESTION)
+        r = self.say("Vorrei prenotare per domani alle 8.")
+        self.assertEqual(r.response_message, "Certo, domani, venerdì 6 novembre alle 20:00. Per quante persone?")
+        r = self.say("Vorrei una capricciosa da sport.", dict(ADD_CAPRICCIOSA))
+        self.assertEqual(r.response_message, "Allora: una capricciosa, per domani venerdì alle 20, a nome Giacomo. Confermo?")
+        r = self.say("Sono per le 8.45.", {**NOTHING, "intent": "set_pickup_time", "pickup_time": "20:45"})
+        self.assertEqual(r.response_message, "Allora: una capricciosa, per domani venerdì alle 20:45, a nome Giacomo. Confermo?")
+        r = self.say("Sì grazie.")
+        self.assertEqual(r.state, "completed")
+        saved = self.saved[0]
+        self.assertEqual((saved["pickup_date"], saved["pickup_time"]), ("2026-11-06", "20:45"))
+        self.assertEqual([i["pizza_name"] for i in saved["items"]], ["Capricciosa"])
+        self.assertEqual(self.reservations, [])
+
+
+class DayChangeAtTheRecapTests(_Call):
+    now = NOV_5_OPEN
+
+    def test_new_day_where_the_time_is_not_valid_says_it_and_proposes_one(self):
+        self.restaurant = {**self.restaurant, "opening_hours": {**self.restaurant["opening_hours"], "saturday": "19:00-21:00"}}
+        self.say("una margherita per le 9 e mezza, sono Giacomo",
+                 {**ADD_MARGHERITA, "customer_name": "Giacomo", "pickup_time": "21:30"})
+        r = self.say("no, per sabato")
+        self.assertEqual(r.state, "collecting_pickup_time")
+        self.assertIn("Alle 21:30 sabato non è possibile, siamo aperti dalle 19:00 alle 21:00. Va bene alle 19?", r.response_message)
+        self.assertEqual(self.conversation().pickup_date, "2026-11-07")
+
+
 class NextDayOnlyUnchangedTests(_Call):
     """Preordine fisso (Pizza a Pezzi), anche con le prenotazioni accese: nulla cambia."""
 
@@ -325,6 +419,11 @@ class NextDayOnlyUnchangedTests(_Call):
         self.assertEqual(r.state, "awaiting_confirmation")
         self.assertIn("alle 20,", r.response_message)
         self.assertEqual(self.conversation().pickup_time, "20:00")
+
+    def test_tonight_is_still_redirected_with_the_fixed_day(self):
+        r = self.say("Due tranci per stasera")
+        self.assertIn("prendiamo solo ordini per il giorno dopo", r.response_message)
+        self.assertTrue(r.response_message.endswith("Vuole ordinare per domani, venerdì?"))
 
     def test_order_is_saved_for_the_fixed_day(self):
         self.say("una margherita per le 8, sono Giacomo", {**ADD_MARGHERITA, "customer_name": "Giacomo", "pickup_time": "20:00"})
