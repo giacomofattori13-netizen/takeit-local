@@ -197,8 +197,9 @@ class EnrichPricingPerRestaurantTests(_DbTestCase):
 
         self.assertEqual([i["sale_unit"] for i in items], ["kg", "kg", "piece"])
         self.assertEqual([i["base_price"] for i in items], [18.5, 19.9, 2.5])
-        self.assertEqual([i["total_price"] for i in items], [9.25, 5.97, 5.0])
-        self.assertEqual(total, 20.22)
+        # Al taglio si paga a peso al ritiro: nessun totale, né della voce né dell'ordine
+        self.assertEqual([i["total_price"] for i in items], [None, None, 5.0])
+        self.assertIsNone(total)
 
     def test_item_of_other_restaurant_is_not_priced(self):
         items, _total = self._enrich(
@@ -301,10 +302,10 @@ class FullOrderNonRegressionTests(_DbTestCase):
         self.assertEqual(sent["Margherita"]["sale_unit"], "kg")
         self.assertEqual(sent["Margherita"]["temperature"], "fredda")
         self.assertEqual(sent["Margherita"]["base_price"], 18.5)
-        self.assertEqual(sent["Margherita"]["total_price"], 9.25)
+        self.assertIsNone(sent["Margherita"]["total_price"])
         self.assertEqual(sent["Bufala al taglio"]["temperature"], "calda")
         self.assertEqual(sent["Bufala al taglio"]["base_price"], 19.9)
-        self.assertEqual(sent["Bufala al taglio"]["total_price"], 5.97)
+        self.assertIsNone(sent["Bufala al taglio"]["total_price"])
 
     def test_full_cds_order_by_piece_with_todays_pickup_date_and_nonzero_price(self):
         order, order_items, payload = self._run_order("cds-full", CDS_ID, [

@@ -43,6 +43,18 @@ CDS = {"id": RID, "name": "Corte Del Sole", "min_prep_minutes": 30, "opening_hou
 MONDAY_CLOSED = {**CDS, "opening_hours": {**CDS["opening_hours"], "monday": ""}}
 NO_CUSTOM_PIZZA = {**CDS, "custom_pizza_enabled": False}
 NEXT_DAY_ONLY = {**CDS, "phone_orders_next_day_only": True}
+# Pizza a Pezzi com'è su Base44 (menu in tests/fixtures/pap_menu.json); id a parte, così il
+# prompt in cache dell'LLM vero non si mescola con quello di Corte del Sole
+PAP_RID = "rest-golden-pap"
+PAP_MENU = json.loads((Path(__file__).parent / "fixtures" / "pap_menu.json").read_text(encoding="utf-8"))
+PAP = {
+    "id": PAP_RID, "name": "Pizza a Pezzi", "reservations_enabled": False, "phone_orders_next_day_only": True,
+    "custom_pizza_enabled": False, "price_per_kg_cold": 18.5, "price_per_kg_hot": 19.9,
+    "handoff_phone": "+390212345678",  # su Base44 PaP ha un numero di trasferimento
+    "opening_hours": {**{d: "17:00-21:00" for d in ALL_DAYS}, "monday": "closed"},
+}
+FRIDAY_NOV_6 = datetime.datetime(2026, 11, 6, 17, 7, tzinfo=ROME)  # chiamate di prova a PaP; domani sabato 7
+SATURDAY_NOV_7 = "2026-11-07"
 
 THURSDAY_16 = datetime.datetime(2026, 10, 1, 16, 0, tzinfo=ROME)  # domani venerdì 2
 SUNDAY_16 = datetime.datetime(2026, 10, 4, 16, 0, tzinfo=ROME)  # domani lunedì 5
@@ -56,6 +68,11 @@ def item(name, quantity=1, add=(), remove=(), dough="classica", size="normale"):
     return {"name": name, "quantity": quantity, "add": list(add), "remove": list(remove), "dough": dough, "size": size}
 
 
+def slice_item(name, quantity=1, unit="tranci", size="normale", temperature=""):
+    """Voce al taglio di Pizza a Pezzi: unità (tranci/kg), porzione e caldo/freddo."""
+    return {**item(name, quantity, size=size), "unit": unit, "temperature": temperature}
+
+
 def recorded(intent="add_items", items=(), name=None, time=None):
     """Estrazione registrata dall'LLM, per la versione senza rete."""
     return {
@@ -64,7 +81,8 @@ def recorded(intent="add_items", items=(), name=None, time=None):
             {
                 "pizza_name": i["name"], "quantity": i["quantity"], "add_ingredients": i["add"],
                 "remove_ingredients": i["remove"], "dough_type": i["dough"], "pizza_type": "Normale",
-                "size": i["size"], "temperature": "", "order_unit": "",
+                "size": i["size"], "temperature": i.get("temperature", ""), "order_unit": i.get("unit", ""),
+                **({"sale_unit": "kg"} if "unit" in i else {}),
             }
             for i in items
         ],
@@ -87,6 +105,8 @@ class Case:
     reply_contains: "str | None" = None
     final_state: "str | None" = None
     replaces_cart: bool = False  # `items` è il carrello finale, non un'aggiunta
+    menu: list = field(default_factory=lambda: MENU)
+    preset: dict = field(default_factory=dict)  # campi della sessione prima della frase (nome, orario, giorno)
 
     def __post_init__(self):
         self.cart = self.cart or []
@@ -161,9 +181,11 @@ CASES = [
     Case("reale_sono_per_le_8_45", "Sono per le 8.45.", time="20:45", state="awaiting_confirmation",
          cart=[item("Capricciosa")], items=[item("Capricciosa")], replaces_cart=True,
          llm=recorded(intent="set_pickup_time", time="20:45"), final_state="collecting_name"),
+    # "tranci" è un prodotto: la frase passa dall'LLM, così un gusto detto resta nel carrello
     Case("pap_due_tranci_per_stasera", "Due tranci per stasera", day=TOMORROW, restaurant=NEXT_DAY_ONLY,
-         reply_contains="prendiamo solo ordini per il giorno dopo: per stasera può passare direttamente in negozio. "
-                        "Il ritiro è per domani, venerdì. Vuole ordinare per domani, venerdì?"),
+         llm=recorded(), final_state="confirming_next_day",
+         reply_contains="purtroppo al telefono prendiamo solo ordini per il giorno dopo, "
+                        "ma può passare direttamente in negozio. Va bene per domani, venerdì?"),
     Case("reale_no_alla_domanda_sulle_persone", "No no no no.", state="collecting_reservation_party",
          final_state="collecting_reservation_party", reply_contains="Va bene, cosa devo correggere?"),
     # ── Ordine o prenotazione: decide il contenuto ───────────────────────────
@@ -184,7 +206,7 @@ CASES = [
          llm=recorded(items=[item("Bondola", 2)], time="20:00")),
     # ── custom_pizza_enabled = false: niente Margherita, gusti più simili ────
     Case("fuori_menu_rifiutata", "una salamino", restaurant=NO_CUSTOM_PIZZA, final_state="collecting_items",
-         llm=recorded(items=[item(PERSONAL, add=["salamino"])]), reply_contains="Salamino oggi non c'è, abbiamo"),
+         llm=recorded(items=[item(PERSONAL, add=["salamino"])]), reply_contains="Salamino non è nel menu, abbiamo"),
     Case("fuori_menu_rifiutata_giorno_e_orario_restano", "2 salamino per domani alle 8", day=TOMORROW, time="20:00",
          restaurant=NO_CUSTOM_PIZZA, final_state="collecting_items",
          llm=recorded(items=[item(PERSONAL, 2, add=["salamino"])], time="20:00"), reply_contains="Quale vuole?"),
@@ -267,29 +289,89 @@ CASES = [
     Case("domani_chiuso_propone_martedi", "una margherita per domani", [_MARGHERITA], now=SUNDAY_16,
          restaurant=MONDAY_CLOSED, llm=recorded(items=[_MARGHERITA]), final_state="confirming_next_day",
          reply_contains="Domani siamo chiusi, il primo giorno disponibile è martedì, va bene?"),
+    # ── Chiamate di prova a Pizza a Pezzi del 6 novembre, parole esatte (errori STT compresi) ─
+    # 96bfebc7: "verde e noci" è il prodotto Verde e Noci; "mezzo" è mezzo trancio; "fritto" è freddo.
+    # L'estrazione registrata è quella sbagliata di quel giorno per il salmone (0,5 kg, calda).
+    Case("reale_pap_verde_e_noci_e_mezzo_salmone_fritto",
+         "Posso ordinarti un trancio intero di verde e noci caldo e mezzo di salmone e limone fritto per domani alle 7.",
+         [slice_item("Verde e Noci", size="piena", temperature="calda"),
+          slice_item("Salmone e Limone", size="mezza", temperature="fredda")],
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="awaiting_confirmation",
+         llm=recorded(items=[slice_item("Verde e Noci", size="piena", temperature="calda"),
+                             slice_item("Salmone e Limone", 0.5, unit="kg", temperature="calda")], time="19:00"),
+         reply_contains="Allora: un trancio intero di verde e noci, caldo; un trancio mezzo di salmone e limone, "
+                        "freddo, per domani sabato alle 19, a nome Giacomo. Confermo?"),
+    # 96bfebc7, quarto turno: la temperatura detta col prodotto vince su quella nel carrello
+    Case("reale_pap_salmone_e_limone_fredda", "Fammi solo salmone e limone fredda.",
+         [slice_item("Salmone e Limone", 0.5, unit="kg", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Salmone e Limone", 0.5, unit="kg", temperature="calda")],
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo", "pickup_time": "19:00"},
+         llm=recorded(intent="set_kg_temperature"), final_state="awaiting_confirmation"),
+    # 3b55138c: domanda sul prezzo e orario ripetuto al riepilogo
+    Case("reale_pap_quanto_costa_al_riepilogo", "Riesci a dirmi quanto costa?",
+         cart=[slice_item("Pepe Rosa", size="piena", temperature="fredda"),
+               slice_item("Salmone e Limone", size="piena", temperature="fredda")],
+         state="awaiting_confirmation", day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo", "pickup_time": "19:00", "pickup_date": SATURDAY_NOV_7},
+         final_state="awaiting_confirmation",
+         reply_contains="Al taglio costa 18,50 euro al chilo freddo: si paga a peso al ritiro. Confermo l'ordine?"),
+    Case("reale_pap_quanto_costa", "Quanto costa?",
+         cart=[slice_item("Pepe Rosa", size="piena", temperature="fredda")],
+         state="awaiting_confirmation", day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo", "pickup_time": "19:00", "pickup_date": SATURDAY_NOV_7},
+         final_state="awaiting_confirmation", reply_contains="si paga a peso al ritiro. Confermo l'ordine?"),
+    Case("reale_pap_per_le_7_al_riepilogo", "Per le 7?",
+         cart=[slice_item("Pepe Rosa", size="piena", temperature="fredda")],
+         state="awaiting_confirmation", day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo", "pickup_time": "19:00", "pickup_date": SATURDAY_NOV_7},
+         final_state="awaiting_confirmation", reply_contains="Sì, alle 19. Confermo l'ordine?"),
+    # CA96b70e (15:32): "Rosa" è contenuto solo in Pepe Rosa
+    Case("reale_pap_rosa", "Vorrei un attimo di te per Rosa per domani alle 6.",
+         day=SATURDAY_NOV_7, time="18:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, add=["Rosa"])], time="18:00"), reply_contains="Intende Pepe Rosa?"),
+    # 67b4aaf1: "per stasera" con un prodotto, che resta nel carrello
+    Case("reale_pap_zucca_e_pistacchi_per_stasera",
+         "Salve Giacomo, come... Salve. Ciao, posso ordinarti 2 tranci di zucca e pistacchi per stasera?",
+         [slice_item("Zucca e Pistacchi", 2)], day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU, preset={"customer_name": "Giacomo"}, final_state="confirming_next_day",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 2)]),
+         reply_contains="Stasera purtroppo al telefono prendiamo solo ordini per il giorno dopo, "
+                        "ma può passare direttamente in negozio. Va bene per domani, sabato?"),
+    Case("reale_pap_zucca_e_pistaxi", "2 trance di zucca e pistaxi.", [slice_item("Zucca e Pistacchi", 2)],
+         day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="collecting_kg_portion",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 2)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
 ]
 
 
 class Call:
     """Chat reale con menu di CdS, orologio fisso, DB in memoria; niente Base44 né invii."""
 
-    def __init__(self, now, restaurant, extract_side_effect=None):
+    def __init__(self, now, restaurant, extract_side_effect=None, menu=None):
         self.now, self.restaurant, self.extract = now, restaurant, extract_side_effect
+        self.menu = MENU if menu is None else menu
+        self.rid = restaurant.get("id") or RID
         self.saved = []
 
     @contextmanager
-    def open(self, state="collecting_items", cart=()):
+    def open(self, state="collecting_items", cart=(), **preset):
         engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         SQLModel.metadata.create_all(engine)
         self.session = Session(engine)
-        for entry in MENU:
+        for entry in self.menu:
             self.session.add(MenuItem(
                 name=entry["name"], category=entry["category"], pizza_type="Normale",
-                price=entry["price"], restaurant_id=RID, sale_unit=entry.get("sale_unit") or "piece",
+                price=entry["price"], restaurant_id=self.rid, sale_unit=entry.get("sale_unit") or "piece",
             ))
         self.session.add(ConversationSession(
-            session_id="golden", customer_phone="+393331234567", state=state, completed=False, restaurant_id=RID,
-            items_json=json.dumps(recorded(items=cart)["items"], ensure_ascii=False),
+            session_id="golden", customer_phone="+393331234567", state=state, completed=False, restaurant_id=self.rid,
+            items_json=json.dumps(recorded(items=cart)["items"], ensure_ascii=False), **preset,
         ))
         self.session.commit()
         frozen = _frozen_datetime_module(self.now)
@@ -306,7 +388,7 @@ class Call:
             patch.object(chat_module, "load_restaurant", side_effect=load),
             patch.object(chat_module, "ensure_restaurant_config", return_value=True),
             patch.object(chat_module, "is_agent_active", return_value=True),
-            patch.object(chat_module, "get_proposable_menu", return_value=MENU),
+            patch.object(chat_module, "get_proposable_menu", return_value=self.menu),
             patch.object(chat_module, "get_sold_out_item_names", return_value=set()),
             patch.object(chat_module, "load_doughs", return_value=DOUGHS),
             patch.object(chat_module, "is_dough_available", return_value=True),
@@ -341,6 +423,9 @@ def _normalized_items(items_json):
                 "add": sorted(a.lower() for a in i.get("add_ingredients") or []),
                 "remove": sorted(r.lower() for r in i.get("remove_ingredients") or []),
                 "dough": i.get("dough_type") or "classica", "size": i.get("size") or "normale",
+                # Al taglio contano anche unità e caldo/freddo
+                **({"unit": i.get("order_unit") or "", "temperature": i.get("temperature") or ""}
+                   if i.get("sale_unit") == "kg" else {}),
             }
             for i in json.loads(items_json)
         ),
@@ -386,7 +471,7 @@ def test_golden_with_recorded_extraction(case):
         assert case.llm is not None, "la frase non dovrebbe passare dall'LLM"
         return json.loads(json.dumps(case.llm))
 
-    with Call(case.now, case.restaurant, fake_extract).open(case.state, case.cart) as call:
+    with Call(case.now, case.restaurant, fake_extract, case.menu).open(case.state, case.cart, **case.preset) as call:
         response = call.say(case.message)
         assert _mismatches(case, call, response) == []
 
@@ -399,7 +484,7 @@ def test_golden_with_recorded_extraction(case):
 def test_golden_with_real_llm(case):
     failures = []
     for run in range(1, LIVE_RUNS + 1):
-        with Call(case.now, case.restaurant).open(case.state, case.cart) as call:
+        with Call(case.now, case.restaurant, menu=case.menu).open(case.state, case.cart, **case.preset) as call:
             response = call.say(case.message)
             errors = _mismatches(case, call, response)
         if errors:
@@ -410,13 +495,13 @@ def test_golden_with_real_llm(case):
 # ── Giorno detto: conversazioni complete ─────────────────────────────────────
 
 
-def _script(now=THURSDAY_16, restaurant=CDS):
+def _script(now=THURSDAY_16, restaurant=CDS, menu=None):
     extractions = []
 
     def fake_extract(*args, **kwargs):
         return extractions.pop(0) if extractions else recorded("unknown")
 
-    call = Call(now, restaurant, fake_extract)
+    call = Call(now, restaurant, fake_extract, menu)
     call.extractions = extractions
     return call
 
@@ -842,7 +927,7 @@ def test_off_menu_refused_names_three_similar_flavours_and_saves_nothing():
     call = _no_custom(recorded(items=[item(PERSONAL, add=["salamino"])]))
     with call.open():
         response = call.say("una salamino")
-        assert re.fullmatch(r"Salamino oggi non c'è, abbiamo [^,]+, [^,]+ e [^,]+\. Quale vuole\?", response.response_message)
+        assert re.fullmatch(r"Salamino non è nel menu, abbiamo [^,]+, [^,]+ e [^,]+\. Quale vuole\?", response.response_message)
         assert response.state == "collecting_items"
         assert json.loads(call.conversation().items_json) == []
         names = re.search(r"abbiamo (.+)\. Quale", response.response_message).group(1).replace(" e ", ", ").split(", ")
@@ -869,14 +954,14 @@ def test_off_menu_refused_when_the_llm_returns_the_bare_name():
     call = _no_custom(recorded(items=[item("Speck")]))
     with call.open():
         response = call.say("una speck")
-        assert response.response_message.startswith("Speck oggi non c'è, abbiamo")
+        assert response.response_message.startswith("Speck non è nel menu, abbiamo")
 
 
 def test_off_menu_refused_keeps_the_other_pizzas_day_and_time():
     call = _no_custom(recorded(items=[_MARGHERITA, item(PERSONAL, add=["salamino"])], time="20:00"))
     with call.open():
         response = call.say("una margherita e una salamino per domani alle 8")
-        assert "Salamino oggi non c'è" in response.response_message
+        assert "Salamino non è nel menu" in response.response_message
         conversation = call.conversation()
         assert [i["name"] for i in _normalized_items(conversation.items_json)] == ["Margherita"]
         assert (conversation.pickup_date, conversation.pickup_time) == (TOMORROW, "20:00")
@@ -905,7 +990,7 @@ def test_off_menu_refused_at_closed_kitchen_agrees_the_day_first():
         response = call.say("una salamino")
         assert "vuole ordinare per domani?" in response.response_message
         response = call.say("sì")
-        assert response.response_message.startswith("Perfetto, il ritiro è per domani, venerdì. Salamino oggi non c'è, abbiamo")
+        assert response.response_message.startswith("Perfetto, il ritiro è per domani, venerdì. Salamino non è nel menu, abbiamo")
         assert response.state == "collecting_items"
 
 
@@ -1137,3 +1222,128 @@ def test_rules_document_only_cites_tests_that_exist():
 def test_rules_document_cites_every_golden_case():
     document = (Path(__file__).parents[1] / "docs" / "regole_ordine.md").read_text(encoding="utf-8")
     assert [case.id for case in CASES if f"`{case.id}`" not in document] == []
+
+
+# ── Pizza a Pezzi, chiamate di prova del 6 novembre: turno per turno ────────
+
+
+def _pap_script():
+    return _script(FRIDAY_NOV_6, PAP, PAP_MENU)
+
+
+def test_96bfebc7_an_exact_menu_name_is_never_changed_by_an_alias():
+    said = "Posso ordinarti un trancio intero di verde e noci caldo e mezzo di salmone e limone fritto per domani alle 7."
+    assert service._apply_aliases(said, PAP_MENU) == said
+    assert service._apply_aliases("Verde e noci.", PAP_MENU) == "Verde e noci."
+    # Fuori dal nome del prodotto l'alias vale ancora
+    assert service._apply_aliases("una con il verde", PAP_MENU) == "una con il gorgonzola"
+
+
+def test_96bfebc7_the_same_unresolved_answer_twice_changes_strategy_then_hands_over():
+    call = _pap_script()
+    gorgonzola = recorded(items=[item(PERSONAL, add=["gorgonzola", "noci"])])
+    call.extractions.extend([dict(gorgonzola), dict(gorgonzola), dict(gorgonzola)])
+    with call.open(customer_name="Giacomo"):
+        first = call.say("Posso ordinarti un trancio intero di verde e noci caldo e mezzo di salmone e limone fritto per domani alle 7.")
+        assert first.response_message.endswith("Quale vuole?")
+        assert "oggi non c'è" not in first.response_message  # il nome non esiste nel menu
+        assert call.say("Verde e noci.").response_message == first.response_message  # ripetuta una volta
+        proposal = call.say("Verde e noci.")
+        assert proposal.response_message == "Intende Verde e Noci?"
+        response = call.say("Sì.")
+        assert [i["pizza_name"] for i in json.loads(call.conversation().items_json)] == ["Verde e Noci"]
+        assert response.state.startswith("collecting_kg")
+
+
+def test_96bfebc7_no_to_the_changed_strategy_hands_over_to_the_restaurant():
+    call = _pap_script()
+    gorgonzola = recorded(items=[item(PERSONAL, add=["gorgonzola", "noci"])])
+    call.extractions.extend([dict(gorgonzola), dict(gorgonzola), dict(gorgonzola)])
+    with call.open(customer_name="Giacomo"), patch.object(chat_module, "save_reservation_to_base44", return_value="r1"):
+        call.say("Posso ordinarti un trancio intero di verde e noci caldo e mezzo di salmone e limone fritto per domani alle 7.")
+        call.say("Verde e noci.")
+        call.say("Verde e noci.")
+        response = call.say("No.")
+        assert response.response_message == chat_module.CALLBACK_HANDOFF_MESSAGE
+        assert response.state == "reservation_handoff"
+
+
+def test_96bfebc7_kg_order_is_saved_without_any_total():
+    call = _pap_script()
+    call.extractions.append(recorded(items=[slice_item("Salmone e Limone", 0.5, unit="kg", temperature="fredda")], time="19:00"))
+    with call.open(customer_name="Giacomo"):
+        call.say("mezzo chilo di salmone e limone freddo per domani alle 7")
+        call.say("Ok.")
+    saved = call.saved[0]
+    assert saved["items"][0]["total_price"] is None
+    assert chat_module.order_total_amount(saved["items"]) is None
+
+
+def test_ca96b70e_rosa_yes_adds_pepe_rosa_and_asks_what_is_missing():
+    call = _pap_script()
+    call.extractions.append(recorded(items=[item(PERSONAL, add=["Rosa"])], time="18:00"))
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Vorrei un attimo di te per Rosa per domani alle 6.").response_message == "Intende Pepe Rosa?"
+        response = call.say("Sì.")
+        assert response.response_message == "Quanti tranci, interi o mezzi? Caldi o freddi?"
+        response = call.say("Uno intero freddo.")
+        assert response.response_message == (
+            "Allora: un trancio intero di pepe rosa, freddo, per domani sabato alle 18, a nome Giacomo. Confermo?"
+        )
+
+
+def test_ca96b70e_no_to_pepe_rosa_offers_similar_flavours():
+    call = _pap_script()
+    call.extractions.append(recorded(items=[item(PERSONAL, add=["Rosa"])], time="18:00"))
+    with call.open(customer_name="Giacomo"):
+        call.say("Vorrei un attimo di te per Rosa per domani alle 6.")
+        response = call.say("No.")
+        assert response.response_message.startswith("Rosa non è nel menu, abbiamo ")
+        assert json.loads(call.conversation().items_json) == []
+
+
+def test_67b4aaf1_tonight_keeps_the_product_and_yes_goes_on_with_the_missing_question():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[slice_item("Zucca e Pistacchi", 2)]),
+        recorded(intent="set_pickup_time", time="20:30"),  # "Interi freddi." non passa dall'LLM
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("Salve Giacomo, come... Salve. Ciao, posso ordinarti 2 tranci di zucca e pistacchi per stasera?")
+        response = call.say("Va bene.")
+        assert response.response_message == "Perfetto, il ritiro è per domani, sabato. Interi o mezzi? Caldi o freddi?"
+        call.say("Interi freddi.")
+        response = call.say("Qua 8 e mezza.")
+        assert response.response_message == (
+            "Allora: due tranci interi di zucca e pistacchi, freddi, per domani sabato alle 20:30, a nome Giacomo. Confermo?"
+        )
+        call.say("Sì grazie.")
+    assert (call.saved[0]["pickup_date"], call.saved[0]["pickup_time"]) == (SATURDAY_NOV_7, "20:30")
+
+
+def test_3b55138c_price_and_same_time_at_the_recap_are_answered_then_confirmed():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[slice_item("Pepe Rosa"), slice_item("Salmone e Limone")]),
+        recorded(intent="set_pickup_time", time="19:00"),
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("Posso ordinarti un trancio di pepe rosa e una di salmone e limone.")
+        call.say("Interi freddi.")
+        recap = call.say("Per le 7?")
+        assert recap.state == "awaiting_confirmation"
+        assert call.say("Per le 7?").response_message == "Sì, alle 19. Confermo l'ordine?"
+        price = "Al taglio costa 18,50 euro al chilo freddo: si paga a peso al ritiro. Confermo l'ordine?"
+        assert call.say("Riesci a dirmi quanto costa?").response_message == price
+        assert call.say("Quanto costa?").response_message == price
+        assert call.saved == []
+        assert call.say("Sì, va bene.").state == "completed"
+    assert all(i["total_price"] is None for i in call.saved[0]["items"])
+
+
+def test_price_at_the_recap_of_pieces_gives_the_total():
+    call = _pap_script()
+    call.extractions.append(recorded(items=[item("FIT - Salmone")], time="19:00"))
+    with call.open(customer_name="Giacomo"):
+        call.say("una fit salmone per le 7")
+        assert call.say("Quanto costa?").response_message == "In tutto sono 9,00 euro. Confermo l'ordine?"

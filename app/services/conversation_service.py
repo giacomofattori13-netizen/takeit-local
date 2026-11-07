@@ -3197,11 +3197,30 @@ def _apply_aliases(text: str, menu_items: list[dict] | None = None) -> str:
     Un alias non vale se è già il nome di una voce del menu del locale: a Corte del
     Sole "bondola" è la pizza Bondola, non la mortadella."""
     menu_names = {str(item.get("name") or "").strip().lower() for item in menu_items or []}
-    for alias, canonical in PIZZA_ALIASES.items():
-        if alias.lower() in menu_names:
-            continue
-        text = re.sub(rf"\b{re.escape(alias)}\b", canonical, text, flags=re.IGNORECASE)
-    return text
+    # Un nome del menu detto per intero vince su ogni alias: a Pizza a Pezzi "verde e
+    # noci" è Verde e Noci, non "gorgonzola e noci". Gli alias valgono solo fuori da quei nomi.
+    exact_names = sorted((name for name in menu_names if name), key=len, reverse=True)
+    exact_re = (
+        re.compile(r"\b(?:" + "|".join(re.escape(name) for name in exact_names) + r")\b", re.IGNORECASE)
+        if exact_names else None
+    )
+
+    def _replace(segment: str) -> str:
+        for alias, canonical in PIZZA_ALIASES.items():
+            if alias.lower() in menu_names:
+                continue
+            segment = re.sub(rf"\b{re.escape(alias)}\b", canonical, segment, flags=re.IGNORECASE)
+        return segment
+
+    if exact_re is None:
+        return _replace(text)
+    parts, last = [], 0
+    for match in exact_re.finditer(text):
+        parts.append(_replace(text[last:match.start()]))
+        parts.append(match.group(0))
+        last = match.end()
+    parts.append(_replace(text[last:]))
+    return "".join(parts)
 
 
 def extract_order_from_text(

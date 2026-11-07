@@ -204,7 +204,8 @@ class PreorderFlowTests(_FlowHarness):
         item = self.saved[0]["items"][0]
         self.assertEqual((item["order_unit"], item["quantity"], item["temperature"]), ("kg", 0.5, "calda"))
         self.assertNotIn(item.get("size"), ("piena", "mezza"))
-        self.assertEqual(item["total_price"], 9.95)
+        # Al taglio il prezzo si fa a peso al ritiro, anche con il peso detto
+        self.assertIsNone(item["total_price"])
 
     def test_weight_said_as_answer_to_the_quantity_question(self):
         self.say("della bufala", {**NOTHING, "intent": "add_items", "items": [_bufala()]})
@@ -379,13 +380,17 @@ class PreorderFlowTests(_FlowHarness):
 
     # ── Richiesta per stasera ────────────────────────────────────────────────
 
-    def test_request_for_tonight_is_redirected_to_the_shop(self):
-        r = self.say("vorrei mezzo chilo di bufala per stasera")
-        self.assertEqual(self.llm_calls, 0)
-        self.assertIn("al telefono prendiamo solo ordini per il giorno dopo", r.response_message)
-        self.assertIn("per stasera può passare direttamente in negozio", r.response_message)
-        self.assertIn("il ritiro è per martedì", r.response_message)
-        self.assertEqual(self.conversation().items_json, "[]")
+    def test_request_for_tonight_is_redirected_to_the_shop_and_keeps_the_product(self):
+        r = self.say("vorrei mezzo chilo di bufala per stasera", {**NOTHING, "intent": "add_items", "items": [_bufala_kg()]})
+        self.assertEqual(r.state, "confirming_next_day")
+        self.assertEqual(
+            r.response_message,
+            "Oggi purtroppo al telefono prendiamo solo ordini per il giorno dopo, "
+            "ma può passare direttamente in negozio. Va bene per martedì?",
+        )
+        self.assertEqual([i["pizza_name"] for i in json.loads(self.conversation().items_json)], ["Bufala"])
+        r = self.say("sì")
+        self.assertEqual(r.response_message, "Perfetto, il ritiro è per martedì. Calda o fredda?")
 
     def test_pickup_day_is_said_once_per_call(self):
         self.order_up_to_name()
@@ -393,13 +398,13 @@ class PreorderFlowTests(_FlowHarness):
         self.assertIn("il ritiro è per martedì", r.response_message)
         r = self.say("stasera alle 8")
         self.assertNotIn("il ritiro è per", r.response_message.lower())
-        self.assertIn("Vuole ordinare per martedì?", r.response_message)
+        self.assertIn("Va bene per martedì?", r.response_message)
 
     def test_request_for_tonight_at_pickup_time_question_is_not_taken_as_tomorrow(self):
         self.order_up_to_name()
         self.say("Giacomo")
         r = self.say("stasera alle 8")
-        self.assertIn("per stasera può passare direttamente in negozio", r.response_message)
+        self.assertIn("ma può passare direttamente in negozio", r.response_message)
         self.assertIsNone(self.conversation().pickup_time)
 
     # ── Ora di ritiro fuori orario ───────────────────────────────────────────

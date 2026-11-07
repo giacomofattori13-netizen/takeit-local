@@ -374,6 +374,28 @@ class RealCallsNovember5EveningTests(_Call):
         self.say("sì")
         self.assertEqual(self.conversation().pickup_time, "19:00")
 
+    def test_known_defect_a_product_instead_of_yes_is_yes_and_the_product(self):
+        self.say("Salve Giacomo.", dict(NOTHING))
+        self.say("Vorrei prenotare una pizza per stasera alle 8.", dict(NOTHING))
+        r = self.say("Una margherita.", dict(ADD_MARGHERITA))
+        self.assertNotIn("non ho capito", r.response_message)
+        self.assertEqual(
+            r.response_message,
+            "Perfetto, il ritiro è per domani, venerdì. Allora: una margherita, per domani venerdì alle 20, a nome Giacomo. Confermo?",
+        )
+
+    def test_known_defect_b_tonight_at_8_without_a_product_is_refused_and_the_choice_asked(self):
+        self.say("Salve Giacomo.", dict(NOTHING))
+        r = self.say("Per stasera alle 8", dict(NOTHING))
+        self.assertEqual(
+            (r.state, r.response_message),
+            ("confirming_next_day", "Stasera purtroppo la cucina è chiusa. Vuole ordinare per domani o prenotare un tavolo?"),
+        )
+        self.assertIsNone(self.conversation().pickup_date)
+        r = self.say("da asporto")
+        self.assertEqual(r.response_message, "Perfetto, il ritiro è per domani, venerdì. Cosa desidera ordinare?")
+        self.assertEqual((self.conversation().pickup_date, self.conversation().pickup_time), ("2026-11-06", "20:00"))
+
     def test_2736d6cb_table_then_order_is_preserved(self):
         r = self.say("Ciao, vorrei prenotare per domani alle 8.")
         self.assertEqual(r.response_message, CLOSED_QUESTION)
@@ -423,7 +445,7 @@ class NextDayOnlyUnchangedTests(_Call):
     def test_tonight_is_still_redirected_with_the_fixed_day(self):
         r = self.say("Due tranci per stasera")
         self.assertIn("prendiamo solo ordini per il giorno dopo", r.response_message)
-        self.assertTrue(r.response_message.endswith("Vuole ordinare per domani, venerdì?"))
+        self.assertTrue(r.response_message.endswith("Va bene per domani, venerdì?"))
 
     def test_order_is_saved_for_the_fixed_day(self):
         self.say("una margherita per le 8, sono Giacomo", {**ADD_MARGHERITA, "customer_name": "Giacomo", "pickup_time": "20:00"})

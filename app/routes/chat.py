@@ -1299,9 +1299,9 @@ def enrich_items_with_pricing(
             else:
                 effective_price = base_price  # fallback: MenuItem.price
             extras_price = 0.0
-            # A tranci (o quantità non capita) il peso non è noto: totale vuoto,
-            # prezzo a peso al ritiro
-            total_price = round(effective_price * quantity, 2) if kg_order_unit(item) == "kg" else None
+            # Al taglio il prezzo si fa a peso al ritiro, anche per un peso detto
+            # ("mezzo chilo" è una stima): nessun totale, né della voce né dell'ordine
+            total_price = None
             base_price = effective_price
         else:
             is_sg_pizza = "(SG)" in item.get("pizza_name", "")
@@ -1903,6 +1903,42 @@ def _kg_price_answer(restaurant_id: str = "") -> str:
     return "Il prezzo è al chilo: il totale lo facciamo alla bilancia."
 
 
+_PRICE_QUESTION_RE = re.compile(
+    r"\bquanto\s+(?:costa|costano|costerebbe|viene|vengono|verrebbe|pago|spendo|fa|fanno)\b|\bprezz[oi]\b|\bcosto\b"
+)
+RECAP_CONFIRM_QUESTION = "Confermo l'ordine?"
+
+
+def _recap_price_answer(session: Session, items: list[dict], restaurant_id: str = "") -> str:
+    """Prezzo dell'ordine al riepilogo. Al taglio: prezzo al chilo (caldo/freddo come
+    nell'ordine) e si paga a peso al ritiro, nessun totale. A pezzo: il totale."""
+    enriched, _ = enrich_items_with_pricing(session, items, restaurant_id)
+    kg_items = [item for item in enriched if item.get("sale_unit") == "kg"]
+    piece_items = [item for item in enriched if item.get("sale_unit") != "kg"]
+    parts = []
+    if piece_items:
+        piece_total = round(sum(float(item.get("total_price") or 0) for item in piece_items), 2)
+        parts.append(
+            f"In tutto sono {_format_euro(piece_total)}." if not kg_items
+            else f"Le voci a pezzo fanno {_format_euro(piece_total)}."
+        )
+    if kg_items:
+        restaurant = load_restaurant(restaurant_id=restaurant_id)
+        cold, hot = restaurant.get("price_per_kg_cold"), restaurant.get("price_per_kg_hot")
+        temperatures = {item.get("temperature") for item in kg_items}
+        if cold and hot:
+            rates = []
+            if temperatures != {"calda"}:
+                rates.append(f"{_format_euro(float(cold))} al chilo freddo")
+            if temperatures != {"fredda"}:
+                rates.append(f"{_format_euro(float(hot))} al chilo caldo")
+            rate_text = " e ".join(rates)
+        else:
+            rate_text = f"{_format_euro(float(kg_items[0].get('base_price') or 0))} al chilo"
+        parts.append(f"Al taglio costa {rate_text}: si paga a peso al ritiro.")
+    return " ".join(parts)
+
+
 def determine_state(
     merged_order: dict,
     missing_messages: list[str],
@@ -2476,6 +2512,82 @@ def _normalize_kg_order_unit(item: dict, message: str) -> None:
         item["quantity"] = float(int(round(quantity)))
 
 
+# Una frase con più prodotti si divide dove inizia un nuovo prodotto: "e" o virgola seguiti
+# da un numero o da una porzione ("... verde e noci caldo | e mezzo di salmone e limone").
+_ITEM_CLAUSE_SPLIT_RE = re.compile(
+    r"(?:,|\be)\s+(?=(?:un|uno|una|due|tre|quattro|cinque|sei|\d+|mezz[oaie]|inter[oaie])\b)"
+)
+_WEIGHT_WORDS_RE = re.compile(r"\b(?:chil[oi]|kg|ett[oi]|hg|grammi|grammo|gr)\b")
+# "fritto": il riconoscimento vocale lo scrive al posto di "freddo"
+_CLAUSE_HOT_RE = re.compile(r"\bcald[aeio]\b")
+_CLAUSE_COLD_RE = re.compile(r"\b(?:fredd[aeio]|fritt[aeio])\b")
+_CLAUSE_SLICE_RE = re.compile(r"\b(?:tranci|trancio|pezzi|pezzo|fette|fetta|inter[aoie]|mezz[aoie])\b")
+
+
+def _kg_item_clauses(items: list[dict], message: str) -> dict[int, str]:
+    """{indice voce al taglio: parte della frase che parla solo di lei}. Una parte che
+    nomina più prodotti non si assegna: lì decide l'LLM."""
+    clauses = _ITEM_CLAUSE_SPLIT_RE.split(_normalize_for_match(message))
+    found: dict[int, str] = {}
+    for clause in clauses:
+        named = [
+            index for index, item in enumerate(items)
+            if item.get("pizza_name")
+            and re.search(rf"\b{re.escape(_normalize_for_match(item['pizza_name']))}\b", clause)
+        ]
+        if len(named) == 1 and items[named[0]].get("sale_unit") == "kg" and named[0] not in found:
+            found[named[0]] = clause
+    return found
+
+
+def _apply_kg_clause_values(items: list[dict], message: str, temperature_only: bool = False) -> set[str]:
+    """Caldo/freddo e "mezzo" detti nella stessa parte di frase del prodotto valgono
+    sempre, anche sopra quanto ha estratto l'LLM. "Mezzo" senza chilo, etti o grammi è
+    mezzo trancio, mai mezzo chilo. Restituisce i campi applicati."""
+    applied: set[str] = set()
+    for index, clause in _kg_item_clauses(items, message).items():
+        item = items[index]
+        hot, cold = bool(_CLAUSE_HOT_RE.search(clause)), bool(_CLAUSE_COLD_RE.search(clause))
+        if hot != cold:
+            temperature = "calda" if hot else "fredda"
+            if item.get("temperature") != temperature:
+                print(f"[KgClause] {item['pizza_name']!r}: temperatura dalla frase {temperature!r}")
+            item["temperature"] = temperature
+            _clear_kg_attempts(item, "temperature")
+            applied.add("temperature")
+        if (
+            not temperature_only
+            and kg_order_unit(item) == "kg"
+            and not _WEIGHT_WORDS_RE.search(clause)
+            and _CLAUSE_SLICE_RE.search(clause)
+        ):
+            said = _extract_kg_quantity(clause)
+            item["order_unit"] = "tranci"
+            item["quantity"] = said[1] if said and said[0] == "tranci" else 1
+            size = _extract_kg_size(clause)
+            item["size"] = size or "normale"
+            print(f"[KgClause] {item['pizza_name']!r}: nessun peso detto → tranci, porzione={size!r}")
+            applied.add("quantity")
+            if size:
+                applied.add("portion")
+        elif (
+            not temperature_only
+            and kg_order_unit(item) == "tranci"
+            and float(item.get("quantity") or 0) <= 0
+            and not _WEIGHT_WORDS_RE.search(clause)
+            and re.search(r"\bmezz[oa]\b", clause)
+            and not _extract_kg_quantity(clause)
+        ):
+            # "e mezzo di salmone": un mezzo trancio
+            item["quantity"] = 1
+            if item.get("size") not in ("piena", "mezza"):
+                item["size"] = "mezza"
+            _clear_kg_attempts(item, "quantity")
+            print(f"[KgClause] {item['pizza_name']!r}: \"mezzo\" senza numero → un mezzo trancio")
+            applied.add("quantity")
+    return applied
+
+
 # ── Quantità, porzione e caldo/freddo per le voci al taglio ──────────────────
 # Nessun valore predefinito: se il cliente non li dice, l'agente li chiede.
 # La porzione (intero/mezzo) serve solo per gli ordini a tranci, non a peso.
@@ -2886,13 +2998,41 @@ def _similar_menu_flavours(words: list[str], menu_items: list[dict], limit: int 
     return [entry["name"] for entry in ranked[:limit]]
 
 
-def _off_menu_question(items: list[dict], menu_items: list[dict]) -> str:
-    """ "Salamino oggi non c'è, abbiamo Diavola, Napoli e Romana. Quale vuole?" """
+def _off_menu_question(items: list[dict], menu_items: list[dict], unavailable_names: set[str] | None = None) -> str:
+    """ "Salamino non è nel menu, abbiamo Diavola, Napoli e Romana. Quale vuole?"
+    "Oggi non c'è" solo per un prodotto del menu non disponibile (`unavailable_names`,
+    nomi normalizzati), mai per un nome che nel menu non esiste."""
     names = [_format_pizza_list(item.get("add_ingredients") or []) or "quella pizza" for item in items]
     spoken = _format_pizza_list(names)
-    verb = "non c'è" if len(items) == 1 else "non ci sono"
+    on_menu = bool(unavailable_names) and all(_normalize_for_match(name) in unavailable_names for name in names)
+    if on_menu:
+        verb = "oggi non c'è" if len(items) == 1 else "oggi non ci sono"
+    else:
+        verb = "non è nel menu" if len(items) == 1 else "non sono nel menu"
     alternatives = _format_pizza_list(_similar_menu_flavours(items[0].get("add_ingredients") or [], menu_items))
-    return f"{spoken[0].upper()}{spoken[1:]} oggi {verb}, abbiamo {alternatives}. Quale vuole?"
+    return f"{spoken[0].upper()}{spoken[1:]} {verb}, abbiamo {alternatives}. Quale vuole?"
+
+
+_NAME_FILLER_WORDS = {"e", "ed", "di", "del", "della", "con", "al", "alla", "la", "il", "lo", "le", "i", "gli"}
+
+
+def _name_words(text: str) -> list[str]:
+    return [re.sub(r"h?[aeiou]$", "", w) for w in re.findall(r"[a-z0-9]+", _normalize_for_match(text))
+            if w not in _NAME_FILLER_WORDS]
+
+
+def _only_menu_name_containing(said: str, menu_items: list[dict]) -> str | None:
+    """Il solo prodotto del menu il cui nome contiene tutte le parole dette ("Rosa" →
+    "Pepe Rosa"); None se nessuno o più di uno."""
+    words = _name_words(said)
+    if not words:
+        return None
+    matches = [entry["name"] for entry in menu_items if set(words) <= set(_name_words(entry["name"]))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _off_menu_proposal_question(name: str) -> str:
+    return f"Intende {name}?"
 
 
 # Risposta a "vuole ordinare per domani?" che non aggiunge altro: niente LLM
@@ -3841,6 +3981,7 @@ def chat(request: ChatRequest, session: SessionDep):
         bool(conversation.pending_customer_name)
         or bool(_correction_slots.get("customer_name", {}).get("proposed"))
         or bool(_correction_slots.get("pickup_time", {}).get("proposed"))
+        or bool(_correction_slots.get("off_menu_proposal"))  # "No" a "Intende Pepe Rosa?"
     )
     if (
         _is_bare_no(request.message)
@@ -4442,6 +4583,10 @@ def chat(request: ChatRequest, session: SessionDep):
         # Dopo un "no" si è chiesto il giorno: non c'è nessuna proposta a cui dire sì
         _nd_conflict = _nd_slots.get("date_conflict")
         _nd_asking_day = bool(_nd_slots.get("asking_pickup_day") or _nd_conflict)
+        _nd_intent_open = bool(_nd_slots.get("intent_question"))
+        if not _nd_intent_open and not _yes and not _no and not _nd_asking_day and _names_a_product(request.message):
+            # "Una margherita" al posto del sì: vale come sì, e il prodotto lo estrae l'LLM
+            _yes = True
         if _nd_slots.get("intent_question"):
             # "Vuole ordinare per domani o prenotare un tavolo?": il sì da solo non sceglie,
             # un prodotto sì. Il giorno detto prima vale più di quello proposto.
@@ -4496,6 +4641,21 @@ def chat(request: ChatRequest, session: SessionDep):
         )
         if _nd_today_refused:
             _nd_spoken_day = None  # "stasera" a cucina chiusa non è una scelta possibile
+        if _nd_today_refused and _nd_intent_open and not _yes and not _no:
+            # "Per stasera alle 8" alla domanda ordine/tavolo: si dice che stasera non si può
+            # e si ripete la scelta; l'orario resta per il giorno che il cliente sceglierà
+            _nd_tonight_time = _time_in_sentence(request.message)
+            if _nd_tonight_time and _nd_tonight_time != "prima_possibile":
+                _nd_slots["next_day_pickup_time"] = _nd_tonight_time
+                _store_slot_state(conversation, _nd_slots)
+            _nd_tonight = "Stasera" if datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).hour >= 17 else "Oggi"
+            _nd_choice = _closed_kitchen_intent_question(restaurant_id)[1].split(". ", 1)[1]
+            return _local_reply(
+                "confirming_next_day",
+                f"{_nd_tonight} purtroppo la cucina è chiusa. {_nd_choice}",
+                _current_merged_order(),
+                "tonight_refused",
+            )
         # "No, venerdì" sceglie un altro giorno; "no, domani no" rifiuta quello proposto
         _nd_accepted = bool((_yes and not _nd_asking_day) or _nd_spoken_day) and (
             not _no or bool(_nd_spoken_day and _nd_spoken_day != _nd_asked_day)
@@ -4623,13 +4783,19 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # Preordini: al telefono solo ordini per il prossimo giorno di apertura.
     # Una richiesta per stasera/oggi riceve la spiegazione, senza LLM e in qualsiasi stato.
+    # Con dei prodotti nella prima frase questi restano nel carrello: li estrae l'LLM e dopo
+    # il sì si prosegue con la domanda che manca.
+    _today_with_products = False
     if _next_day_only and _is_today_order_request(request.message):
-        _today_guard_intro = "" if _day_said_for("collecting_pickup_time") else f"{_pickup_day_intro(_day_phrase)} "
+        _today_word = "Stasera" if datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).hour >= 17 else "Oggi"
         _today_guard_msg = (
-            "Mi dispiace, al telefono prendiamo solo ordini per il giorno dopo: "
-            "per stasera può passare direttamente in negozio. "
-            f"{_today_guard_intro}Vuole ordinare per {_day_phrase}?"
+            f"{_today_word} purtroppo al telefono prendiamo solo ordini per il giorno dopo, "
+            f"ma può passare direttamente in negozio. Va bene per {_day_phrase}?"
         )
+        if conversation.state == "collecting_items" and _names_a_product(request.message):
+            _propose_day(_preorder_date, _today_guard_msg)
+            _today_with_products = True
+    if _next_day_only and _is_today_order_request(request.message) and not _today_with_products:
         _cur_merged = {
             "customer_name": conversation.customer_name,
             "pickup_time": conversation.pickup_time,
@@ -4730,7 +4896,25 @@ def chat(request: ChatRequest, session: SessionDep):
             merged_order["pickup_date"] = _preorder_date.isoformat()
 
         order = None
-        if _is_confirm and not conversation.completed:
+        # Preordini: una domanda al riepilogo riceve la risposta, poi si richiede la conferma
+        _recap_answer = None
+        if _next_day_only:
+            if _PRICE_QUESTION_RE.search(_normalize_for_match(request.message)):
+                _recap_answer = f"{_recap_price_answer(session, existing_items, restaurant_id)} {RECAP_CONFIRM_QUESTION}"
+            elif not _is_confirm and not _is_cancel:
+                _recap_time = _time_in_sentence(request.message)
+                if (
+                    _recap_time and _recap_time != "prima_possibile"
+                    and _check_pickup_time(_recap_time)[0] == conversation.pickup_time
+                ):
+                    _recap_answer = (
+                        f"Sì, alle {_spoken_pickup_time(conversation.pickup_time)}. {RECAP_CONFIRM_QUESTION}"
+                    )
+        if _recap_answer:
+            _is_confirm = _is_cancel = False
+            _resp = _recap_answer
+            _extracted_stub = {"intent": "recap_question", "items": [], "customer_name": None, "pickup_time": None}
+        elif _is_confirm and not conversation.completed:
             order = _confirm_order(session, conversation, merged_order, restaurant_id)
 
             name_part = f", {merged_order['customer_name']}" if merged_order.get("customer_name") else ""
@@ -5240,6 +5424,7 @@ def chat(request: ChatRequest, session: SessionDep):
     # Trigger: transizione a confirming_usual (prima della chiamata LLM)
     if (
         fav_pizzas_session
+        and not _today_with_products  # "2 tranci di zucca per stasera": i prodotti sono già detti
         and conversation.state == "collecting_items"
         and not json.loads(conversation.items_json)  # carrello vuoto
         and (
@@ -5296,6 +5481,68 @@ def chat(request: ChatRequest, session: SessionDep):
             order_id=None,
             state="confirming_usual",
         )
+
+    # Risposta sì/no a "Intende Pepe Rosa?" (pizza fuori menu): niente LLM
+    _proposal_slots = _slot_state(conversation)
+    _proposal = _proposal_slots.get("off_menu_proposal")
+    _proposal_answer = (
+        _yes_no_answer(request.message) if _proposal and conversation.state == "collecting_items" else None
+    )
+    if _proposal_answer == "yes":
+        _proposal_slots.pop("off_menu_proposal", None)
+        _proposal_slots.pop("off_menu_asked", None)
+        _proposal_slots.pop("off_menu_quantity", None)
+        _store_slot_state(conversation, _proposal_slots)
+        _row = session.exec(_menu_select(restaurant_id, MenuItem.name == _proposal["name"])).first()
+        _chosen = {
+            **_proposal["item"], "pizza_name": _proposal["name"], "add_ingredients": [],
+            "pizza_type": _row.pizza_type if _row else _proposal["item"].get("pizza_type", "Normale"),
+            "sale_unit": getattr(_row, "sale_unit", "piece") if _row else "piece",
+        }
+        if _chosen["sale_unit"] == "kg":
+            if _chosen.get("order_unit") not in ("kg", "tranci"):
+                # La quantità dell'LLM per un nome sconosciuto non è stata detta: si chiede
+                _said_quantity = _extract_kg_quantity(_proposal.get("message", ""))
+                _chosen["order_unit"], _chosen["quantity"] = _said_quantity or ("", 0)
+            _normalize_kg_order_unit(_chosen, _proposal.get("message", ""))
+            if _chosen.get("temperature") not in ("calda", "fredda"):
+                _chosen["temperature"] = ""
+        _merged_now = _current_merged_order()
+        _merged_now["items"] = [*_merged_now["items"], _chosen]
+        conversation.items_json = json.dumps(_merged_now["items"], ensure_ascii=False)
+        _proposal_state = determine_state(
+            merged_order=_merged_now,
+            missing_messages=[],
+            completed=conversation.completed,
+            intended_quantity=conversation.intended_quantity,
+        )
+        _proposal_resp = build_assistant_response(
+            merged_order=_merged_now,
+            state=_proposal_state,
+            missing_messages=[],
+            order_saved=False,
+            intent="add_items",
+            new_valid_items=[_chosen],
+            customer_phone=conversation.customer_phone,
+            day_phrase=_day_phrase,
+            restaurant_id=restaurant_id,
+            day_said=_day_said_for(_proposal_state),
+        )
+        print(f"[Cart] Proposta accettata: {_proposal['name']!r}")
+        return _local_reply(_proposal_state, _proposal_resp, _merged_now, "off_menu_proposal_yes")
+    if _proposal_answer == "no":
+        _proposal_slots.pop("off_menu_proposal", None)
+        _merged_now = _current_merged_order()
+        if _proposal.get("kind") == "loop":
+            _store_slot_state(conversation, _proposal_slots)
+            _handover_state, _handover_resp = _callback_fallback()
+            return _local_reply(_handover_state, _handover_resp, _merged_now, "off_menu_handover")
+        # "No" a "Intende Pepe Rosa?": si propongono i gusti più simili
+        _proposal_menu = get_proposable_menu(restaurant_id=restaurant_id)
+        _proposal_resp = _off_menu_question([_proposal["item"]], _proposal_menu)
+        _proposal_slots["off_menu_asked"] = 1
+        _store_slot_state(conversation, _proposal_slots)
+        return _local_reply("collecting_items", _proposal_resp, _merged_now, "off_menu_proposal_no")
 
     # Da qui in poi serve davvero l'LLM: carichiamo menu/dough solo dopo tutti
     # i fast path locali, così i turni semplici non pagano latenza di rete/cache.
@@ -5432,12 +5679,41 @@ def chat(request: ChatRequest, session: SessionDep):
     # custom_pizza_enabled = false: la pizza fuori menu non si prende, si propongono i
     # gusti più simili. La quantità detta vale per il gusto scelto ("2 salamino" → "diavola").
     _off_menu_reply: str | None = None
+    _off_menu_handover = False
     _off_menu_slots = _slot_state(conversation)
     if intent in ("add_items", "modify_items", "replace_items") and not is_custom_pizza_enabled(restaurant_id):
         _refused = [item for item in new_items if item["pizza_name"] in _OFF_MENU_PIZZA_NAMES]
         if _refused:
             new_items = [item for item in new_items if item["pizza_name"] not in _OFF_MENU_PIZZA_NAMES]
-            _off_menu_reply = _off_menu_question(_refused, menu_items_for_llm)
+            # Mai la stessa domanda all'infinito: 1ª volta la domanda con i gusti simili (o
+            # "Intende X?" se il nome è dentro un solo prodotto), ripetuta una volta; alla
+            # seconda risposta non risolta "Intende X?" con sì/no; poi si passa al locale.
+            _asked = int(_off_menu_slots.get("off_menu_asked") or 0)
+            _pending_proposal = _off_menu_slots.pop("off_menu_proposal", None)
+            _said = " ".join(_refused[0].get("add_ingredients") or [])
+            _contained = (
+                _only_menu_name_containing(_said, menu_items_for_llm)
+                if len(_refused) == 1 and _asked == 0 and not _pending_proposal else None
+            )
+            if _pending_proposal and _pending_proposal.get("kind") == "loop":
+                _off_menu_handover = True
+                _off_menu_reply = CALLBACK_HANDOFF_MESSAGE
+                print("[Cart] Pizza fuori menu: ancora non risolta dopo la proposta → passo al locale")
+            elif _contained or _asked >= 2:
+                _proposed = _contained or _similar_menu_flavours(_said.split(), menu_items_for_llm, limit=1)[0]
+                _off_menu_slots["off_menu_proposal"] = {
+                    "name": _proposed, "kind": "contained" if _contained else "loop",
+                    "item": _refused[0], "message": request.message,
+                }
+                _off_menu_reply = _off_menu_proposal_question(_proposed)
+                print(f"[Cart] Pizza fuori menu: propongo {_proposed!r} con sì/no")
+            else:
+                _unavailable = {
+                    _normalize_for_match(row.name)
+                    for row in session.exec(_menu_select(restaurant_id, MenuItem.available == False)).all()  # noqa: E712
+                }
+                _off_menu_reply = _off_menu_question(_refused, menu_items_for_llm, _unavailable)
+            _off_menu_slots["off_menu_asked"] = _asked + 1
             if len(_refused) == 1 and int(_refused[0].get("quantity") or 1) > 1:
                 _off_menu_slots["off_menu_quantity"] = int(_refused[0]["quantity"])
             _store_slot_state(conversation, _off_menu_slots)
@@ -5455,6 +5731,11 @@ def chat(request: ChatRequest, session: SessionDep):
         # "Sì, alle 8" alla domanda sul giorno: ora la pizza che non c'è
         _off_menu_reply = _off_menu_slots.pop("off_menu_pending")
         _store_slot_state(conversation, _off_menu_slots)
+    if not _off_menu_reply and (_off_menu_slots.get("off_menu_asked") or _off_menu_slots.get("off_menu_proposal")):
+        # Risolta o lasciata dal cliente: il conteggio riparte
+        _off_menu_slots.pop("off_menu_asked", None)
+        _off_menu_slots.pop("off_menu_proposal", None)
+        _store_slot_state(conversation, _off_menu_slots)
 
     # Voci al taglio nuove: si tengono solo quantità, porzione e caldo/freddo detti
     # dal cliente. Nessun default: i campi mancanti vengono chiesti (determine_state).
@@ -5464,6 +5745,7 @@ def chat(request: ChatRequest, session: SessionDep):
             _normalize_kg_order_unit(item, request.message)
             if item.get("temperature") not in ("calda", "fredda"):
                 item["temperature"] = ""
+    _apply_kg_clause_values(new_items, request.message)
 
     # Prodotto riconosciuto solo dall'LLM ("una capriciosa"): l'ordine è deciso anche così
     if (
@@ -5574,9 +5856,12 @@ def chat(request: ChatRequest, session: SessionDep):
     # ("2 etti di porchetta calda" non rende calda anche la bufala di prima).
     _kg_unresolved_now = False
     if not new_items:
+        # "Salmone e limone fredda": il prodotto nominato prende il valore detto, anche
+        # se nel carrello ne aveva già un altro
+        _kg_named = _apply_kg_clause_values(merged_items, request.message, temperature_only=True)
         _kg_applied = _apply_kg_answers_from_message(
             merged_items, request.message, bare_number_ok=_prior_state == "collecting_kg_quantity",
-        )
+        ) | _kg_named
         if (
             _prior_state in _KG_SLOT_STATES
             and intent != "ask_kg_price"  # una domanda sul prezzo non è una risposta mancata
@@ -5739,6 +6024,8 @@ def chat(request: ChatRequest, session: SessionDep):
         response_message = _ask_call_intent(INTENT_QUESTION, "collecting_items")
     elif (_day_note or _day_changed) and not merged_items and not missing_messages:
         response_message = "Cosa desidera ordinare?"
+    if _off_menu_handover and state != "completed" and not _next_day_ask:
+        conversation.state, response_message = _callback_fallback()
 
     # Domande obbligatorie rimaste senza risposta: mai la stessa domanda due volte di fila
     if _kg_unresolved_now:
