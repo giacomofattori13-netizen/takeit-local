@@ -237,10 +237,10 @@ def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]
 _EXPLICIT_ADD_RE = re.compile(r"\b(?:altr[aoie]|aggiung\w*|anche|ancora|in\s+piu)\b")
 
 
-def _repeated_cart_item(cart: list[dict], new_item: dict) -> dict | None:
-    """La voce del carrello che `new_item` ripete: stesso prodotto, stessa quantità, stesse
-    aggiunte e nessun dettaglio in contrasto (porzione, caldo/freddo, unità). None se è
-    una voce nuova."""
+def _repeated_cart_item(cart: list[dict], new_item: dict, same_quantity: bool = True) -> dict | None:
+    """La voce del carrello che `new_item` ripete: stesso prodotto, stessa quantità (se
+    `same_quantity`), stesse aggiunte e nessun dettaglio in contrasto (porzione,
+    caldo/freddo, unità). None se è una voce nuova."""
     def same_or_missing(a, b, missing=("",)) -> bool:
         return a == b or a in missing or b in missing
 
@@ -248,7 +248,7 @@ def _repeated_cart_item(cart: list[dict], new_item: dict) -> dict | None:
         if (
             existing.get("pizza_name") != new_item.get("pizza_name")
             or existing.get("pizza_type") != new_item.get("pizza_type")
-            or float(existing.get("quantity") or 0) != float(new_item.get("quantity") or 0)
+            or (same_quantity and float(existing.get("quantity") or 0) != float(new_item.get("quantity") or 0))
             or float(new_item.get("quantity") or 0) <= 0
             or (new_item.get("add_ingredients") or []) not in ([], existing.get("add_ingredients") or [])
             or (new_item.get("remove_ingredients") or []) not in ([], existing.get("remove_ingredients") or [])
@@ -3169,6 +3169,37 @@ def _off_menu_proposal_question(name: str) -> str:
     return f"Intende {name}?"
 
 
+def _close_menu_name(said: str, menu_items: list[dict]) -> str | None:
+    """Il solo prodotto del menu di cui `said` è chiaramente una parte o una storpiatura:
+    ogni parola detta è una parola del nome o quasi ("Rosa" → "Pepe Rosa", "pistaxi" →
+    "Zucca e Pistacchi"). None se nessuno o più di uno: "capricciosa" non è vicino a nulla."""
+    def words(text: str) -> list[str]:
+        return [w for w in re.findall(r"[a-z0-9]+", _normalize_for_match(text or ""))
+                if w not in _NAME_FILLER_WORDS and not _SPOKEN_COUNT_RE.fullmatch(w)]
+
+    def close(word: str, name_word: str) -> bool:
+        if word == name_word:
+            return True
+        return min(len(word), len(name_word)) >= 4 and SequenceMatcher(None, word, name_word).ratio() >= 0.75
+
+    said_words = words(said)
+    if not said_words:
+        return None
+    matches = [
+        entry["name"] for entry in menu_items
+        if all(any(close(w, n) for n in words(entry["name"])) for w in said_words)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _off_menu_last_list(items: list[dict], menu_items: list[dict]) -> str:
+    """Terza volta sullo stesso gusto senza un nome vicino: niente "Intende", si dice che
+    non c'è e si propongono i gusti del menu."""
+    name = _format_pizza_list(items[0].get("add_ingredients") or []) or "quella pizza"
+    alternatives = _format_pizza_list(_similar_menu_flavours(items[0].get("add_ingredients") or [], menu_items))
+    return f"Mi dispiace, {name} non c'è. Posso proporle {alternatives}: quale preferisce?"
+
+
 # Risposta a "vuole ordinare per domani?" che non aggiunge altro: niente LLM
 _NEXT_DAY_ACCEPT_WORDS = {
     "no", "si", "ok", "okay", "va", "bene", "certo", "volentieri", "d'accordo", "perfetto", "esatto",
@@ -5676,6 +5707,7 @@ def chat(request: ChatRequest, session: SessionDep):
     if _proposal_answer == "yes":
         _proposal_slots.pop("off_menu_proposal", None)
         _proposal_slots.pop("off_menu_asked", None)
+        _proposal_slots.pop("off_menu_said", None)
         _proposal_slots.pop("off_menu_quantity", None)
         _store_slot_state(conversation, _proposal_slots)
         _row = session.exec(_menu_select(restaurant_id, MenuItem.name == _proposal["name"])).first()
@@ -5894,22 +5926,39 @@ def chat(request: ChatRequest, session: SessionDep):
             _asked = int(_off_menu_slots.get("off_menu_asked") or 0)
             _pending_proposal = _off_menu_slots.pop("off_menu_proposal", None)
             _said = " ".join(_refused[0].get("add_ingredients") or [])
+            # Un gusto diverso dal precedente è una richiesta nuova: il conteggio riparte
+            _said_key = " ".join(sorted(_name_words(" ".join(
+                a for refused in _refused for a in (refused.get("add_ingredients") or [])
+            ))))
+            _previous_key = _off_menu_slots.get("off_menu_said")
+            if _previous_key is not None and _previous_key != _said_key:
+                print("[Cart] Pizza fuori menu: gusto diverso dal precedente, il conteggio riparte")
+                _asked, _pending_proposal = 0, None
+            _off_menu_slots["off_menu_said"] = _said_key
             _contained = (
                 _only_menu_name_containing(_said, menu_items_for_llm)
                 if len(_refused) == 1 and _asked == 0 and not _pending_proposal else None
             )
-            if _pending_proposal and _pending_proposal.get("kind") == "loop":
+            # Dal terzo turno sulla stessa richiesta: "Intende X?" solo per un nome vicino
+            _close = (
+                (_close_menu_name(_said, menu_items_for_llm) or _close_menu_name(request.message, menu_items_for_llm))
+                if _asked >= 2 and not _contained else None
+            )
+            if (_pending_proposal and _pending_proposal.get("kind") == "loop") or _asked >= 3:
                 _off_menu_handover = True
                 _off_menu_reply = CALLBACK_HANDOFF_MESSAGE
                 print("[Cart] Pizza fuori menu: ancora non risolta dopo la proposta → passo al locale")
-            elif _contained or _asked >= 2:
-                _proposed = _contained or _similar_menu_flavours(_said.split(), menu_items_for_llm, limit=1)[0]
+            elif _contained or _close:
+                _proposed = _contained or _close
                 _off_menu_slots["off_menu_proposal"] = {
                     "name": _proposed, "kind": "contained" if _contained else "loop",
                     "item": _refused[0], "message": request.message,
                 }
                 _off_menu_reply = _off_menu_proposal_question(_proposed)
                 print(f"[Cart] Pizza fuori menu: propongo {_proposed!r} con sì/no")
+            elif _asked >= 2:
+                _off_menu_reply = _off_menu_last_list(_refused, menu_items_for_llm)
+                print("[Cart] Pizza fuori menu: nessun nome vicino, propongo i gusti senza \"Intende\"")
             else:
                 _unavailable = {
                     _normalize_for_match(row.name)
@@ -5942,6 +5991,7 @@ def chat(request: ChatRequest, session: SessionDep):
         # Risolta o lasciata dal cliente: il conteggio riparte
         _off_menu_slots.pop("off_menu_asked", None)
         _off_menu_slots.pop("off_menu_proposal", None)
+        _off_menu_slots.pop("off_menu_said", None)
         _store_slot_state(conversation, _off_menu_slots)
 
     # Voci al taglio nuove: si tengono solo quantità, porzione e caldo/freddo detti
@@ -6048,6 +6098,22 @@ def chat(request: ChatRequest, session: SessionDep):
             if _repeated is not None:
                 print(f"[Cart] {ni['pizza_name']!r} ripetuto con la stessa quantità: nessuna aggiunta")
                 _fill_repeated_item(_repeated, ni)
+                continue
+            # Locale senza pizza personalizzata: lo stesso prodotto detto con un'altra
+            # quantità ("3 tranci di zucca" con 2 nel carrello) la sostituisce. Si somma
+            # solo con "anche", "ancora", "in più", "altri".
+            _requantified = (
+                None if _adds_more or _custom_pizza_on
+                else _repeated_cart_item(
+                    [ei for ei in merged_items if any(ei is old for old in existing_items)], ni, same_quantity=False,
+                )
+            )
+            if _requantified is not None:
+                print(f"[Cart] {ni['pizza_name']!r}: quantità {_requantified.get('quantity')} → {ni['quantity']}")
+                _requantified["quantity"] = ni["quantity"]
+                if _requantified.get("sale_unit") == "kg" and not _requantified.get("order_unit"):
+                    _requantified["order_unit"] = ni.get("order_unit", "")
+                _fill_repeated_item(_requantified, ni)
                 continue
             for ei in merged_items:
                 if (ei["pizza_name"] == ni["pizza_name"]

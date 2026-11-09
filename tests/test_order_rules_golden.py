@@ -370,6 +370,38 @@ CASES = [
          preset=_PAP_AT_19, final_state="awaiting_confirmation",
          llm=recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")]),
          reply_contains="Allora: quattro tranci interi di zucca e pistacchi, freddi,"),
+    # ── Dopo 4b01762: quantità diversa per un prodotto già nel carrello (PaP) ──
+    Case("pap_tre_tranci_sostituiscono_i_due", "3 tranci di zucca e pistacchi.",
+         [slice_item("Zucca e Pistacchi", 3)], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2)], state="collecting_kg_portion",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="collecting_kg_portion",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 3)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
+    Case("pap_no_facciamo_tre_tranci_interi", "No, facciamo 3 tranci di zucca e pistacchi interi.",
+         [slice_item("Zucca e Pistacchi", 3, size="piena")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2)], state="collecting_kg_portion",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="collecting_kg_temperature",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 3, size="piena")]), reply_contains="Caldi o freddi?"),
+    Case("pap_un_trancio_solo_al_riepilogo", "Ah no, un trancio solo di zucca e pistacchi.",
+         [slice_item("Zucca e Pistacchi", 1, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 1)]),
+         reply_contains="Allora: un trancio intero di zucca e pistacchi, freddo,"),
+    Case("pap_anche_tre_tranci_si_sommano", "Mettimi anche 3 tranci di zucca e pistacchi.",
+         [slice_item("Zucca e Pistacchi", 5)], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2)], state="collecting_kg_portion",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="collecting_kg_portion",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 3)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
+    Case("pap_tre_tranci_in_piu_si_sommano", "3 tranci in più di zucca e pistacchi.",
+         [slice_item("Zucca e Pistacchi", 5)], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2)], state="collecting_kg_portion",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="collecting_kg_portion",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 3)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
     # 2. Una correzione al riepilogo aggiorna il carrello e dà un riepilogo nuovo
     Case("pap_riepilogo_mezzi_non_interi", "No, mezzi, non interi.",
          [slice_item("Zucca e Pistacchi", 2, size="mezza", temperature="fredda")], replaces_cart=True,
@@ -1488,11 +1520,14 @@ def test_2715b8a1_capricciosa_never_loops_on_what_to_order():
         assert first.response_message.startswith("Capricciosa non è nel menu, abbiamo ")
         assert first.response_message.endswith("Quale vuole?")
         assert call.say("Una capricciosa.").response_message == first.response_message  # ripetuta una volta
-        proposal = call.say("Una capricciosa.")
-        assert proposal.response_message.startswith("Intende ")
+        last = call.say("Una capricciosa.")
+        # Nessun gusto del menu è vicino a "capricciosa": niente "Intende Salmone e Limone?"
+        assert last.response_message.startswith("Mi dispiace, capricciosa non c'è. Posso proporle ")
+        assert "Intende" not in last.response_message
+        # "Una diavola?" è una richiesta nuova: si risponde su quella, non si passa al locale
         response = call.say("Una diavola?")
-        assert response.response_message == chat_module.CALLBACK_HANDOFF_MESSAGE
-        replies = [first.response_message, proposal.response_message, response.response_message]
+        assert response.response_message.startswith("Diavola non è nel menu, abbiamo ")
+        replies = [first.response_message, last.response_message, response.response_message]
         assert "Cosa desidera ordinare?" not in replies
     assert call.saved == []
 
@@ -1509,4 +1544,101 @@ def test_a_turn_without_products_does_not_restart_the_off_menu_count():
         first = call.say("Posso ordinarti una capricciosa per domani alle 7.")
         call.say("Eh, come?")
         assert call.say("Una capricciosa.").response_message == first.response_message
-        assert call.say("Una capricciosa.").response_message.startswith("Intende ")
+        assert call.say("Una capricciosa.").response_message.startswith("Mi dispiace, capricciosa non c'è.")
+
+
+# ── Difetti aperti dopo 4b01762 (solo locali senza pizza personalizzata) ────
+
+
+def test_a_different_quantity_for_a_product_in_the_cart_replaces_it():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[slice_item("Zucca e Pistacchi", 2)], time="19:00"),
+        recorded(items=[slice_item("Zucca e Pistacchi", 3)]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Posso ordinarti 2 tranci di zucca e pistacchi per domani alle 7?").response_message == (
+            "Interi o mezzi? Caldi o freddi?"
+        )
+        assert call.say("3 tranci di zucca e pistacchi.").response_message == "Interi o mezzi? Caldi o freddi?"
+        assert call.say("Interi freddi.").response_message == (
+            "Allora: tre tranci interi di zucca e pistacchi, freddi, per domani sabato alle 19, a nome Giacomo. Confermo?"
+        )
+        call.say("Sì.")
+    assert [(i["pizza_name"], i["quantity"]) for i in call.saved[0]["items"]] == [("Zucca e Pistacchi", 3)]
+
+
+def test_corte_del_sole_quantity_merge_is_unchanged():
+    """Il cambio vale solo per i locali senza pizza personalizzata: a Corte del Sole il
+    comportamento resta quello di prima."""
+    call = _script(THURSDAY_16, CDS, MENU)
+    call.extractions.extend([recorded(items=[item("Margherita", 2)]), recorded(items=[item("Margherita", 3)])])
+    with call.open(customer_name="Giacomo"):
+        call.say("2 margherite")
+        call.say("3 margherite")
+        assert [(i["pizza_name"], i["quantity"]) for i in json.loads(call.conversation().items_json)] == [
+            ("Margherita", 5)
+        ]
+
+
+def test_a_misspelled_flavour_asked_three_times_gets_intende_with_the_close_name():
+    call = _pap_script()
+    pistaxi = recorded(items=[item(PERSONAL, add=["pistaxi"])])
+    call.extractions.extend([recorded(items=[item(PERSONAL, add=["pistaxi"])], time="19:00"), dict(pistaxi), dict(pistaxi)])
+    with call.open(customer_name="Giacomo"):
+        first = call.say("Vorrei un trancio di pistaxi per domani alle 7.")
+        assert first.response_message.endswith("Quale vuole?")
+        assert call.say("Pistaxi.").response_message == first.response_message
+        assert call.say("Di pistaxi.").response_message == "Intende Zucca e Pistacchi?"
+
+
+def test_capricciosa_never_gets_intende_and_hands_over_after_the_list():
+    call = _pap_script()
+    capricciosa = recorded(items=[item("Capricciosa")])
+    call.extractions.extend([recorded(items=[item("Capricciosa")], time="19:00")] + [dict(capricciosa) for _ in range(3)])
+    with call.open(customer_name="Giacomo"), patch.object(chat_module, "save_reservation_to_base44", return_value="r1"):
+        replies = [call.say("Posso ordinarti una capricciosa per domani alle 7.").response_message]
+        replies.append(call.say("Una capricciosa.").response_message)
+        replies.append(call.say("No, una capricciosa ho detto.").response_message)
+        assert all("Intende" not in reply for reply in replies)
+        proposed = chat_module._similar_menu_flavours(["Capricciosa"], PAP_MENU)
+        assert len(proposed) == 3 and all(name in {e["name"] for e in PAP_MENU} for name in proposed)
+        assert replies[2] == (
+            f"Mi dispiace, capricciosa non c'è. Posso proporle {chat_module._format_pizza_list(proposed)}: quale preferisce?"
+        )
+        response = call.say("La capricciosa.")
+        assert response.response_message == chat_module.CALLBACK_HANDOFF_MESSAGE
+
+
+def test_a_new_flavour_after_the_list_restarts_the_count():
+    call = _pap_script()
+    capricciosa, diavola = recorded(items=[item("Capricciosa")]), recorded(items=[item("Diavola")])
+    call.extractions.extend([
+        recorded(items=[item("Capricciosa")], time="19:00"), dict(capricciosa), dict(capricciosa),
+        dict(diavola), dict(diavola), dict(diavola), dict(diavola),
+    ])
+    with call.open(customer_name="Giacomo"), patch.object(chat_module, "save_reservation_to_base44", return_value="r1"):
+        call.say("Posso ordinarti una capricciosa per domani alle 7.")
+        call.say("Una capricciosa.")
+        call.say("Una capricciosa.")
+        first = call.say("Una diavola?")
+        assert first.response_message.startswith("Diavola non è nel menu, abbiamo ")
+        assert call.say("Diavola.").response_message == first.response_message
+        assert call.say("La diavola.").response_message.startswith("Mi dispiace, diavola non c'è.")
+        assert call.say("Diavola.").response_message == chat_module.CALLBACK_HANDOFF_MESSAGE
+
+
+def test_a_new_flavour_after_intende_is_a_new_request_not_a_handover():
+    call = _pap_script()
+    pistaxi = recorded(items=[item(PERSONAL, add=["pistaxi"])])
+    call.extractions.extend([
+        recorded(items=[item(PERSONAL, add=["pistaxi"])], time="19:00"), dict(pistaxi), dict(pistaxi),
+        recorded(items=[item("Diavola")]),
+    ])
+    with call.open(customer_name="Giacomo"), patch.object(chat_module, "save_reservation_to_base44", return_value="r1"):
+        call.say("Vorrei un trancio di pistaxi per domani alle 7.")
+        call.say("Pistaxi.")
+        assert call.say("Di pistaxi.").response_message == "Intende Zucca e Pistacchi?"
+        response = call.say("Una diavola?")
+        assert response.response_message.startswith("Diavola non è nel menu, abbiamo ")
+        assert response.state == "collecting_items"
