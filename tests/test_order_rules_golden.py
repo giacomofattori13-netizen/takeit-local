@@ -350,6 +350,24 @@ CASES = [
          day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
          preset={"customer_name": "Giacomo"}, final_state="collecting_kg_portion",
          llm=recorded(items=[slice_item("Zucca e Pistacchi", 2)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
+    # ── Prove al telefono del 9/11 sera (84d7ad7) ────────────────────────────
+    # 6237d2d2: parole attaccate dal riconoscimento vocale
+    Case("reale_pap_un_trancio_di_peperosa", "Un trancio di peperosa.",
+         day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="collecting_items",
+         llm=recorded(items=[item(PERSONAL, add=["peperosa"])]), reply_contains="Intende Pepe Rosa?"),
+    # 4b350eed: orario fuori fascia già nella frase dell'ordine, "tranche" è un trancio
+    Case("reale_pap_tranche_di_pepe_rosa_alle_9", "Ti puoi fare un tranche di pepe rosa per domani alle 9?",
+         [slice_item("Pepe Rosa", 1)], day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU, preset={"customer_name": "Giacomo"}, final_state="collecting_kg_portion",
+         llm=recorded(items=[slice_item("Pepe Rosa", 1, unit="")], time="21:00"),
+         reply_contains="Posso segnarla alle 20:45. Intero o mezzo? Caldo o freddo?"),
+    # e793391f: modifica di ingredienti su un prodotto nuovo, un trancio
+    Case("reale_pap_pepe_rosa_con_la_rucola", "Mi puoi fare una pepe rosa per domani con la rucola?",
+         [slice_item("Pepe Rosa", 1)], day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6,
+         restaurant=PAP, menu=PAP_MENU, preset={"customer_name": "Giacomo"}, final_state="collecting_kg_portion",
+         llm=recorded(items=[{**slice_item("Pepe Rosa", 1, unit=""), "add": ["rucola"]}]),
+         reply_contains="Vuole cambiare gusto?"),
     # ── Prove al telefono del 9/11 (255009c): controlli deterministici PaP ──
     # 21cce898: sostituzione di gusto al riepilogo, stessa quantità, nessuna modifica
     Case("reale_pap_invece_della_zucca_mettimi_il_pepe_rosa", "Invece della zucca mettimi il pepe rosa.",
@@ -1887,3 +1905,170 @@ def test_g6_a_number_after_e_fills_quantity_and_portion():
     assert chat_module._extract_kg_quantity("E 2 interi?", bare_number_ok=True) == ("tranci", 2.0)
     assert chat_module._extract_kg_size("E 2 interi?") == "piena"
     assert chat_module._extract_kg_quantity("Intrancio di pepe rosa.") == ("tranci", 1.0)
+
+
+# ── Prove al telefono del 9/11 sera (84d7ad7): chiamate intere ────────────────
+
+
+def test_134ef2c1_the_clarified_flavour_keeps_two_whole_cold_slices_and_yes_with_a_flavour_replaces():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[item(PERSONAL, 2, add=["zucchero e pistacchi"])], time="19:00"),
+        recorded(items=[slice_item("Zucca e Pistacchi", 1, unit="")]),
+        recorded("modify_items", items=[{**slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda"),
+                                         "add": ["peperoncino"], "remove": ["zucca"]}]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("Salve, buonasera.")
+        first = call.say("2 tranci di zucchero e pistacchi per domani alle 7 interi freddi.")
+        assert first.response_message.startswith("Zucchero e pistacchi non è nel menu")
+        assert call.say("Zucca e pistacchi.").response_message == (
+            "Allora: due tranci interi di zucca e pistacchi, freddi, per domani sabato alle 19, a nome Giacomo. Confermo?"
+        )
+        assert call.say("E invece della zucca mettimi il peperoncino.").response_message == (
+            chat_module.FLAVOUR_CHANGE_QUESTION
+        )
+        assert call.say("Sì, vorrei un pepe rosa.").response_message == (
+            "Allora: due tranci interi di pepe rosa, freddi, per domani sabato alle 19, a nome Giacomo. Confermo?"
+        )
+        call.say("Sì grazie.")
+    saved = call.saved[0]["items"]
+    assert [(i["pizza_name"], i["quantity"], i["size"], i["temperature"], i["add_ingredients"]) for i in saved] == [
+        ("Pepe Rosa", 2, "piena", "fredda", [])
+    ]
+
+
+def test_e793391f_no_keeps_the_flavour_the_time_is_kept_and_there_is_one_line():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[{**slice_item("Pepe Rosa", 1, unit=""), "add": ["rucola"]}]),
+        recorded(intent="set_pickup_time", time="20:30"),
+    ])
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Mi puoi fare una pepe rosa per domani con la rucola?").response_message == (
+            chat_module.FLAVOUR_CHANGE_QUESTION
+        )
+        call.say("No no, fammi una più per oggi e basta.")
+        response = call.say("Sì, fammela per domani alle 8 e mezza,")
+        assert "Quale gusto" not in response.response_message
+        response = call.say("Interi freddi.")
+        assert response.response_message == (
+            "Allora: un trancio intero di pepe rosa, freddo, per domani sabato alle 20:30, a nome Giacomo. Confermo?"
+        )
+        call.say("Sì.")
+    assert [(i["pizza_name"], i["quantity"]) for i in call.saved[0]["items"]] == [("Pepe Rosa", 1)]
+
+
+def test_e793391f_the_same_flavour_said_again_without_unit_is_never_a_second_line():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[{**slice_item("Pepe Rosa", 1, unit=""), "add": ["rucola"]}]),
+        recorded(items=[slice_item("Pepe Rosa", 1, unit="")]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("Mi puoi fare una pepe rosa per domani con la rucola?")
+        call.say("La Pepe Rosa.")  # l'LLM ridà il gusto senza unità: prima diventava una seconda riga
+        call.say("Interi freddi.")
+        call.say("Alle 8 e mezza.")
+        recap = call.conversation()
+    items = json.loads(recap.items_json)
+    assert [(i["pizza_name"], i["quantity"]) for i in items] == [("Pepe Rosa", 1)]
+
+
+def test_6237d2d2_peperosa_is_proposed_as_pepe_rosa():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded("unknown"),
+        recorded(items=[item(PERSONAL, add=["peperosa"])]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("Salve Giacomo.")
+        assert call.say("Un trancio di peperosa.").response_message == "Intende Pepe Rosa?"
+        assert call.say("Sì.").response_message == "Intero o mezzo? Caldo o freddo?"
+        call.say("Intero caldo.")
+        assert call.say("Sì va bene, alle 8.").response_message == (
+            "Allora: un trancio intero di pepe rosa, caldo, per domani sabato alle 20, a nome Giacomo. Confermo?"
+        )
+
+
+def test_4b350eed_time_in_the_first_phrase_gets_the_nearest_slot_and_the_portion_is_asked_once():
+    call = _pap_script()
+    call.extractions.extend([recorded("unknown"), recorded(items=[slice_item("Pepe Rosa", 1, unit="")], time="21:00")])
+    with call.open(customer_name="Giacomo"):
+        call.say("Salve Giacomo.")
+        first = call.say("Ti puoi fare un tranche di pepe rosa per domani alle 9?")
+        assert first.response_message == (
+            "Mi dispiace, domani, sabato siamo aperti dalle 17:00 alle 21:00. Posso segnarla alle 20:45. "
+            "Intero o mezzo? Caldo o freddo?"
+        )
+        second = call.say("Intero caldo.")
+        assert second.response_message.endswith("Va bene alle 20:45? Mi dica sì o no.")
+        assert "Intero o mezzo" not in second.response_message
+        assert call.say("Sì.").response_message == (
+            "Allora: un trancio intero di pepe rosa, caldo, per domani sabato alle 20:45, a nome Giacomo. Confermo?"
+        )
+
+
+# ── Controlli senza LLM: righe doppie ed eco del saluto ──────────────────────
+
+
+def test_g4_two_identical_lines_become_one_without_adding():
+    lines = [_pap_line(quantity=1.0), _pap_line(quantity=1.0)]
+    assert chat_module._merge_duplicate_kg_lines(lines, add_said=False)
+    assert [(i["pizza_name"], i["quantity"]) for i in lines] == [("Pepe Rosa", 1.0)]
+
+
+def test_g4_a_missing_portion_or_temperature_is_still_the_same_line():
+    lines = [_pap_line(quantity=1.0, size="normale", temperature=""), _pap_line(quantity=1.0)]
+    chat_module._merge_duplicate_kg_lines(lines, add_said=False)
+    assert [(i["quantity"], i["size"], i["temperature"]) for i in lines] == [(1.0, "piena", "fredda")]
+
+
+def test_g4_two_lines_with_different_quantities_ask_how_many_in_total():
+    lines = [_pap_line(quantity=1.0), _pap_line(quantity=2.0)]
+    chat_module._merge_duplicate_kg_lines(lines, add_said=False)
+    assert len(lines) == 1 and lines[0]["quantity"] == 0
+    assert chat_module._kg_slot_question(lines) == "Quanti tranci in tutto?"
+
+
+def test_g4_lines_are_added_only_with_an_add_word():
+    lines = [_pap_line(quantity=1.0), _pap_line(quantity=2.0)]
+    chat_module._merge_duplicate_kg_lines(lines, add_said=True)
+    assert [i["quantity"] for i in lines] == [3.0]
+
+
+def test_g4_different_portion_or_temperature_stay_two_lines():
+    lines = [_pap_line(quantity=1.0, temperature="calda"), _pap_line(quantity=1.0, temperature="fredda")]
+    assert chat_module._merge_duplicate_kg_lines(lines, add_said=False) == []
+    assert len(lines) == 2
+
+
+def test_attached_words_match_a_menu_name():
+    assert chat_module._only_menu_name_containing("peperosa", PAP_MENU) == "Pepe Rosa"
+    assert chat_module._only_menu_name_containing("capricciosa", PAP_MENU) is None
+
+
+@pytest.mark.parametrize("message, rest", [
+    ("Salve Giacomo, come posso aiutarla?", ""),
+    ("Salve, Giacomo.", ""),
+    ("Salve Giacomo, come... Salve. Ciao, posso ordinarti 2 tranci di zucca e pistacchi per stasera?",
+     "Salve. Ciao, posso ordinarti 2 tranci di zucca e pistacchi per stasera?"),
+    ("Salve, buonasera.", None),
+    ("Salve, vorrei 2 tranci di pepe rosa.", None),
+])
+def test_the_greeting_echo_is_removed_from_the_first_phrase(message, rest):
+    assert chat_module._strip_greeting_echo(message, ["Salve Giacomo! Come posso aiutarla?"]) == rest
+
+
+def test_the_greeting_echo_never_reaches_the_llm():
+    seen = []
+    call = _script(THURSDAY_16, CDS, MENU)
+
+    def spy(*args, **kwargs):
+        seen.append(" ".join(str(a) for a in args) + " " + " ".join(str(v) for v in kwargs.values()))
+        return recorded(items=[_MARGHERITA])
+
+    call.extract = spy
+    with call.open(customer_name="Giacomo Fattori"):
+        call.say("Salve Giacomo, come posso aiutarla? Vorrei una margherita.")
+    assert seen and all("aiutarla" not in text for text in seen)

@@ -2519,6 +2519,7 @@ def _extract_kg_quantity(message: str, bare_number_ok: bool = False) -> tuple[st
     m = message.lower()
     # "Intrancio di pepe rosa": il riconoscimento vocale attacca "un" a "trancio"
     m = re.sub(r"\bin\s?trancio\b", "un trancio", m)
+    m = re.sub(r"\btranche\b", "trancio", m)  # "un tranche di pepe rosa"
     if re.search(r"\bmezzo\s+(?:chilo|kg)\b", m):
         return "kg", 0.5
     match = re.search(rf"\b{_KG_NUM}\s*(?:chil[oi]|kg)\b(\s+e\s+mezzo)?", m)
@@ -2572,7 +2573,7 @@ _WEIGHT_WORDS_RE = re.compile(r"\b(?:chil[oi]|kg|ett[oi]|hg|grammi|grammo|gr)\b"
 # "fritto": il riconoscimento vocale lo scrive al posto di "freddo"
 _CLAUSE_HOT_RE = re.compile(r"\bcald[aeio]\b")
 _CLAUSE_COLD_RE = re.compile(r"\b(?:fredd[aeio]|fritt[aeio])\b")
-_CLAUSE_SLICE_RE = re.compile(r"\b(?:intrancio|tranci|trancio|pezzi|pezzo|fette|fetta|inter[aoie]|mezz[aoie])\b")
+_CLAUSE_SLICE_RE = re.compile(r"\b(?:intrancio|tranche|tranci|trancio|pezzi|pezzo|fette|fetta|inter[aoie]|mezz[aoie])\b")
 
 
 def _kg_item_clauses(items: list[dict], message: str) -> dict[int, str]:
@@ -2793,7 +2794,9 @@ def _kg_slot_question(items: list[dict], slot: str | None = None) -> str:
     missing = {s: _kg_items_missing(items, s) for s in _KG_SLOTS}
     parts = []
     if missing["quantity"]:
-        if all(item.get("size") in ("piena", "mezza") for item in missing["quantity"]):
+        if any(item.get("_quantity_total") for item in missing["quantity"]):
+            parts.append("Quanti tranci in tutto?")
+        elif all(item.get("size") in ("piena", "mezza") for item in missing["quantity"]):
             parts.append("Quanti tranci?")
         else:
             parts.append("Quanti tranci, interi o mezzi?")
@@ -3156,6 +3159,13 @@ def _only_menu_name_containing(said: str, menu_items: list[dict]) -> str | None:
     if not words:
         return None
     matches = [entry["name"] for entry in menu_items if set(words) <= set(_name_words(entry["name"]))]
+    if not matches:
+        # Parole attaccate dal riconoscimento vocale: "peperosa" → "Pepe Rosa"
+        def joined(text: str) -> str:
+            return "".join(w for w in re.findall(r"[a-z0-9]+", _normalize_for_match(text)) if w not in _NAME_FILLER_WORDS)
+        said_joined = joined(said)
+        if len(said_joined) >= 6:
+            matches = [entry["name"] for entry in menu_items if said_joined == joined(entry["name"])]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -3233,10 +3243,18 @@ def _substitution_words(text: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]+", _normalize_for_match(text)) if w not in _SUBSTITUTION_NOISE_WORDS]
 
 
+_FLAVOUR_ANSWER_WORDS = {"si", "certo", "ok", "okay", "va", "bene", "volentieri", "allora", "ecco"}
+# "Sì" a "Vuole cambiare gusto?" senza altro: si chiede quale gusto
+_BARE_FLAVOUR_YES_WORDS = _FLAVOUR_ANSWER_WORDS | {"vorrei", "voglio", "cambiare", "cambiarlo", "cambialo", "cambio",
+                                                   "mi", "piacerebbe", "lo", "la", "cambiamo", "cambi"}
+
+
 def _flavour_in(words: list[str], entries: list[dict]) -> str | None:
-    """Il solo nome in `entries` di cui `words` (senza verbi e articoli ai lati) è una
-    parte o una storpiatura."""
-    while words and (words[0] in _SUBSTITUTION_VERB_WORDS or words[0] in _SUBSTITUTION_ARTICLES):
+    """Il solo nome in `entries` di cui `words` (senza sì, verbi e articoli davanti) è
+    una parte o una storpiatura."""
+    while words and (
+        words[0] in _SUBSTITUTION_VERB_WORDS or words[0] in _SUBSTITUTION_ARTICLES or words[0] in _FLAVOUR_ANSWER_WORDS
+    ):
         words = words[1:]
     return _close_menu_name(" ".join(words), entries) if words else None
 
@@ -3340,12 +3358,13 @@ def _pap_guard_cart(items: list[dict], *, before: list[dict], message: str, weig
                 line["quantity"] = float(quantity)
                 if line.get("size") not in ("piena", "mezza"):
                     line["size"] = "normale"
-            if kg_order_unit(line) == "tranci" and not float(line.get("quantity") or 0):
-                # "Intrancio di pepe rosa": il numero detto vicino al gusto vale
+            if kg_order_unit(line) in ("", "tranci") and not float(line.get("quantity") or 0):
+                # "Intrancio di pepe rosa", "un tranche di pepe rosa": il numero detto vicino
+                # al gusto vale anche se l'LLM non ha dato né quantità né unità
                 clause = _kg_item_clauses([line], message).get(0) or (message if len(items) == 1 else "")
                 spoken = _extract_kg_quantity(clause) if clause else None
-                if spoken and spoken[0] == "tranci":
-                    line["quantity"] = float(spoken[1])
+                if spoken and (spoken[0] == "tranci" or weight_said):
+                    line["order_unit"], line["quantity"] = spoken[0], float(spoken[1])
             if kg_order_unit(line) == "tranci":
                 quantity = float(line.get("quantity") or 0)
                 if quantity and quantity != int(quantity):
@@ -3371,11 +3390,105 @@ def _pap_guard_cart(items: list[dict], *, before: list[dict], message: str, weig
     items[:] = kept
     for problem in problems:
         print(f"[Guard] riga sospetta: {problem}")
+    return problems + _merge_duplicate_kg_lines(items, add_said=bool(_EXPLICIT_ADD_RE.search(said)))
+
+
+def _spoken_kg_details(message: str) -> dict:
+    """Quantità, porzione e caldo/freddo detti nella frase ("2 tranci ... interi freddi")."""
+    details: dict = {}
+    quantity = _extract_kg_quantity(message)
+    if quantity:
+        details["order_unit"], details["quantity"] = quantity[0], float(quantity[1])
+    size = _extract_kg_size(message)
+    if size:
+        details["size"] = size
+    temperature = _extract_temperature(message)
+    if temperature:
+        details["temperature"] = temperature
+    return details
+
+
+def _apply_earlier_kg_details(line: dict, earlier: dict, message: str) -> None:
+    """Gusto chiarito dopo la domanda fuori menu: quantità, porzione e caldo/freddo detti
+    prima valgono per la riga, salvo che il cliente li ridica adesso."""
+    now = _spoken_kg_details(message)
+    if "quantity" in earlier and "quantity" not in now and not _SPOKEN_COUNT_RE.search(_normalize_for_match(message)):
+        line["order_unit"], line["quantity"] = earlier["order_unit"], earlier["quantity"]
+    if "size" in earlier and "size" not in now:
+        line["size"] = earlier["size"]
+    if "temperature" in earlier and "temperature" not in now:
+        line["temperature"] = earlier["temperature"]
+    print(f"[Guard] {line.get('pizza_name')!r}: valgono i dettagli detti prima {sorted(earlier)}")
+
+
+def _merge_duplicate_kg_lines(items: list[dict], add_said: bool) -> list[str]:
+    """G4: mai due righe uguali (stesso gusto, unità, porzione, caldo/freddo; un valore
+    mancante è compatibile). Si fondono senza sommare; si somma solo con "anche/in più/
+    altri". Quantità diverse senza quelle parole: si chiede "Quanti tranci in tutto?"."""
+    def same_or_missing(a, b, missing) -> bool:
+        return a == b or a in missing or b in missing
+
+    def compatible(a: dict, b: dict) -> bool:
+        return (
+            a.get("pizza_name") == b.get("pizza_name")
+            and a.get("sale_unit") == b.get("sale_unit") == "kg"
+            and not (a.get("add_ingredients") or a.get("remove_ingredients")
+                     or b.get("add_ingredients") or b.get("remove_ingredients"))
+            and same_or_missing(kg_order_unit(a), kg_order_unit(b), ("",))
+            and same_or_missing(a.get("size"), b.get("size"), ("", None, "normale"))
+            and same_or_missing(a.get("temperature", ""), b.get("temperature", ""), ("", None))
+        )
+
+    problems: list[str] = []
+    merged: list[dict] = []
+    for line in items:
+        twin = next((m for m in merged if compatible(m, line)), None)
+        if twin is None:
+            merged.append(line)
+            continue
+        for key, missing in (("order_unit", ("",)), ("size", ("", None, "normale")), ("temperature", ("", None))):
+            if twin.get(key) in missing and line.get(key) not in missing:
+                twin[key] = line[key]
+        a, b = float(twin.get("quantity") or 0), float(line.get("quantity") or 0)
+        if add_said:
+            twin["quantity"] = a + b
+        elif a == b or not b:
+            pass
+        elif not a:
+            twin["quantity"] = b
+        else:
+            twin["quantity"] = 0.0
+            twin["_quantity_total"] = True
+        problems.append(f"{line.get('pizza_name')!r} su due righe ({a:g} e {b:g}): fuse, quantità {twin['quantity']:g}")
+    items[:] = merged
+    for problem in problems:
+        print(f"[Guard] riga sospetta: {problem}")
     return problems
 
 
 FLAVOUR_CHANGE_QUESTION = "Gli ingredienti dei gusti non si possono cambiare. Vuole cambiare gusto?"
 FLAVOUR_CHANGE_WHICH = "Quale gusto vuole al posto di {name}?"
+
+
+# ── Eco del saluto ───────────────────────────────────────────────────────────
+# Il <Gather> ascolta già mentre il saluto suona: col vivavoce la voce del bot rientra
+# dal microfono e diventa la prima frase del cliente ("Salve Giacomo, come posso
+# aiutarla?"). Le parole iniziali uguali al saluto (almeno due) si tolgono.
+def _strip_greeting_echo(message: str, greetings: list[str]) -> str | None:
+    """La frase senza l'eco iniziale del saluto; None se non c'è eco."""
+    tokens = list(re.finditer(r"[^\W_]+", message))
+    words = [_normalize_for_match(t.group(0)) for t in tokens]
+    best = 0
+    for greeting in greetings:
+        greeting_words = re.findall(r"[a-z0-9]+", _normalize_for_match(greeting or ""))
+        matched = 0
+        while matched < min(len(words), len(greeting_words)) and words[matched] == greeting_words[matched]:
+            matched += 1
+        best = max(best, matched)
+    if best < 2:
+        return None
+    rest = message[tokens[best - 1].end():] if best < len(tokens) else ""
+    return re.sub(r"^[\s.,;:!?…]+", "", rest).strip()
 
 
 # Risposta a "vuole ordinare per domani?" che non aggiunge altro: niente LLM
@@ -3536,6 +3649,23 @@ def chat(request: ChatRequest, session: SessionDep):
             order_id=None,
             state="closed",
         )
+
+    # Eco del saluto nella prima frase del cliente (tutti i locali)
+    _first_turn = session.exec(
+        select(ConversationLog.id).where(ConversationLog.session_id == request.session_id)
+    ).first() is None
+    if _first_turn and not conversation.completed:
+        _greetings = [get_agent_greeting(restaurant_id=restaurant_id)]
+        if conversation.customer_name:
+            _greetings.append(f"Salve {conversation.customer_name.split()[0]}! Come posso aiutarla?")
+        _without_echo = _strip_greeting_echo(request.message, _greetings)
+        if _without_echo is not None:
+            print(f"[Echo] eco del saluto nella prima frase: {describe_text_for_log(request.message)} → "
+                  f"resto {describe_text_for_log(_without_echo)}")
+            # Solo eco: resta un saluto, a cui il bot risponde "Certo, mi dica pure!" senza
+            # prendere nulla. Con altro dopo l'eco vale solo quello.
+            if _without_echo:
+                request.message = _without_echo
 
     message_lower = unicodedata.normalize("NFC", request.message.lower())
 
@@ -3941,6 +4071,19 @@ def chat(request: ChatRequest, session: SessionDep):
             return None, f"Le {spoken} di mattina o le {spoken} di sera?"
         return (morning if morning_ok else evening), None
 
+    def _with_time_proposal(state: str, response: str) -> str:
+        """G5 (PaP): un orario fuori fascia detto prima ha già una proposta. Alla domanda
+        sull'orario si chiede quella con sì o no invece di "A che ora passa?"."""
+        if state != "collecting_pickup_time" or not response.endswith("A che ora passa?"):
+            return response
+        proposed = _slot_state(conversation).get("pickup_time", {}).get("proposed")
+        if not proposed or is_custom_pizza_enabled(restaurant_id):
+            return response
+        return (
+            f"{response.removesuffix('A che ora passa?').rstrip()} "
+            f"Va bene alle {_spoken_pickup_time(proposed)}? Mi dica sì o no."
+        ).lstrip()
+
     def _nearest_pickup_slot(requested: str) -> str | None:
         """G5: il primo orario valido più vicino a quello chiesto ("alle 9" con chiusura
         alle 21 → l'ultimo orario prima della chiusura, non l'apertura). Si provano l'ora
@@ -4110,6 +4253,7 @@ def chat(request: ChatRequest, session: SessionDep):
     def _local_reply(state: str, response_message: str, merged_order: dict, intent: str,
                      order_id: int | None = None) -> ChatResponse:
         """Turno risolto senza LLM: salva sessione e log, risponde."""
+        response_message = _with_time_proposal(state, response_message)
         extracted_stub = {"intent": intent, "items": [], "customer_name": None, "pickup_time": None}
         valid = state == "completed"
         if not conversation.completed:
@@ -5267,22 +5411,44 @@ def chat(request: ChatRequest, session: SessionDep):
             at_recap=conversation.state == "awaiting_confirmation" or bool(_change_target),
         )
         _sub_reply: str | None = None
+        _last_log = session.exec(
+            select(ConversationLog).where(ConversationLog.session_id == request.session_id)
+            .order_by(ConversationLog.id.desc())
+        ).first() if _change_target else None
+        _last_reply = _last_log.response_message if _last_log else ""
+        if _change_target and not (
+            _last_reply.endswith(FLAVOUR_CHANGE_QUESTION) or _last_reply.startswith("Quale gusto vuole al posto di")
+        ):
+            # La domanda sul gusto non è più l'ultima fatta: la risposta è per un'altra domanda
+            _sub_slots.pop("flavour_change", None)
+            _store_slot_state(conversation, _sub_slots)
+            _change_target = None
+            _sub = _parse_flavour_substitution(
+                request.message, _sub_cart, _sub_menu, at_recap=conversation.state == "awaiting_confirmation",
+            )
         if _sub is None and _change_target:
             # Risposta a "Vuole cambiare gusto?"
-            _named = _flavour_in(_substitution_words(request.message), _sub_menu)
+            _answer_words = _substitution_words(request.message)
+            _named = _flavour_in(_answer_words, _sub_menu)
             _target_index = next(
                 (i for i, line in enumerate(_sub_cart) if line.get("pizza_name") == _change_target), None,
             )
             _change_answer = _yes_no_answer(request.message)
+            _bare_answer = all(w in _BARE_FLAVOUR_YES_WORDS for w in _answer_words)
+            _sub_slots.pop("flavour_change", None)
+            _store_slot_state(conversation, _sub_slots)
             if _named and _target_index is not None and _named != _change_target:
+                # "Sì, vorrei un pepe rosa": sì e gusto nella stessa frase
                 _sub = (_target_index, _named)
-            elif _change_answer == "yes" and not _named:
-                _sub_reply = FLAVOUR_CHANGE_WHICH.format(name=_change_target.lower())
-            else:
-                _sub_slots.pop("flavour_change", None)
+            elif _named == _change_target or (_change_answer == "no" and _bare_answer):
+                _sub = (-1, "")  # tiene il gusto di prima, senza modifiche, e si prosegue
+            elif _change_answer == "yes" and _bare_answer:
+                _sub_slots["flavour_change"] = _change_target
                 _store_slot_state(conversation, _sub_slots)
-                if _change_answer == "no":
-                    _sub = (-1, "")  # nessun cambio: si torna alla domanda o al riepilogo
+                _sub_reply = FLAVOUR_CHANGE_WHICH.format(name=_change_target.lower())
+            elif _change_answer == "no":
+                # "No no, fammi una per oggi": gusto di prima; il resto della frase vale
+                print(f"[Guard] no a \"Vuole cambiare gusto?\": resta {_change_target!r}, la frase prosegue")
         if _sub_reply:
             return _local_reply(conversation.state, _sub_reply, _current_merged_order(), "flavour_change_which")
         if _sub is not None:
@@ -5291,6 +5457,7 @@ def chat(request: ChatRequest, session: SessionDep):
                 _row = session.exec(_menu_select(restaurant_id, MenuItem.name == _new_flavour)).first()
                 _old_flavour = _sub_cart[_index].get("pizza_name")
                 _sub_cart[_index] = _substitute_flavour(_sub_cart[_index], _new_flavour, _row)
+                _merge_duplicate_kg_lines(_sub_cart, add_said=False)
                 print(f"[Guard] sostituzione di gusto: {_old_flavour!r} → {_new_flavour!r}, stessa quantità")
                 conversation.items_json = json.dumps(_sub_cart, ensure_ascii=False)
             _sub_slots = _slot_state(conversation)
@@ -5740,6 +5907,7 @@ def chat(request: ChatRequest, session: SessionDep):
             )
             if _day_note:
                 response_message = f"{_day_note} {response_message}"
+            response_message = _with_time_proposal(state, response_message)
             extracted_stub = {"intent": f"set_kg_{slot}", "items": [], "customer_name": None, "pickup_time": None}
             session.add(conversation)
             session.add(ConversationLog(
@@ -6001,6 +6169,7 @@ def chat(request: ChatRequest, session: SessionDep):
         _proposal_slots.pop("off_menu_asked", None)
         _proposal_slots.pop("off_menu_said", None)
         _proposal_slots.pop("off_menu_quantity", None)
+        _proposal_earlier_kg = _proposal_slots.pop("off_menu_kg", None)
         _store_slot_state(conversation, _proposal_slots)
         _row = session.exec(_menu_select(restaurant_id, MenuItem.name == _proposal["name"])).first()
         _chosen = {
@@ -6016,8 +6185,14 @@ def chat(request: ChatRequest, session: SessionDep):
             _normalize_kg_order_unit(_chosen, _proposal.get("message", ""))
             if _chosen.get("temperature") not in ("calda", "fredda"):
                 _chosen["temperature"] = ""
+            if _proposal_earlier_kg:
+                _apply_earlier_kg_details(_chosen, _proposal_earlier_kg, request.message)
         _merged_now = _current_merged_order()
         _merged_now["items"] = [*_merged_now["items"], _chosen]
+        if not is_custom_pizza_enabled(restaurant_id):
+            _merge_duplicate_kg_lines(
+                _merged_now["items"], add_said=bool(_EXPLICIT_ADD_RE.search(_normalize_for_match(request.message))),
+            )
         conversation.items_json = json.dumps(_merged_now["items"], ensure_ascii=False)
         _proposal_state = determine_state(
             merged_order=_merged_now,
@@ -6261,6 +6436,14 @@ def chat(request: ChatRequest, session: SessionDep):
             _off_menu_slots["off_menu_asked"] = _asked + 1
             if len(_refused) == 1 and int(_refused[0].get("quantity") or 1) > 1:
                 _off_menu_slots["off_menu_quantity"] = int(_refused[0]["quantity"])
+            _said_kg_details = (
+                _spoken_kg_details(request.message)
+                if len(_refused) == 1 and len(_ITEM_CLAUSE_SPLIT_RE.split(_normalize_for_match(request.message))) == 1
+                else {}
+            )
+            if _said_kg_details:
+                # "2 tranci di zucchero e pistacchi interi freddi": valgono per il gusto chiarito
+                _off_menu_slots["off_menu_kg"] = _said_kg_details
             _store_slot_state(conversation, _off_menu_slots)
             print(f"[Cart] Pizza fuori menu non accettata dal locale: {len(_refused)} voci")
     if new_items and not _off_menu_reply and _off_menu_slots.get("off_menu_quantity"):
@@ -6272,6 +6455,11 @@ def chat(request: ChatRequest, session: SessionDep):
             and not _SPOKEN_COUNT_RE.search(_normalize_for_match(request.message))
         ):
             new_items[0]["quantity"] = _said_quantity
+    if new_items and not _off_menu_reply and _off_menu_slots.get("off_menu_kg"):
+        _earlier_kg = _off_menu_slots.pop("off_menu_kg")
+        _store_slot_state(conversation, _off_menu_slots)
+        if len(new_items) == 1 and new_items[0].get("sale_unit") == "kg":
+            _apply_earlier_kg_details(new_items[0], _earlier_kg, request.message)
     if not _off_menu_reply and not new_items and _off_menu_slots.get("off_menu_pending"):
         # "Sì, alle 8" alla domanda sul giorno: ora la pizza che non c'è
         _off_menu_reply = _off_menu_slots.pop("off_menu_pending")
@@ -6285,6 +6473,7 @@ def chat(request: ChatRequest, session: SessionDep):
         _off_menu_slots.pop("off_menu_asked", None)
         _off_menu_slots.pop("off_menu_proposal", None)
         _off_menu_slots.pop("off_menu_said", None)
+        _off_menu_slots.pop("off_menu_kg", None)
         _store_slot_state(conversation, _off_menu_slots)
 
     # Voci al taglio nuove: si tengono solo quantità, porzione e caldo/freddo detti
@@ -6314,6 +6503,13 @@ def chat(request: ChatRequest, session: SessionDep):
                     continue  # la riga del carrello resta com'è
             _unmodified.append(item)
         new_items = _unmodified
+    if _pap_guards and new_items:
+        # G1 prima del merge: una riga a peso non detta diventa in tranci prima di essere
+        # confrontata col carrello, così non nasce una seconda riga dello stesso gusto
+        _pap_guard_cart(
+            new_items, before=[], message=request.message,
+            weight_said=bool(_slot_state(conversation).get("weight_said")),
+        )
 
     # Prodotto riconosciuto solo dall'LLM ("una capriciosa"): l'ordine è deciso anche così
     if (
@@ -6644,6 +6840,25 @@ def chat(request: ChatRequest, session: SessionDep):
         response_message = "Cosa desidera ordinare?"
     if _off_menu_handover and state != "completed" and not _next_day_ask:
         conversation.state, response_message = _callback_fallback()
+    if (
+        _pap_guards and pickup_time_error and _extracted_time and _extracted_time != "prima_possibile"
+        and pickup_time_error.startswith("Mi dispiace,") and _prior_state != "collecting_pickup_time"
+        and not conversation.completed
+    ):
+        # G5 (PaP): orario fuori fascia nella frase dell'ordine → si propone il più vicino
+        _nearest_now = _nearest_pickup_slot(pt)
+        if _nearest_now:
+            _g5_slots = _slot_state(conversation)
+            _g5_slots.setdefault("pickup_time", {})["proposed"] = _nearest_now
+            _store_slot_state(conversation, _g5_slots)
+            _hours_said = pickup_time_error.removesuffix(" A che ora passa?")
+            print(f"[Pickup] orario {pt} fuori fascia nella frase dell'ordine: propongo {_nearest_now}")
+            if conversation.state == "collecting_pickup_time":
+                response_message = _with_time_proposal(conversation.state, f"{_hours_said} A che ora passa?")
+            else:
+                response_message = response_message.replace(
+                    _hours_said, f"{_hours_said} Posso segnarla alle {_spoken_pickup_time(_nearest_now)}.", 1,
+                )
     if _flavour_change_ask and not conversation.completed and not _off_menu_reply:
         # G2: "Vuole cambiare gusto?" al posto di una modifica di ingredienti
         _fc_slots = _slot_state(conversation)
@@ -6665,7 +6880,9 @@ def chat(request: ChatRequest, session: SessionDep):
             and intent != "ask_kg_price"
             and not _day_changed  # ha detto il giorno: non è una risposta mancata
         ):
-            conversation.state, response_message, order_id = _pickup_time_miss(merged_order, pickup_time_error)
+            conversation.state, response_message, order_id = _pickup_time_miss(
+                merged_order, pickup_time_error, requested=pt if _extracted_time else None,
+            )
             valid = valid or conversation.state == "completed"
         _log_pickup_time_turn(
             "llm" if extracted.get("pickup_time") and not pickup_time_error else "nessuno", conversation,
