@@ -55,6 +55,7 @@ PAP = {
 }
 FRIDAY_NOV_6 = datetime.datetime(2026, 11, 6, 17, 7, tzinfo=ROME)  # chiamate di prova a PaP; domani sabato 7
 SATURDAY_NOV_7 = "2026-11-07"
+_PAP_AT_19 = {"customer_name": "Giacomo", "pickup_time": "19:00", "pickup_date": SATURDAY_NOV_7}
 
 THURSDAY_16 = datetime.datetime(2026, 10, 1, 16, 0, tzinfo=ROME)  # domani venerdì 2
 SUNDAY_16 = datetime.datetime(2026, 10, 4, 16, 0, tzinfo=ROME)  # domani lunedì 5
@@ -347,6 +348,75 @@ CASES = [
          day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
          preset={"customer_name": "Giacomo"}, final_state="collecting_kg_portion",
          llm=recorded(items=[slice_item("Zucca e Pistacchi", 2)]), reply_contains="Interi o mezzi? Caldi o freddi?"),
+    # ── Difetti aperti dopo d6309a6 (Pizza a Pezzi) ──────────────────────────
+    # 1. Il prodotto ripetuto alla domanda intero/mezzo o caldo/freddo non si somma
+    Case("pap_ripete_il_prodotto_alla_domanda_intero_mezzo", "2 tranci di zucca e pistacchi interi.",
+         [slice_item("Zucca e Pistacchi", 2, size="piena")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2)], state="collecting_kg_portion",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="collecting_kg_temperature",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena")]), reply_contains="Caldi o freddi?"),
+    Case("pap_ripete_il_prodotto_alla_domanda_caldo_freddo", "Due tranci di zucca e pistacchi, freddi.",
+         [slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena")], state="collecting_kg_temperature",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")]),
+         reply_contains="Allora: due tranci interi di zucca e pistacchi, freddi,"),
+    Case("pap_altri_due_tranci_si_aggiungono", "Aggiungi altri due tranci di zucca e pistacchi interi freddi.",
+         [slice_item("Zucca e Pistacchi", 4, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         llm=recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")]),
+         reply_contains="Allora: quattro tranci interi di zucca e pistacchi, freddi,"),
+    # 2. Una correzione al riepilogo aggiorna il carrello e dà un riepilogo nuovo
+    Case("pap_riepilogo_mezzi_non_interi", "No, mezzi, non interi.",
+         [slice_item("Zucca e Pistacchi", 2, size="mezza", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         reply_contains="Allora: due tranci mezzi di zucca e pistacchi, freddi, per domani sabato alle 19, "
+                        "a nome Giacomo. Confermo?"),
+    Case("pap_riepilogo_si_pero_caldi", "Sì, però caldi.",
+         [slice_item("Zucca e Pistacchi", 2, size="piena", temperature="calda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         reply_contains="Allora: due tranci interi di zucca e pistacchi, caldi,"),
+    Case("pap_riepilogo_facciamone_tre", "Facciamone tre.",
+         [slice_item("Zucca e Pistacchi", 3, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         reply_contains="Allora: tre tranci interi di zucca e pistacchi, freddi,"),
+    Case("pap_riepilogo_alle_8", "No, facciamo alle 8.",
+         [slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="20:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation", reply_contains="per domani sabato alle 20,"),
+    Case("pap_riepilogo_cambio_gusto", "Invece della zucca e pistacchi mettimi il pepe rosa.",
+         [slice_item("Pepe Rosa", 2, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation",
+         llm=recorded(intent="replace_items", items=[slice_item("Pepe Rosa", 0, unit="")]),
+         reply_contains="Allora: due tranci interi di pepe rosa, freddi,"),
+    Case("pap_riepilogo_correzione_non_chiara", "Aspetta, vorrei cambiare una cosa.",
+         [slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], replaces_cart=True,
+         cart=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], state="awaiting_confirmation",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset=_PAP_AT_19, final_state="awaiting_confirmation", llm=recorded(intent="unknown"),
+         reply_contains="Va bene, cosa cambio?"),
+    # 3. 2715b8a1 (6/11 16:10): prodotto che non è nel menu, parole esatte dai log di Railway
+    Case("reale_pap_capricciosa", "Posso ordinarti una capricciosa per domani alle 7.",
+         day=SATURDAY_NOV_7, time="19:00", name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="collecting_items",
+         llm=recorded(items=[item("Capricciosa")], time="19:00"), reply_contains="Capricciosa non è nel menu, abbiamo "),
+    Case("reale_pap_una_diavola", "Una diavola?",
+         day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6, restaurant=PAP, menu=PAP_MENU,
+         preset={"customer_name": "Giacomo"}, final_state="collecting_items",
+         llm=recorded(items=[item("Diavola")]), reply_contains="Diavola non è nel menu, abbiamo "),
 ]
 
 
@@ -1347,3 +1417,96 @@ def test_price_at_the_recap_of_pieces_gives_the_total():
     with call.open(customer_name="Giacomo"):
         call.say("una fit salmone per le 7")
         assert call.say("Quanto costa?").response_message == "In tutto sono 9,00 euro. Confermo l'ordine?"
+
+
+# ── Difetti aperti dopo d6309a6: turno per turno ────────────────────────────
+
+
+def test_repeating_the_product_at_the_portion_question_does_not_add_slices():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[slice_item("Zucca e Pistacchi", 2)], time="19:00"),
+        recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena")]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Posso ordinarti 2 tranci di zucca e pistacchi per domani alle 7?").response_message == (
+            "Interi o mezzi? Caldi o freddi?"
+        )
+        assert call.say("2 tranci di zucca e pistacchi interi.").response_message == "Caldi o freddi?"
+        assert call.say("Freddi.").response_message == (
+            "Allora: due tranci interi di zucca e pistacchi, freddi, per domani sabato alle 19, a nome Giacomo. Confermo?"
+        )
+        call.say("Sì.")
+    assert [(i["pizza_name"], i["quantity"]) for i in call.saved[0]["items"]] == [("Zucca e Pistacchi", 2)]
+
+
+def test_a_correction_at_the_recap_is_applied_and_never_confirmed():
+    call = _pap_script()
+    call.extractions.append(recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")],
+                                     time="19:00"))
+    with call.open(customer_name="Giacomo"):
+        first = call.say("2 tranci interi freddi di zucca e pistacchi per domani alle 7")
+        assert first.state == "awaiting_confirmation"
+        response = call.say("Sì, però caldi.")
+        assert response.response_message == (
+            "Allora: due tranci interi di zucca e pistacchi, caldi, per domani sabato alle 19, a nome Giacomo. Confermo?"
+        )
+        assert response.response_message != first.response_message
+        assert call.saved == []
+        assert call.say("Sì.").state == "completed"
+    saved = call.saved[0]["items"][0]
+    assert (saved["quantity"], saved["size"], saved["temperature"]) == (2, "piena", "calda")
+
+
+def test_an_unclear_correction_at_the_recap_asks_what_to_change_then_applies_it():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[slice_item("Zucca e Pistacchi", 2, size="piena", temperature="fredda")], time="19:00"),
+        recorded("unknown"),
+    ])
+    with call.open(customer_name="Giacomo"):
+        call.say("2 tranci interi freddi di zucca e pistacchi per domani alle 7")
+        assert call.say("Aspetta, vorrei cambiare una cosa.").response_message == chat_module.RECAP_CHANGE_QUESTION_KG
+        assert call.say("Mezzi.").response_message.startswith("Allora: due tranci mezzi di zucca e pistacchi")
+    assert call.saved == []
+
+
+def test_2715b8a1_capricciosa_never_loops_on_what_to_order():
+    """2715b8a1 (6/11, 16:10 UTC), parole ricostruite dagli hash dei log di Railway. Il
+    secondo turno (18 caratteri, risposta "Certo, mi dica pure!") non si è potuto
+    ricostruire e qui manca. Prima: quattro volte "Cosa desidera ordinare?", poi il
+    cliente ha riattaccato."""
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[item("Capricciosa")], time="19:00"),
+        recorded(items=[item("Capricciosa")]),
+        recorded(items=[item("Capricciosa")]),
+        recorded(items=[item("Diavola")]),
+    ])
+    with call.open(customer_name="Giacomo"), patch.object(chat_module, "save_reservation_to_base44", return_value="r1"):
+        first = call.say("Posso ordinarti una capricciosa per domani alle 7.")
+        assert first.response_message.startswith("Capricciosa non è nel menu, abbiamo ")
+        assert first.response_message.endswith("Quale vuole?")
+        assert call.say("Una capricciosa.").response_message == first.response_message  # ripetuta una volta
+        proposal = call.say("Una capricciosa.")
+        assert proposal.response_message.startswith("Intende ")
+        response = call.say("Una diavola?")
+        assert response.response_message == chat_module.CALLBACK_HANDOFF_MESSAGE
+        replies = [first.response_message, proposal.response_message, response.response_message]
+        assert "Cosa desidera ordinare?" not in replies
+    assert call.saved == []
+
+
+def test_a_turn_without_products_does_not_restart_the_off_menu_count():
+    call = _pap_script()
+    call.extractions.extend([
+        recorded(items=[item("Capricciosa")], time="19:00"),
+        recorded("unknown"),
+        recorded(items=[item("Capricciosa")]),
+        recorded(items=[item("Capricciosa")]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        first = call.say("Posso ordinarti una capricciosa per domani alle 7.")
+        call.say("Eh, come?")
+        assert call.say("Una capricciosa.").response_message == first.response_message
+        assert call.say("Una capricciosa.").response_message.startswith("Intende ")

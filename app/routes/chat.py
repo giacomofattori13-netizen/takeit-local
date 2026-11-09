@@ -233,6 +233,53 @@ def merge_items(existing_items: list[dict], new_items: list[dict]) -> list[dict]
 
     return merged
 
+# Parole che aggiungono davvero: "altri due", "aggiungi", "anche", "un'altra"
+_EXPLICIT_ADD_RE = re.compile(r"\b(?:altr[aoie]|aggiung\w*|anche|ancora|in\s+piu)\b")
+
+
+def _repeated_cart_item(cart: list[dict], new_item: dict) -> dict | None:
+    """La voce del carrello che `new_item` ripete: stesso prodotto, stessa quantità, stesse
+    aggiunte e nessun dettaglio in contrasto (porzione, caldo/freddo, unità). None se è
+    una voce nuova."""
+    def same_or_missing(a, b, missing=("",)) -> bool:
+        return a == b or a in missing or b in missing
+
+    for existing in cart:
+        if (
+            existing.get("pizza_name") != new_item.get("pizza_name")
+            or existing.get("pizza_type") != new_item.get("pizza_type")
+            or float(existing.get("quantity") or 0) != float(new_item.get("quantity") or 0)
+            or float(new_item.get("quantity") or 0) <= 0
+            or (new_item.get("add_ingredients") or []) not in ([], existing.get("add_ingredients") or [])
+            or (new_item.get("remove_ingredients") or []) not in ([], existing.get("remove_ingredients") or [])
+        ):
+            continue
+        if existing.get("sale_unit") == "kg" or new_item.get("sale_unit") == "kg":
+            unit_ok = same_or_missing(existing.get("order_unit", ""), new_item.get("order_unit", ""))
+            size_ok = same_or_missing(existing.get("size"), new_item.get("size"), ("", None, "normale"))
+            temperature_ok = same_or_missing(existing.get("temperature", ""), new_item.get("temperature", ""))
+            if unit_ok and size_ok and temperature_ok:
+                return existing
+        elif existing.get("size", "normale") == new_item.get("size", "normale"):
+            return existing
+    return None
+
+
+def _fill_repeated_item(existing: dict, new_item: dict) -> None:
+    """Dettagli detti ripetendo il prodotto ("2 tranci di zucca interi") che nel carrello
+    mancavano."""
+    if existing.get("sale_unit") != "kg":
+        return
+    if not existing.get("order_unit") and new_item.get("order_unit"):
+        existing["order_unit"] = new_item["order_unit"]
+    if existing.get("size") not in ("piena", "mezza") and new_item.get("size") in ("piena", "mezza"):
+        existing["size"] = new_item["size"]
+        _clear_kg_attempts(existing, "portion")
+    if existing.get("temperature") not in ("calda", "fredda") and new_item.get("temperature") in ("calda", "fredda"):
+        existing["temperature"] = new_item["temperature"]
+        _clear_kg_attempts(existing, "temperature")
+
+
 def remove_items_from_order(existing_items: list[dict], items_to_remove: list[dict]) -> list[dict]:
     updated_items = []
 
@@ -2784,6 +2831,81 @@ def _kg_proposal_question(slot: str, items: list[dict]) -> str:
     return f"Va bene {word}? Mi dica sì o no."
 
 
+# ── Correzioni al riepilogo ("Confermo?") ─────────────────────────────────────
+# Parole di chi vuole cambiare qualcosa senza dire subito cosa, o con un altro gusto
+_RECAP_CHANGE_WORDS_RE = re.compile(
+    r"\b(?:invece|anziche|piuttosto|cambi\w*|modific\w*|sostitu\w*|togli\w*|correggi\w*|sbagliat\w*"
+    r"|metti\w*|fammi\w*|facciamo\w*|fanne|aggiung\w*|pero)\b"
+)
+# "Facciamone tre", "mettine due": la nuova quantità della voce
+_RECAP_COUNT_RE = re.compile(
+    rf"\b(?:facciamone|fanne|mettine|fammene|dammene|ne\s+(?:voglio|vorrei|prendo|metta|metti|faccia|fai))\s+{_KG_NUM}\b"
+)
+RECAP_CHANGE_QUESTION_KG = "Va bene, cosa cambio? Il gusto, i tranci, intero o mezzo, caldo o freddo, o l'orario?"
+RECAP_CHANGE_QUESTION = "Va bene, cosa cambio? Le pizze, l'orario o il nome?"
+
+
+def _recap_change_question(items: list[dict]) -> str:
+    return RECAP_CHANGE_QUESTION_KG if any(i.get("sale_unit") == "kg" for i in items) else RECAP_CHANGE_QUESTION
+
+
+def _names_product_outside_cart(message: str, items: list[dict], menu_items: list[dict]) -> bool:
+    """La frase nomina un prodotto del menu che non è nel carrello ("mettimi pepe rosa")."""
+    said = " ".join(re.findall(r"[a-z0-9]+", _normalize_for_match(message)))
+    in_cart = {_normalize_for_match(i.get("pizza_name") or "") for i in items}
+    for entry in menu_items:
+        name = " ".join(re.findall(r"[a-z0-9]+", _normalize_for_match(entry.get("name") or "")))
+        if name and _normalize_for_match(entry.get("name") or "") not in in_cart and re.search(rf"\b{re.escape(name)}\b", said):
+            return True
+    return False
+
+
+def _apply_recap_item_changes(items: list[dict], message: str) -> bool:
+    """Intero/mezzo, caldo/freddo e quantità detti al riepilogo sostituiscono quelli del
+    carrello. Valgono per il prodotto nominato, altrimenti per tutte le voci al taglio
+    (la quantità solo se nel carrello c'è una voce). True se qualcosa è cambiato."""
+    message = re.sub(r"\bnon\s+\w+", " ", _normalize_for_match(message))  # "mezzi, non interi"
+    named = _kg_item_clauses(items, message)
+    whole = message
+    if named:
+        targets = list(named.items())
+    else:
+        targets = [(index, whole) for index, item in enumerate(items) if item.get("sale_unit") == "kg"]
+    changed = False
+    for index, clause in targets:
+        item = items[index]
+        size = _extract_kg_size(clause)
+        if size and kg_order_unit(item) != "kg" and item.get("size") != size:
+            item["order_unit"], item["size"] = "tranci", size
+            _clear_kg_attempts(item, "portion")
+            changed = True
+        hot, cold = bool(_CLAUSE_HOT_RE.search(clause)), bool(_CLAUSE_COLD_RE.search(clause))
+        if hot != cold and item.get("temperature") != ("calda" if hot else "fredda"):
+            item["temperature"] = "calda" if hot else "fredda"
+            _clear_kg_attempts(item, "temperature")
+            changed = True
+        quantity = _extract_kg_quantity(clause) if named or len(targets) == 1 else None
+        if quantity and (kg_order_unit(item), float(item.get("quantity") or 0)) != quantity:
+            item["order_unit"], item["quantity"] = quantity
+            if quantity[0] == "kg":
+                item["size"] = "normale"
+            _clear_kg_attempts(item, "quantity")
+            changed = True
+    count = _RECAP_COUNT_RE.search(whole)
+    if count and len(items) == 1 and _kg_number(count.group(1)) >= 1:
+        item = items[0]
+        value = _kg_number(count.group(1))
+        if item.get("sale_unit") == "kg":
+            value = float(int(value))
+            if kg_order_unit(item) != "kg" and float(item.get("quantity") or 0) != value:
+                item["order_unit"], item["quantity"] = "tranci", value
+                changed = True
+        elif int(item.get("quantity") or 1) != int(value):
+            item["quantity"] = int(value)
+            changed = True
+    return changed
+
+
 def pickup_day_phrase(pickup_date: datetime.date) -> str:
     """'domani, giovedì' oppure solo il giorno ('martedì') se domani il locale è chiuso."""
     today = datetime.datetime.now(tz=ZoneInfo("Europe/Rome")).date()
@@ -3029,6 +3151,18 @@ def _only_menu_name_containing(said: str, menu_items: list[dict]) -> str | None:
         return None
     matches = [entry["name"] for entry in menu_items if set(words) <= set(_name_words(entry["name"]))]
     return matches[0] if len(matches) == 1 else None
+
+
+def _looks_like_product_name(said: str, restaurant_name: str = "", customer_name: str | None = None) -> bool:
+    """Un nome detto come prodotto che non è un saluto, il nome del locale o il nome del
+    cliente: "capricciosa" sì, "salve" o "Giacomo" no."""
+    def plain(text: str) -> list[str]:
+        return [w for w in re.findall(r"[a-z0-9]+", _normalize_for_match(text or "")) if w not in _NAME_FILLER_WORDS]
+
+    words = plain(said)
+    if not words or is_only_greeting(said, restaurant_name) or words == plain(restaurant_name):
+        return False
+    return not (customer_name and words == plain(customer_name))
 
 
 def _off_menu_proposal_question(name: str) -> str:
@@ -4862,10 +4996,61 @@ def chat(request: ChatRequest, session: SessionDep):
             _new_day_resp = f"{_day_note} {_new_day_resp}"
         return _local_reply(_new_day_state, _new_day_resp, _new_day_merged, "change_pickup_day")
 
+    # Correzione al riepilogo: il carrello si aggiorna e si riepiloga di nuovo, mai lo
+    # stesso riepilogo. Intero/mezzo, caldo/freddo, quantità e orario si leggono qui; un
+    # altro gusto o una correzione non chiara passano dall'LLM. Prima del sì/no, perché
+    # "Sì, però caldi" non è una conferma.
+    _recap_correction_before: tuple[str, str | None] | None = None
+    if conversation.state == "awaiting_confirmation" and not conversation.completed:
+        _recap_items = json.loads(conversation.items_json)
+        _other_product = _names_product_outside_cart(
+            request.message, _recap_items, get_proposable_menu(restaurant_id=restaurant_id),
+        )
+        _recap_changed = not _other_product and _apply_recap_item_changes(_recap_items, request.message)
+        _recap_new_time = _recap_time_error = None
+        _said_recap_time = _time_in_sentence(request.message) if _next_day_only else None
+        if _said_recap_time and _said_recap_time != "prima_possibile":
+            _checked_recap_time, _recap_time_error = _check_pickup_time(_said_recap_time)
+            if _checked_recap_time == conversation.pickup_time:
+                _recap_time_error = None
+            else:
+                _recap_new_time = _checked_recap_time
+        if not _other_product and (_recap_changed or _recap_new_time or _recap_time_error):
+            conversation.items_json = json.dumps(_recap_items, ensure_ascii=False)
+            if _recap_new_time:
+                conversation.pickup_time = _recap_new_time
+            _recap_merged = _current_merged_order()
+            print(f"[Confirm] correzione al riepilogo: voci={_recap_changed} orario={_recap_new_time!r}")
+            if _recap_time_error:
+                return _local_reply("collecting_pickup_time", _recap_time_error, _recap_merged, "recap_correction")
+            _recap_state = determine_state(
+                merged_order=_recap_merged,
+                missing_messages=[],
+                completed=conversation.completed,
+                intended_quantity=conversation.intended_quantity,
+            )
+            _recap_resp = build_assistant_response(
+                merged_order=_recap_merged,
+                state=_recap_state,
+                missing_messages=[],
+                order_saved=False,
+                intent="recap_correction",
+                new_valid_items=[],
+                customer_phone=conversation.customer_phone,
+                day_phrase=_day_phrase,
+                restaurant_id=restaurant_id,
+                day_said=_day_said_for(_recap_state),
+            )
+            return _local_reply(_recap_state, _recap_resp, _recap_merged, "recap_correction")
+        if _other_product or _RECAP_CHANGE_WORDS_RE.search(_normalize_for_match(request.message)):
+            _recap_correction_before = (conversation.items_json, conversation.pickup_time)
+            conversation.state = "collecting_items"
+
     # "No, per le 9" al riepilogo: è una correzione, non l'annullamento dell'ordine
     if conversation.state == "awaiting_confirmation" and re.match(
         r"no\b[\s,]+(?!grazie\b|lascia\b|lasci\b|niente\b|annull|cancell)", _normalize_for_match(request.message),
     ):
+        _recap_correction_before = (conversation.items_json, conversation.pickup_time)
         conversation.state = "collecting_items"
 
     # Un orario diverso al riepilogo ("Per 8.45."): lo legge la domanda sull'orario, che lo
@@ -5653,6 +5838,10 @@ def chat(request: ChatRequest, session: SessionDep):
 
     # Margherita + aggiunte solo se le parole sono ingredienti del locale o alias. Saluti,
     # nome del locale e nomi di persona non diventano mai aggiunte.
+    # Locale senza pizza personalizzata: un nome che sembra un prodotto ma non è nel menu
+    # né tra gli ingredienti ("una capricciosa") non si scarta in silenzio. Va alla domanda
+    # sulla pizza fuori menu, che dice cosa non c'è, propone i gusti più vicini e non va in loop.
+    _custom_pizza_on = is_custom_pizza_enabled(restaurant_id)
     _kept_items = []
     for item in new_items:
         _said = item.get("add_ingredients") or []
@@ -5663,6 +5852,20 @@ def chat(request: ChatRequest, session: SessionDep):
         if len(_good) != len(_said):
             _dropped_additions = True
             print(f"[Cart] Scartate {len(_said) - len(_good)} parole che non sono ingredienti")
+            _unknown = [
+                a for a in _said
+                if a not in _good and _looks_like_product_name(str(a), _restaurant_name, conversation.customer_name)
+            ]
+            if (
+                not _custom_pizza_on
+                and item.get("pizza_name") in _OFF_MENU_PIZZA_NAMES
+                and _unknown
+                and intent in ("add_items", "modify_items", "replace_items")
+            ):
+                print(f"[Cart] {len(_unknown)} nomi non riconosciuti: domanda sui gusti del menu")
+                item["add_ingredients"] = [a for a in _said if a in _good or a in _unknown]
+                _kept_items.append(item)
+                continue
             item["add_ingredients"] = _good
             if not _good and item.get("pizza_name") in _OFF_MENU_PIZZA_NAMES:
                 continue
@@ -5681,7 +5884,7 @@ def chat(request: ChatRequest, session: SessionDep):
     _off_menu_reply: str | None = None
     _off_menu_handover = False
     _off_menu_slots = _slot_state(conversation)
-    if intent in ("add_items", "modify_items", "replace_items") and not is_custom_pizza_enabled(restaurant_id):
+    if intent in ("add_items", "modify_items", "replace_items") and not _custom_pizza_on:
         _refused = [item for item in new_items if item["pizza_name"] in _OFF_MENU_PIZZA_NAMES]
         if _refused:
             new_items = [item for item in new_items if item["pizza_name"] not in _OFF_MENU_PIZZA_NAMES]
@@ -5731,7 +5934,11 @@ def chat(request: ChatRequest, session: SessionDep):
         # "Sì, alle 8" alla domanda sul giorno: ora la pizza che non c'è
         _off_menu_reply = _off_menu_slots.pop("off_menu_pending")
         _store_slot_state(conversation, _off_menu_slots)
-    if not _off_menu_reply and (_off_menu_slots.get("off_menu_asked") or _off_menu_slots.get("off_menu_proposal")):
+    if (
+        not _off_menu_reply
+        and (new_items or intent != "unknown")  # un turno a vuoto non risolve nulla
+        and (_off_menu_slots.get("off_menu_asked") or _off_menu_slots.get("off_menu_proposal"))
+    ):
         # Risolta o lasciata dal cliente: il conteggio riparte
         _off_menu_slots.pop("off_menu_asked", None)
         _off_menu_slots.pop("off_menu_proposal", None)
@@ -5830,9 +6037,18 @@ def chat(request: ChatRequest, session: SessionDep):
     elif new_items:
         # Stessa pizza + stesso impasto → somma quantità e aggiorna ingredienti; altrimenti aggiungi
         merged_items = list(existing_items)
+        _adds_more = bool(_EXPLICIT_ADD_RE.search(_normalize_for_match(request.message)))
         for ni in new_items:
             ni_add = ni.get("add_ingredients") or []
             ni_rem = ni.get("remove_ingredients") or []
+            # Prodotto già nel carrello ripetuto con la stessa quantità (es. alla domanda
+            # intero/mezzo): non si aggiunge nulla, valgono solo i dettagli nuovi.
+            # Si aggiunge solo con "altri", "aggiungi", "anche".
+            _repeated = None if _adds_more else _repeated_cart_item(merged_items, ni)
+            if _repeated is not None:
+                print(f"[Cart] {ni['pizza_name']!r} ripetuto con la stessa quantità: nessuna aggiunta")
+                _fill_repeated_item(_repeated, ni)
+                continue
             for ei in merged_items:
                 if (ei["pizza_name"] == ni["pizza_name"]
                         and ei["pizza_type"] == ni["pizza_type"]
@@ -5850,6 +6066,22 @@ def chat(request: ChatRequest, session: SessionDep):
                 merged_items.append(ni)
     else:
         merged_items = existing_items
+
+    # Cambio di gusto al riepilogo ("invece di zucca mettimi pepe rosa"): il gusto nuovo
+    # prende quantità, porzione e caldo/freddo di quello che sostituisce, se non li ha
+    if _recap_correction_before is not None:
+        _before_items = json.loads(_recap_correction_before[0])
+        _gone = [o for o in _before_items if all(o["pizza_name"] != m["pizza_name"] for m in merged_items)]
+        _arrived = [m for m in merged_items if all(m["pizza_name"] != o["pizza_name"] for o in _before_items)]
+        if len(_gone) == 1 and len(_arrived) == 1 and _gone[0].get("sale_unit") == _arrived[0].get("sale_unit") == "kg":
+            _old, _new = _gone[0], _arrived[0]
+            if _kg_slot_missing(_new, "quantity"):
+                _new["order_unit"], _new["quantity"] = _old.get("order_unit", ""), _old.get("quantity", 0)
+            if _kg_slot_missing(_new, "portion") and _old.get("size") in ("piena", "mezza"):
+                _new["size"] = _old["size"]
+            if _kg_slot_missing(_new, "temperature") and _old.get("temperature") in ("calda", "fredda"):
+                _new["temperature"] = _old["temperature"]
+            print(f"[Confirm] cambio gusto al riepilogo: {_old['pizza_name']!r} → {_new['pizza_name']!r}")
 
     # Risposte a porzione / caldo-freddo per le voci già nel carrello. Con voci nuove
     # nello stesso messaggio valgono solo i valori estratti per ciascuna voce
@@ -6054,6 +6286,15 @@ def chat(request: ChatRequest, session: SessionDep):
             conversation.state, response_message = "collecting_pickup_time", _llm_time_question
     if _day_note:
         response_message = f"{_day_note} {response_message}"
+    # Correzione al riepilogo che non ha cambiato nulla: mai lo stesso riepilogo, si
+    # chiede cosa cambiare
+    if (
+        _recap_correction_before is not None
+        and (conversation.items_json, conversation.pickup_time) == _recap_correction_before
+        and conversation.state == "awaiting_confirmation"
+        and not missing_messages
+    ):
+        response_message = _recap_change_question(merged_items)
 
     session.add(conversation)
     session.commit()
