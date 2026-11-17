@@ -58,6 +58,18 @@ def _frozen_datetime_module(now: datetime.datetime):
     return module
 
 
+def closing_answer(response):
+    """ "no" a "Altro?", "sì" a "Sono N pizze in tutto?" / "Solo una pizza?"; None altrimenti."""
+    if response.state != "collecting_items":
+        return None
+    message = response.response_message
+    if message.endswith(chat_module.ITEMS_MORE_QUESTION):
+        return "no"
+    if message.endswith("pizze in tutto?") and message != chat_module.PIZZA_COUNT_QUESTION or message.endswith("Solo una pizza?"):
+        return "sì"
+    return None
+
+
 class _CorteHarness(unittest.TestCase):
     """Chat reale con LLM, Base44 e orologio simulati."""
 
@@ -113,10 +125,18 @@ class _CorteHarness(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    # Risponde da sé alla domanda di fine elenco ("Altro?" / "Sono due pizze in tutto?"),
+    # così i test sugli altri passi seguono il flusso; i test su quella domanda la spengono.
+    auto_close_items = True
+
     def say(self, message, extraction=None):
         if extraction is not None:
             self.next_extraction = extraction
-        return chat_module.chat(ChatRequest(session_id="s-1", message=message), self.session)
+        response = chat_module.chat(ChatRequest(session_id="s-1", message=message), self.session)
+        answer = closing_answer(response) if self.auto_close_items else None
+        if answer:
+            response = chat_module.chat(ChatRequest(session_id="s-1", message=answer), self.session)
+        return response
 
     def conversation(self):
         self.session.expire_all()

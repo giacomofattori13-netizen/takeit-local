@@ -15,6 +15,7 @@ from sqlmodel import SQLModel, Session, create_engine, select
 from sqlmodel.pool import StaticPool
 
 import app.routes.chat as chat_module
+from tests.test_opening_hours_flow import closing_answer  # noqa: F401 (usato anche dal golden)
 from app.models import ConversationSession, MenuItem, OrderSideEffect
 from app.schemas import ChatRequest
 from app.services import conversation_service as service
@@ -133,10 +134,18 @@ class _FlowHarness(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    # Risponde da sé alla domanda di fine elenco ("Altro?" / "Sono due pizze in tutto?"),
+    # così i test sugli altri passi seguono il flusso; i test su quella domanda la spengono.
+    auto_close_items = True
+
     def say(self, message, extraction=None):
         if extraction is not None:
             self.next_extraction = extraction
-        return chat_module.chat(ChatRequest(session_id="s-1", message=message), self.session)
+        response = chat_module.chat(ChatRequest(session_id="s-1", message=message), self.session)
+        answer = closing_answer(response) if self.auto_close_items else None
+        if answer:
+            response = chat_module.chat(ChatRequest(session_id="s-1", message=answer), self.session)
+        return response
 
     def conversation(self):
         self.session.expire_all()
@@ -307,8 +316,10 @@ class PreorderFlowTests(_FlowHarness):
         self.order_up_to_name()
         r = self.say("alle 8", {**NOTHING, "pickup_time": "20:00"})
         self.assertEqual(r.state, "collecting_name")
-        # mai "A che nome?" due volte di fila
-        self.assertEqual(r.response_message, "Non ho capito il nome. Me lo ripete, per favore?")
+        # Ha risposto a un'altra domanda: si conferma l'orario e si richiede il nome,
+        # senza contarlo come nome non capito (mai "A che nome?" nudo due volte di fila)
+        self.assertEqual(r.response_message, "Va bene, alle 20. A che nome?")
+        self.assertNotIn("customer_name", json.loads(self.conversation().slot_attempts_json or "{}"))
         r = self.say("Giacomo")
         self.assertEqual(r.state, "awaiting_confirmation")
 
@@ -327,7 +338,7 @@ class PreorderFlowTests(_FlowHarness):
         r = self.say("boh")
         self.assertEqual((r.state, r.response_message), ("collecting_kg_portion", "Scusi, interi o mezzi? Caldi o freddi?"))
         r = self.say("non saprei")
-        self.assertEqual((r.state, r.response_message), ("collecting_kg_portion", "Va bene interi? Mi dica sì o no."))
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_portion", "Va bene interi?"))
         r = self.say("boh vediamo")
         # si passa oltre, senza valore
         self.assertEqual(
@@ -356,7 +367,7 @@ class PreorderFlowTests(_FlowHarness):
         self.assertIn('"size": "mezza"', self.conversation().items_json)
         self.say("boh")
         r = self.say("non so")
-        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Va bene caldi? Mi dica sì o no."))
+        self.assertEqual((r.state, r.response_message), ("collecting_kg_temperature", "Va bene caldi?"))
         r = self.say("sì")
         self.assertEqual(r.state, "collecting_name")
         self.assertIn('"temperature": "calda"', self.conversation().items_json)

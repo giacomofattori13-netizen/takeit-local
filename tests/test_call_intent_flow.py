@@ -58,7 +58,7 @@ class RealCallsClosedKitchenTests(_Call):
         self.assertEqual((r.state, r.response_message), ("collecting_reservation_time", "A che ora?"))
         r = self.book("20.", "Giacomo")
         self.assertEqual(r.state, "awaiting_reservation_confirmation")
-        self.assertIn("venerdì 20 novembre alle 20:00, 2 persone", r.response_message)
+        self.assertIn("venerdì 20 novembre alle 20, 2 persone", r.response_message)
         r = self.say("Sì sì. Sì, Sì,")
         self.assertEqual(r.state, "reservation_completed")
         saved = self.reservations[0]
@@ -369,7 +369,7 @@ class RealCallsNovember5EveningTests(_Call):
         self.assertEqual(
             r.response_message,
             "Perfetto, il ritiro è per domani, venerdì. Alle 21:30 domani venerdì non è possibile, "
-            "siamo aperti dalle 19:00 alle 21:00. Va bene alle 19? Mi dica sì o no.",
+            "siamo aperti dalle 19:00 alle 21:00. Va bene alle 19?",
         )
         self.say("sì")
         self.assertEqual(self.conversation().pickup_time, "19:00")
@@ -400,7 +400,7 @@ class RealCallsNovember5EveningTests(_Call):
         r = self.say("Ciao, vorrei prenotare per domani alle 8.")
         self.assertEqual(r.response_message, CLOSED_QUESTION)
         r = self.say("Vorrei prenotare per domani alle 8.")
-        self.assertEqual(r.response_message, "Certo, domani, venerdì 6 novembre alle 20:00. Per quante persone?")
+        self.assertEqual(r.response_message, "Certo, domani, venerdì 6 novembre alle 20. Per quante persone?")
         r = self.say("Vorrei una capricciosa da sport.", dict(ADD_CAPRICCIOSA))
         self.assertEqual(r.response_message, "Allora: una capricciosa, per domani venerdì alle 20, a nome Giacomo. Confermo?")
         r = self.say("Sono per le 8.45.", {**NOTHING, "intent": "set_pickup_time", "pickup_time": "20:45"})
@@ -482,7 +482,7 @@ class IntentChangeTests(_Call):
         self.say("Giacomo")
         r = self.say("anzi, vorrei un tavolo per 4")
         self.assertEqual(r.state, "awaiting_reservation_confirmation")
-        self.assertEqual(r.response_message, "Allora: Giacomo, domani, giovedì 5 novembre alle 20:00, 4 persone. Confermo?")
+        self.assertEqual(r.response_message, "Allora: Giacomo, domani, giovedì 5 novembre alle 20, 4 persone. Confermo?")
         conversation = self.conversation()
         self.assertEqual(json.loads(conversation.items_json), [])
         self.assertIsNone(conversation.pickup_date)
@@ -565,7 +565,7 @@ class NoAnswerTests(_Call):
         self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")
         r = self.say("no, alle 21")
         self.assertEqual(r.state, "awaiting_reservation_confirmation")
-        self.assertIn("alle 21:00", r.response_message)
+        self.assertIn("alle 21, 4 persone", r.response_message)
 
     def test_explicit_cancel_at_the_recap_still_cancels(self):
         self.book("vorrei un tavolo", "domani", "alle 20", "4 persone", "Giacomo")

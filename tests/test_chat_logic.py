@@ -901,8 +901,8 @@ class ChatLogicTests(unittest.TestCase):
             chat_module.extract_order_from_text = original_extract
 
         self.assertIsNone(updated.customer_name)
-        self.assertEqual(updated.state, "collecting_name")
-        self.assertIn("nome", second.response_message.lower())
+        # Prima di nome e orario si chiude l'elenco ("Altro?"): il nome resta vuoto
+        self.assertEqual((updated.state, second.response_message), ("collecting_items", chat_module.ITEMS_MORE_QUESTION))
 
     def test_is_today_order_request_detects_keywords(self):
         """_is_today_order_request fires on 'per oggi', 'in giornata', 'oggi stesso'."""

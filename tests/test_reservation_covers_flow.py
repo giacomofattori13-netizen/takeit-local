@@ -77,7 +77,7 @@ class CoversTests(_ReservationHarness):
         self.booked = [{"party_size": 140, "time": "20:00"}, {"party_size": 6, "time": "21:30"}]
         r = self.book("vorrei prenotare un tavolo", "stasera", "alle 20", "4 persone", "Giacomo")
         self.assertEqual(r.state, "awaiting_reservation_confirmation")
-        self.assertEqual(r.response_message, "Allora: Giacomo, stasera, giovedì 1 ottobre alle 20:00, 4 persone. Confermo?")
+        self.assertEqual(r.response_message, "Allora: Giacomo, stasera, giovedì 1 ottobre alle 20, 4 persone. Confermo?")
         r = self.say("sì")
         self.assertEqual(r.state, "reservation_completed")
         saved = self.reservations[0]
@@ -149,7 +149,7 @@ class PartySizeInSentenceTests(_ReservationHarness):
         self.assertEqual(r.state, "collecting_reservation_name")
         self.assertEqual(r.response_message, "A nome di chi?")
         r = self.say("Giacomo")
-        self.assertEqual(r.response_message, "Allora: Giacomo, domani, venerdì 2 ottobre alle 20:00, 4 persone. Confermo?")
+        self.assertEqual(r.response_message, "Allora: Giacomo, domani, venerdì 2 ottobre alle 20, 4 persone. Confermo?")
 
     def test_saturday_for_twelve_people_in_the_first_sentence(self):
         r = self.say("Ciao, vorrei prenotare un tavolo per sabato per 12 persone.")
@@ -188,7 +188,7 @@ class PartySizeInSentenceTests(_ReservationHarness):
 
     def test_first_sentence_with_time_only_asks_party(self):
         r = self.say("vorrei prenotare un tavolo per domani per le 8")
-        self.assertEqual(r.response_message, "Certo, domani, venerdì 2 ottobre alle 20:00. Per quante persone?")
+        self.assertEqual(r.response_message, "Certo, domani, venerdì 2 ottobre alle 20. Per quante persone?")
 
 
 class LargeGroupTests(_ReservationHarness):

@@ -61,7 +61,7 @@ class NullReservationsTests(_NullReservationsAt2302):
         r = self.book("alle 20", "4 persone", "Giacomo")
         self.assertEqual(
             r.response_message,
-            "Allora: Giacomo, domani, venerdì 2 ottobre alle 20:00, 4 persone. Confermo?",
+            "Allora: Giacomo, domani, venerdì 2 ottobre alle 20, 4 persone. Confermo?",
         )
         r = self.say("sì")
         self.assertEqual(r.state, "reservation_completed")

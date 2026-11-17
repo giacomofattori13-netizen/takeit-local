@@ -31,7 +31,7 @@ from app.schemas import ChatRequest
 from app.services import conversation_service as service
 from app.services.daily_summary import flavour_totals
 from app.services.order_sync import build_order_items
-from tests.test_opening_hours_flow import _frozen_datetime_module
+from tests.test_opening_hours_flow import _frozen_datetime_module, closing_answer
 
 LIVE_RUNS = 1
 ROME = ZoneInfo("Europe/Rome")
@@ -394,7 +394,7 @@ CASES = [
          cart=[slice_item("Friarielli e Salsiccia", 2, size="piena", temperature="calda")],
          state="collecting_pickup_time", day=SATURDAY_NOV_7, name="Giacomo", now=FRIDAY_NOV_6,
          restaurant=PAP, menu=PAP_MENU, preset={"customer_name": "Giacomo", "pickup_date": SATURDAY_NOV_7},
-         final_state="collecting_pickup_time", reply_contains="Va bene alle 20:45? Mi dica sì o no."),
+         final_state="collecting_pickup_time", reply_contains="Va bene alle 20:45?"),
     # ── Difetti aperti dopo d6309a6 (Pizza a Pezzi) ──────────────────────────
     # 1. Il prodotto ripetuto alla domanda intero/mezzo o caldo/freddo non si somma
     Case("pap_ripete_il_prodotto_alla_domanda_intero_mezzo", "2 tranci di zucca e pistacchi interi.",
@@ -556,8 +556,16 @@ class Call:
                 active.stop()
             self.session.close()
 
+    auto_close_items = True  # come _FlowHarness: risponde da sé alla domanda di fine elenco
+
     def say(self, message):
-        return chat_module.chat(ChatRequest(session_id="golden", message=message), self.session)
+        response = chat_module.chat(ChatRequest(session_id="golden", message=message), self.session)
+        self.replies = [response.response_message]
+        answer = closing_answer(response) if self.auto_close_items else None
+        if answer:
+            response = chat_module.chat(ChatRequest(session_id="golden", message=answer), self.session)
+            self.replies.append(response.response_message)
+        return response
 
     def conversation(self):
         self.session.expire_all()
@@ -604,7 +612,7 @@ def _mismatches(case, call, response):
     for key, value in expected.items():
         if actual[key] != value:
             errors.append(f"{key}: atteso {value!r}, ottenuto {actual[key]!r}")
-    if case.reply_contains and case.reply_contains not in response.response_message:
+    if case.reply_contains and not any(case.reply_contains in reply for reply in call.replies):
         errors.append(f"risposta senza {case.reply_contains!r}: {response.response_message!r}")
     if case.final_state and response.state != case.final_state:
         errors.append(f"stato: atteso {case.final_state!r}, ottenuto {response.state!r}")
@@ -1008,7 +1016,7 @@ def test_usual_order_recap_names_the_day():
 
 @pytest.mark.parametrize("items, spoken", [
     ([item(PERSONAL, add=["salamino"])], "una margherita con salamino"),
-    ([item(PERSONAL, 2, add=["salamino"])], "2 margherite con salamino"),
+    ([item(PERSONAL, 2, add=["salamino"])], "due margherite con salamino"),
     ([item(PERSONAL, add=["melanzane", "gorgonzola"])], "una margherita con melanzane e gorgonzola"),
     ([item(PERSONAL, add=["melanzane", "salamino", "gorgonzola"])], "una margherita con melanzane, salamino e gorgonzola"),
     ([item(PERSONAL, add=["würstel"], remove=["pomodoro"])], "una bianca con würstel"),
@@ -1028,7 +1036,7 @@ def test_recap_of_the_real_call_never_says_personalizzata():
     call.extractions.append(recorded(items=[item(PERSONAL, 2, add=["salamino"])], name="Giacomo", time="20:00"))
     with call.open():
         response = call.say("2 salamino per domani alle 8, sono Giacomo")
-    assert response.response_message == "Allora: 2 margherite con salamino, per domani venerdì alle 20, a nome Giacomo. Confermo?"
+    assert response.response_message == "Allora: due margherite con salamino, per domani venerdì alle 20, a nome Giacomo. Confermo?"
 
 
 @pytest.mark.parametrize("items, total", [
@@ -1147,7 +1155,7 @@ def test_sold_out_and_typos_are_not_affected_by_the_flag():
     call = _no_custom(recorded(items=[item("Capriciosa")]))
     with call.open():
         response = call.say("una capriciosa")
-        assert "Forse intendevi Capricciosa" in response.response_message
+        assert "Forse intendeva Capricciosa" in response.response_message
 
 
 # ── Alias ────────────────────────────────────────────────────────────────────
@@ -1319,12 +1327,12 @@ def test_item_sold_only_by_another_restaurant_is_off_menu_here():
         response = call.say("tre speck senza rucola")
         items = _normalized_items(call.conversation().items_json)
     assert (items[0]["name"], items[0]["add"]) == (PERSONAL, ["speck"])
-    assert "Forse intendevi" not in response.response_message
+    assert "Forse intendeva" not in response.response_message
 
 
 def test_typo_of_a_menu_item_keeps_the_suggestion():
     response, items = _say_with_llm_item("Capriciosa")
-    assert "Forse intendevi Capricciosa" in response.response_message
+    assert "Forse intendeva Capricciosa" in response.response_message
     assert items[0]["name"] == "Capriciosa"
 
 
@@ -1795,7 +1803,7 @@ def test_90c4212b_two_whole_slices_and_the_nearest_time_before_closing():
         assert call.say("E 2 interi?").response_message == "Caldi o freddi?"
         call.say("Caldi.")
         response = call.say("Per le 9.")
-        assert response.response_message.endswith("Va bene alle 20:45? Mi dica sì o no.")
+        assert response.response_message.endswith("Va bene alle 20:45?")
         assert call.say("Sì.").response_message == (
             "Allora: due tranci interi di friarielli e salsiccia, caldi, per domani sabato alle 20:45, a nome Giacomo. "
             "Confermo?"
@@ -2002,7 +2010,7 @@ def test_4b350eed_time_in_the_first_phrase_gets_the_nearest_slot_and_the_portion
             "Intero o mezzo? Caldo o freddo?"
         )
         second = call.say("Intero caldo.")
-        assert second.response_message.endswith("Va bene alle 20:45? Mi dica sì o no.")
+        assert second.response_message.endswith("Va bene alle 20:45?")
         assert "Intero o mezzo" not in second.response_message
         assert call.say("Sì.").response_message == (
             "Allora: un trancio intero di pepe rosa, caldo, per domani sabato alle 20:45, a nome Giacomo. Confermo?"
@@ -2072,3 +2080,166 @@ def test_the_greeting_echo_never_reaches_the_llm():
     with call.open(customer_name="Giacomo Fattori"):
         call.say("Salve Giacomo, come posso aiutarla? Vorrei una margherita.")
     assert seen and all("aiutarla" not in text for text in seen)
+
+
+# ── Flusso naturale: risposte fuori dalla domanda (simulazione del 17/11) ──────────────
+
+
+def test_an_extra_pizza_at_the_name_question_is_confirmed_and_not_a_missed_name():
+    call = _script()
+    call.extractions.extend([
+        recorded(items=[item("Margherita"), item("Diavola")]),
+        recorded(items=[item("Capricciosa")]),
+    ])
+    with call.open():
+        assert call.say("Una margherita e una diavola").response_message == "A che nome?"
+        reply = call.say("Poi anche una capricciosa").response_message
+        assert reply == "Va bene, aggiungo una capricciosa. A che nome?"
+        assert "customer_name" not in json.loads(call.conversation().slot_attempts_json or "{}")
+
+
+def test_basta_cosi_at_the_name_question_is_never_proposed_as_a_name():
+    call = _script()
+    call.extractions.extend([recorded(items=[item("Margherita")]), recorded(intent="done")])
+    with call.open():
+        call.say("Una margherita")
+        reply = call.say("Basta così").response_message
+        assert reply == "Perfetto. A che nome?"
+        assert "Basta" not in reply
+    assert chat_module._name_guess("Basta così") is None
+    assert chat_module._name_guess("Poi anche una capricciosa") is None
+    assert chat_module._name_guess("Marco Rossi") == "Marco Rossi"
+
+
+def test_cart_changes_at_the_time_question_never_save_an_unsaid_time():
+    call = _script()
+    call.extractions.extend([
+        recorded(items=[item("Margherita"), item("Boscaiola")]),
+        recorded(intent="remove_items", items=[item("Margherita")]),
+        recorded(items=[item("Margherita")]),
+        recorded(intent="done"),
+    ])
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Una margherita e una boscaiola").response_message == "Per che ora?"
+        assert call.say("Togli la margherita").response_message == "Va bene, tolgo una margherita. Per che ora?"
+        assert call.say("Rimetti la margherita").response_message == "Va bene, aggiungo una margherita. Per che ora?"
+        assert call.say("Ho finito").response_message == "Perfetto. Per che ora?"
+        conversation = call.conversation()
+        assert conversation.pickup_time is None and conversation.state == "collecting_pickup_time"
+        assert call.saved == []
+
+
+def test_a_name_said_at_the_recap_replaces_the_placeholder_which_is_never_spoken():
+    call = _script()
+    with call.open(state="awaiting_confirmation", cart=[item("Margherita")], customer_name="Cliente", pickup_time="20:00"):
+        assert call.say("A nome Marco").response_message.endswith(", a nome Marco. Confermo?")
+        assert call.say("Sì").response_message.startswith("Perfetto, Marco!")
+    call = _script()
+    with call.open(state="awaiting_confirmation", cart=[item("Margherita")], customer_name="Cliente", pickup_time="20:00"):
+        reply = call.say("Sì").response_message
+        assert "Cliente" not in reply and reply.startswith("Perfetto!")
+
+
+# ── Fine dell'elenco: numero di pizze (CdS) e "Altro?" (PaP) ──────────────────────────
+
+
+def _closing_script(now=THURSDAY_16, restaurant=CDS, menu=None):
+    call = _script(now, restaurant, menu)
+    call.auto_close_items = False
+    return call
+
+
+def test_cds_asks_how_many_pizzas_then_counts_down_to_the_name():
+    call = _closing_script()
+    call.extractions.extend([recorded(intent="order"), recorded(items=[item("Margherita"), item("Diavola")]),
+                             recorded(items=[item("Capricciosa")])])
+    with call.open():
+        assert call.say("Buonasera, vorrei ordinare").response_message == "Certo, quante pizze?"
+        assert call.say("Tre").response_message == "Perfetto, mi dica pure."
+        assert call.conversation().intended_quantity == 3
+        assert call.say("Una margherita e una diavola").response_message == "Perfetto! E la terza pizza?"
+        assert call.say("Una capricciosa").response_message == "A che nome?"
+
+
+def test_cds_confirms_the_total_of_listed_pizzas_before_the_name():
+    call = _closing_script()
+    call.extractions.extend([recorded(items=[item("Margherita"), item("Diavola")])])
+    with call.open():
+        reply = call.say("Una margherita e una diavola")
+        assert (reply.state, reply.response_message) == ("collecting_items", "Sono due pizze in tutto?")
+        assert call.say("Sì").response_message == "A che nome?"
+        assert call.conversation().intended_quantity == 2
+
+
+def test_cds_no_to_the_total_asks_the_number_and_waits_for_the_missing_pizzas():
+    call = _closing_script()
+    call.extractions.extend([recorded(items=[item("Margherita"), item("Diavola")]),
+                             recorded(items=[item("Capricciosa", 2)])])
+    with call.open(customer_name="Giacomo"):
+        call.say("Una margherita e una diavola")
+        assert call.say("No").response_message == chat_module.PIZZA_COUNT_QUESTION
+        assert call.say("Quattro").response_message == "Va bene, quattro pizze. Mi dica le altre due."
+        assert call.say("Due capricciose").response_message == "Per che ora?"
+
+
+def test_cds_a_change_at_the_total_question_is_said_and_the_total_asked_again():
+    call = _closing_script()
+    call.extractions.extend([recorded(items=[item("Margherita"), item("Boscaiola")]),
+                             recorded(intent="remove_items", items=[item("Margherita")]),
+                             recorded(items=[item("Margherita")])])
+    with call.open(customer_name="Giacomo"):
+        call.say("Una margherita e una boscaiola")
+        assert call.say("Togli la margherita").response_message == "Va bene, tolgo una margherita. Solo una pizza?"
+        assert call.say("Rimetti la margherita").response_message == "Va bene, aggiungo una margherita. Sono due pizze in tutto?"
+        assert call.say("Ho finito").response_message == "Per che ora?"
+
+
+def test_cds_moving_on_at_the_total_question_accepts_the_total():
+    call = _closing_script()
+    call.extractions.extend([recorded(items=[item("Margherita"), item("Diavola")]), recorded(intent="done")])
+    with call.open():
+        call.say("Una margherita e una diavola")
+        assert call.say("Basta così").response_message == "A che nome?"
+    call = _closing_script()
+    call.extractions.extend([recorded(items=[item("Margherita"), item("Diavola")])])
+    with call.open():
+        call.say("Una margherita e una diavola")
+        reply = call.say("Giacomo")  # il nome, senza LLM
+        assert (reply.state, reply.response_message) == ("collecting_pickup_time", "Per che ora?")
+        assert call.conversation().customer_name == "Giacomo"
+
+
+def test_cds_recap_says_the_total_when_everything_comes_in_one_sentence():
+    call = _closing_script()
+    call.extractions.append(recorded(items=[item("Margherita"), item("Diavola")], name="Luca", time="20:30"))
+    with call.open():
+        reply = call.say("Una margherita e una diavola per le otto e mezza a nome Luca").response_message
+        assert reply == "Allora, due pizze: una margherita e una diavola, per stasera alle 20:30, a nome Luca. Confermo?"
+
+
+def test_a_number_is_the_pizza_count_only_after_quante_pizze():
+    call, favourites = _usual_call(["Diavola"])
+    call.auto_close_items = False
+    with call.open():
+        conversation = call.conversation()
+        conversation.favorite_pizzas_json = favourites
+        call.session.add(conversation)
+        call.session.commit()
+        assert call.say("2 pizze").response_message == "Le preparo le solite? Diavola"
+
+
+def test_pap_asks_altro_after_the_products_then_the_time_with_the_day():
+    call = _pap_script()
+    call.auto_close_items = False
+    call.extractions.extend([
+        recorded(items=[slice_item("Pepe Rosa", 2, size="piena", temperature="calda")]),
+        recorded(items=[slice_item("Bufala", 1, size="piena", temperature="fredda")]),
+    ])
+    with call.open(customer_name="Giacomo"):
+        assert call.say("Due tranci interi di pepe rosa caldi per domani").response_message == "Altro?"
+        assert call.say("Sì, anche un trancio intero di bufala freddo").response_message == (
+            "Va bene, aggiungo un trancio intero di bufala, freddo. Altro?"
+        )
+        assert call.say("No grazie").response_message == "Il ritiro è per domani, sabato. A che ora passa?"
+        recap = call.say("alle 7").response_message
+        assert recap.startswith("Allora: due tranci interi di pepe rosa, caldi; un trancio intero di bufala, freddo,")

@@ -95,7 +95,7 @@ class PickupTimeEscalationTests(_AtPickupTime):
     def test_three_failures_save_the_order_at_the_first_slot_with_needs_review(self):
         r1 = self.say("Per le hotpoint.")
         r2 = self.say("Parte.")
-        self.assertEqual((r2.state, r2.response_message), ("collecting_pickup_time", "Va bene alle 17? Mi dica sì o no."))
+        self.assertEqual((r2.state, r2.response_message), ("collecting_pickup_time", "Va bene alle 17?"))
         r3 = self.say("boh")
         self.assertEqual(r3.state, "completed")
         self.assertEqual(r3.response_message, "Segno alle 17, il locale la richiama se serve. Grazie, a presto!")
@@ -170,7 +170,7 @@ class PickupTimeEscalationTests(_AtPickupTime):
         r2 = self.say("alle 23")
         self.assertEqual(r1.state, "collecting_pickup_time")
         self.assertNotEqual(r1.response_message, r2.response_message)
-        self.assertEqual(r2.response_message, "Va bene alle 17? Mi dica sì o no.")
+        self.assertEqual(r2.response_message, "Va bene alle 17?")
 
     def test_log_reports_source_and_failures_without_user_text(self):
         _, lines = self.say_logged("Per le hotpoint.")
@@ -197,7 +197,7 @@ class PickupTimeSameDayTests(_AtPickupTime):
         self.say("Per le hotpoint.")
         r = self.say("Parte.")
         # domenica 15:00 + 20 minuti di preparazione → 15:30
-        self.assertEqual(r.response_message, "Va bene alle 15:30? Mi dica sì o no.")
+        self.assertEqual(r.response_message, "Va bene alle 15:30?")
         r = self.say("boh")
         self.assertEqual(r.state, "completed")
         self.assertEqual(self.saved[0]["pickup_time"], "15:30")
@@ -265,7 +265,7 @@ class NameEscalationTests(flow._FlowHarness):
         r = self.say("aspetti 1 attimo")
         self.assertEqual((r.state, r.response_message), ("collecting_name", NAME_MISS_MESSAGE))
         r = self.say("Marco 3")
-        self.assertEqual(r.response_message, "Ho capito Marco, giusto? Mi dica sì o no.")
+        self.assertEqual(r.response_message, "Ho capito Marco, giusto?")
         r = self.say("sì")
         self.assertEqual(r.state, "collecting_pickup_time")
         self.assertEqual(self.conversation().customer_name, "Marco")

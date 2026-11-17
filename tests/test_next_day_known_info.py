@@ -49,7 +49,7 @@ class DayAlreadySaidTests(_ClosedKitchen):
         self.assertEqual(
             r.response_message,
             "La cucina stasera è chiusa, segno per domani venerdì. "
-            "Allora: 2 margherite, per domani venerdì alle 20, a nome Giacomo. Confermo?",
+            "Allora: due margherite, per domani venerdì alle 20, a nome Giacomo. Confermo?",
         )
         r = self.say("sì")
         self.assertEqual(r.state, "completed")
@@ -60,11 +60,14 @@ class DayAlreadySaidTests(_ClosedKitchen):
     def test_replay_of_the_real_call(self):
         """Prodotto fuori menu + giorno + orario: si chiede solo il nome che manca."""
         salamino = {**MARGHERITA, "pizza_name": "Personalizzata", "quantity": 2, "add_ingredients": ["salamino"]}
+        self.auto_close_items = False
         r = self.order_sentence(
             "Ciao, posso ordinarti 2 salamino da asporto per domani alle 8.", [salamino], pickup_time="20:00",
         )
-        self.assertEqual(r.state, "collecting_name")
-        self.assertEqual(r.response_message, "La cucina stasera è chiusa, segno per domani venerdì. A che nome?")
+        self.assertEqual(r.state, "collecting_items")
+        self.assertEqual(r.response_message, "La cucina stasera è chiusa, segno per domani venerdì. Sono due pizze in tutto?")
+        r = self.say("sì")
+        self.assertEqual((r.state, r.response_message), ("collecting_name", "A che nome?"))
         r = self.say("Giacomo")
         self.assertEqual(r.state, "awaiting_confirmation")
         self.assertIn("alle 20", r.response_message)
@@ -96,8 +99,11 @@ class DayAlreadySaidTests(_ClosedKitchen):
         self.assert_day_never_repeated()
 
     def test_products_and_day_ask_only_the_first_missing_field(self):
+        self.auto_close_items = False
         r = self.order_sentence("2 margherite per domani")
-        self.assertEqual(r.response_message, "La cucina stasera è chiusa, segno per domani venerdì. A che nome?")
+        self.assertEqual(r.response_message, "La cucina stasera è chiusa, segno per domani venerdì. Sono due pizze in tutto?")
+        r = self.say("sì")
+        self.assertEqual(r.response_message, "A che nome?")
         r = self.say("Giacomo")
         self.assertEqual(r.response_message, "A che ora passa?")
         self.assert_day_never_repeated()
@@ -167,7 +173,7 @@ class InformationKeptAcrossTheQuestionTests(_ClosedKitchen):
         self.assertEqual(r.response_message, "Perfetto, il ritiro è per domani, venerdì. A che nome?")
         r = self.say("Giacomo")
         self.assertEqual(r.state, "awaiting_confirmation")  # l'orario non si richiede
-        self.assertIn("2 margherite, per domani venerdì alle 20", r.response_message)
+        self.assertIn("due margherite, per domani venerdì alle 20", r.response_message)
         self.assert_day_never_repeated()
 
     def test_name_survives_the_question(self):
@@ -193,7 +199,7 @@ class InformationKeptAcrossTheQuestionTests(_ClosedKitchen):
         self.say("vorrei ordinare", {**NOTHING, "intent": "add_items"})
         r = self.order_sentence("sì, due margherite alle 8", customer_name="Giacomo", pickup_time="20:00")
         self.assertEqual(r.state, "awaiting_confirmation")
-        self.assertTrue(r.response_message.startswith("Perfetto, il ritiro è per domani, venerdì. Allora: 2 margherite"))
+        self.assertTrue(r.response_message.startswith("Perfetto, il ritiro è per domani, venerdì. Allora: due margherite"))
         self.assert_day_never_repeated()
 
     def test_bare_yes_with_empty_cart_asks_for_products(self):
@@ -262,7 +268,7 @@ class WholeQuantityTests(unittest.TestCase):
 
     def test_recap_text(self):
         item = {**margherite(self._quantity(2.0)), "sale_unit": "piece"}
-        self.assertEqual(chat_module.format_items_for_customer([item]), "2 margherite")
+        self.assertEqual(chat_module.format_items_for_customer([item]), "due margherite")
 
 
 class WhatsappSandboxTests(unittest.TestCase):
